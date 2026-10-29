@@ -1,0 +1,15 @@
+material Kudos/Sign_slow
+{
+ technique
+ {
+  pass
+  {
+   lighting off
+   texture_unit
+   {
+    texture kudos_sign_slow.png
+    filtering bilinear
+   }
+  }
+ }
+}

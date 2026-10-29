@@ -1,0 +1,1 @@
+<sdf version="1.6"><model name="speed_bump"><static>true</static><link name="bump"><visual name="visual"><geometry><mesh><uri>model://speed_bump/meshes/bump.stl</uri><scale>0.3 0.5 0.015</scale></mesh></geometry></visual></link></model></sdf>

@@ -1,0 +1,76 @@
+<?xml version='1.0' encoding='utf-8'?>
+<sdf version="1.6">
+  <model name="sign_A">
+    <static>true</static>
+    <link name="sign_link">
+      <visual name="base_visual">
+        <pose>0 0 0.01 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.10 0.10 0.02</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.25 0.25 0.25 1</ambient>
+          <diffuse>0.25 0.25 0.25 1</diffuse>
+        </material>
+      </visual>
+      <collision name="base_collision">
+        <pose>0 0 0.01 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.10 0.10 0.02</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="pole_visual">
+        <pose>0 0 0.18 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.02 0.02 0.36</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.25 0.25 0.25 1</ambient>
+          <diffuse>0.25 0.25 0.25 1</diffuse>
+        </material>
+      </visual>
+      <collision name="pole_collision">
+        <pose>0 0 0.18 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.02 0.02 0.36</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="backing_visual">
+        <pose>0 0 0.36 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.24 0.24</size>
+          </box>
+        </geometry>
+        <material>
+          <ambient>0.25 0.25 0.25 1</ambient>
+          <diffuse>0.25 0.25 0.25 1</diffuse>
+        </material>
+      </visual>
+      <collision name="backing_collision">
+        <pose>0 0 0.36 0 0 0</pose>
+        <geometry>
+          <box>
+            <size>0.01 0.24 0.24</size>
+          </box>
+        </geometry>
+      </collision>
+      <visual name="printed_face">
+        <pose>0 0 0.36 0 0 0</pose>
+        <geometry>
+          <mesh>
+            <uri>model://sign_A/meshes/panel.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+  </model>
+</sdf>

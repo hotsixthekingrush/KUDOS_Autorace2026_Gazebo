@@ -1,0 +1,15 @@
+material Kudos/Sign_pedestrian
+{
+ technique
+ {
+  pass
+  {
+   lighting off
+   texture_unit
+   {
+    texture kudos_sign_pedestrian.png
+    filtering bilinear
+   }
+  }
+ }
+}

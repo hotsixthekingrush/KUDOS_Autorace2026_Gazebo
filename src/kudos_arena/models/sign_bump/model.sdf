@@ -1,0 +1,1 @@
+<sdf version="1.6"><model name="sign_bump"><static>true</static><link name="panel"><visual name="face"><geometry><mesh><uri>model://sign_bump/meshes/triangle_face.dae</uri></mesh></geometry></visual></link></model></sdf>

@@ -1,0 +1,15 @@
+material Kudos/Sign_bump
+{
+ technique
+ {
+  pass
+  {
+   lighting off
+   texture_unit
+   {
+    texture kudos_sign_bump.png
+    filtering bilinear
+   }
+  }
+ }
+}

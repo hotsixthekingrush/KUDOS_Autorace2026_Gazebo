@@ -1,0 +1,10 @@
+build/
+install/
+log/
+__pycache__/
+*.py[cod]
+*.backup*
+.pytest_cache/
+.vscode/
+.idea/
+*.log

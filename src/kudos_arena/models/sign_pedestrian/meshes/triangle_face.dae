@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">
+<asset><created>2026-10-28T00:00:00Z</created><modified>2026-10-28T00:00:00Z</modified><unit name="meter" meter="1" /><up_axis>Z_UP</up_axis></asset>
+<library_images><image id="sign-image"><init_from>../materials/textures/kudos_sign_pedestrian.png</init_from></image></library_images>
+<library_effects><effect id="sign-effect"><profile_COMMON>
+<newparam sid="surface"><surface type="2D"><init_from>sign-image</init_from></surface></newparam>
+<newparam sid="sampler"><sampler2D><source>surface</source></sampler2D></newparam>
+<technique sid="common"><lambert><ambient><color>0.5 0.5 0.5 1</color></ambient><diffuse><texture texture="sampler" texcoord="UVMap" /></diffuse></lambert></technique>
+</profile_COMMON></effect></library_effects>
+<library_materials><material id="sign-material"><instance_effect url="#sign-effect" /></material></library_materials>
+<library_geometries><geometry id="panel"><mesh>
+<source id="positions"><float_array id="positions-array" count="9">0 -0.14 -0.125 0 0.14 -0.125 0 0 0.125</float_array><technique_common><accessor source="#positions-array" count="3" stride="3"><param name="X" type="float" /><param name="Y" type="float" /><param name="Z" type="float" /></accessor></technique_common></source>
+<source id="normals"><float_array id="normals-array" count="3">1 0 0</float_array><technique_common><accessor source="#normals-array" count="1" stride="3"><param name="X" type="float" /><param name="Y" type="float" /><param name="Z" type="float" /></accessor></technique_common></source>
+<source id="uv"><float_array id="uv-array" count="6">0 0 1 0 0.5 1</float_array><technique_common><accessor source="#uv-array" count="3" stride="2"><param name="S" type="float" /><param name="T" type="float" /></accessor></technique_common></source>
+<vertices id="vertices"><input semantic="POSITION" source="#positions" /></vertices>
+<triangles count="1" material="paint"><input semantic="VERTEX" source="#vertices" offset="0" /><input semantic="NORMAL" source="#normals" offset="1" /><input semantic="TEXCOORD" source="#uv" offset="2" set="0" /><p>0 0 0 1 0 1 2 0 2</p></triangles>
+</mesh></geometry></library_geometries>
+<library_visual_scenes><visual_scene id="Scene"><node id="panel-node"><instance_geometry url="#panel"><bind_material><technique_common><instance_material symbol="paint" target="#sign-material"><bind_vertex_input semantic="UVMap" input_semantic="TEXCOORD" input_set="0" /></instance_material></technique_common></bind_material></instance_geometry></node></visual_scene></library_visual_scenes>
+<scene><instance_visual_scene url="#Scene" /></scene></COLLADA>

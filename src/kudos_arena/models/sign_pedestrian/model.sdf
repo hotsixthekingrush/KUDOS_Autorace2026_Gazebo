@@ -1,0 +1,1 @@
+<sdf version="1.6"><model name="sign_pedestrian"><static>true</static><link name="panel"><visual name="face"><geometry><mesh><uri>model://sign_pedestrian/meshes/triangle_face.dae</uri></mesh></geometry></visual></link></model></sdf>

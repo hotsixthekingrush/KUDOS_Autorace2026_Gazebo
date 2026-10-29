@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="track_paint">
+    <static>true</static>
+    <pose>0 0 0.002 0 0 0</pose>
+    <link name="paint_link">
+      <visual name="yellow_paint">
+        <cast_shadows>false</cast_shadows>
+        <geometry>
+          <mesh>
+            <uri>model://track_paint/meshes/yellow.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <visual name="white_paint">
+        <cast_shadows>false</cast_shadows>
+        <geometry>
+          <mesh>
+            <uri>model://track_paint/meshes/white.dae</uri>
+          </mesh>
+        </geometry>
+      </visual>
+    </link>
+  </model>
+</sdf>

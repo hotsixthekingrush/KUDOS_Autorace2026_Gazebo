@@ -1,0 +1,58 @@
+solid triangle_sign
+facet normal 1.0 0.0 0.0
+outer loop
+vertex 0.005 -0.15 -0.135
+vertex 0.005 0.15 -0.135
+vertex 0.005 0 0.135
+endloop
+endfacet
+facet normal -1.0 0.0 -0.0
+outer loop
+vertex -0.005 0 0.135
+vertex -0.005 0.15 -0.135
+vertex -0.005 -0.15 -0.135
+endloop
+endfacet
+facet normal 0.0 0.0 -1.0
+outer loop
+vertex -0.005 -0.15 -0.135
+vertex -0.005 0.15 -0.135
+vertex 0.005 0.15 -0.135
+endloop
+endfacet
+facet normal 0.0 0.0 -1.0
+outer loop
+vertex -0.005 -0.15 -0.135
+vertex 0.005 0.15 -0.135
+vertex 0.005 -0.15 -0.135
+endloop
+endfacet
+facet normal 0.0 0.8741572761215378 0.4856429311786321
+outer loop
+vertex -0.005 0.15 -0.135
+vertex -0.005 0 0.135
+vertex 0.005 0 0.135
+endloop
+endfacet
+facet normal -0.0 0.8741572761215378 0.4856429311786321
+outer loop
+vertex -0.005 0.15 -0.135
+vertex 0.005 0 0.135
+vertex 0.005 0.15 -0.135
+endloop
+endfacet
+facet normal 0.0 -0.8741572761215378 0.4856429311786321
+outer loop
+vertex -0.005 0 0.135
+vertex -0.005 -0.15 -0.135
+vertex 0.005 -0.15 -0.135
+endloop
+endfacet
+facet normal 0.0 -0.8741572761215378 0.4856429311786321
+outer loop
+vertex -0.005 0 0.135
+vertex 0.005 -0.15 -0.135
+vertex 0.005 0 0.135
+endloop
+endfacet
+endsolid triangle_sign

@@ -1,0 +1,86 @@
+solid speed_bump
+facet normal 0.0 -1.0 0.0
+outer loop
+vertex -0.5 -0.5 0
+vertex 0.5 -0.5 0
+vertex 0.1 -0.5 1
+endloop
+endfacet
+facet normal 0.0 -1.0 0.0
+outer loop
+vertex -0.5 -0.5 0
+vertex 0.1 -0.5 1
+vertex -0.1 -0.5 1
+endloop
+endfacet
+facet normal 0.0 1.0 0.0
+outer loop
+vertex -0.5 0.5 0
+vertex 0.1 0.5 1
+vertex 0.5 0.5 0
+endloop
+endfacet
+facet normal 0.0 1.0 0.0
+outer loop
+vertex -0.5 0.5 0
+vertex -0.1 0.5 1
+vertex 0.1 0.5 1
+endloop
+endfacet
+facet normal 0.0 0.0 -1.0
+outer loop
+vertex -0.5 -0.5 0
+vertex -0.5 0.5 0
+vertex 0.5 0.5 0
+endloop
+endfacet
+facet normal 0.0 0.0 -1.0
+outer loop
+vertex -0.5 -0.5 0
+vertex 0.5 0.5 0
+vertex 0.5 -0.5 0
+endloop
+endfacet
+facet normal 0.9284766908852592 -0.0 0.37139067635410367
+outer loop
+vertex 0.5 -0.5 0
+vertex 0.5 0.5 0
+vertex 0.1 0.5 1
+endloop
+endfacet
+facet normal 0.9284766908852592 0.0 0.37139067635410367
+outer loop
+vertex 0.5 -0.5 0
+vertex 0.1 0.5 1
+vertex 0.1 -0.5 1
+endloop
+endfacet
+facet normal 0.0 -0.0 1.0
+outer loop
+vertex 0.1 -0.5 1
+vertex 0.1 0.5 1
+vertex -0.1 0.5 1
+endloop
+endfacet
+facet normal 0.0 0.0 1.0
+outer loop
+vertex 0.1 -0.5 1
+vertex -0.1 0.5 1
+vertex -0.1 -0.5 1
+endloop
+endfacet
+facet normal -0.9284766908852592 0.0 0.37139067635410367
+outer loop
+vertex -0.1 -0.5 1
+vertex -0.1 0.5 1
+vertex -0.5 0.5 0
+endloop
+endfacet
+facet normal -0.9284766908852592 0.0 0.37139067635410367
+outer loop
+vertex -0.1 -0.5 1
+vertex -0.5 0.5 0
+vertex -0.5 -0.5 0
+endloop
+endfacet
+endsolid speed_bump

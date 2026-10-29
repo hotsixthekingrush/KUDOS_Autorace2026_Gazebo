@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<sdf version="1.6"><model name="traffic_cone"><static>true</static><link name="cone_link">
+<visual name="visual"><geometry><mesh><uri>model://traffic_cone/meshes/traffic_cone.stl</uri></mesh></geometry><material><ambient>1 0.25 0.02 1</ambient><diffuse>1 0.25 0.02 1</diffuse></material></visual>
+<collision name="collision"><geometry><mesh><uri>model://traffic_cone/meshes/traffic_cone.stl</uri></mesh></geometry></collision>
+</link></model></sdf>

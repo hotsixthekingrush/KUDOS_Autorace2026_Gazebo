@@ -1,0 +1,20 @@
+# Gazebo 시뮬레이터용 덮어쓰기 값.
+# params.yaml 을 먼저 읽고, 여기 적힌 항목만 교체된다.
+mission_supervisor:
+  ros__parameters:
+    use_sim_time: true
+
+    wheel_base: 0.24          # Gazebo 모델 앞뒤 바퀴 x = +-0.12 (실차 0.2)
+    max_steer: 0.5236         # Gazebo ackermann 플러그인 조향 한계 30도
+    front_wheel_x: 0.12       # Gazebo 모델 앞바퀴 x
+    cmd_angular_is_steering: true   # Gazebo 아커만 플러그인은 angular.z 를 조향각으로 씀 (11/02 녹화·플러그인 코드로 확인)
+
+    # 주차 turn_radius(0.50)는 시뮬 최소회전반경(0.24 / tan(30도) = 0.416)보다 커서 그대로 씀
+
+    # (11/02 임시) Gazebo 조향이 초당 약 3.4도로만 돌아가서(녹화로 확인) 라바콘만 느리게.
+    # 시뮬 팀원이 조향 속도를 고치면 지울 것. 실차 값(params.yaml)은 0.25 그대로.
+    # 정적 장애물은 0.10 으로 낮추면 오히려 나빠져서(제한시간 40초 초과·접촉, 계산 확인) 0.25 그대로 둠.
+    cone:
+      speed: 0.10
+      max_duration: 90.0       # 느린 만큼 제한시간도 늘림 (실차 40초)
+      steer_rate_deg: 3.4      # 미리 굴려보기에서 Gazebo 의 느린 조향을 흉내 (녹화로 잰 값)

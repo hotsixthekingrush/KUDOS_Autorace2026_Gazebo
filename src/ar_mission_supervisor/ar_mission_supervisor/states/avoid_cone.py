@@ -12,7 +12,18 @@
         차 옆·뒤로 지나간 콘은 라이다 시야(앞쪽) 밖이라, odom 기준으로 기억해 두고 같이 검사한다.
         조향이 느린 차는 steer_rate_deg 로 흉내 내서 굴려본다 (0 = 바로 바뀜).
   false 예전 방식: 게이트 중점 선 위 lookahead 점을 Pure Pursuit.
-odom 이 없거나 게이트를 못 만들면 예전 방식(한쪽 콘 오프셋 / Follow the Gap)으로 간다.
+게이트를 못 만들면(한쪽 콘만 보이거나 짝이 안 맞으면) 한쪽 콘 줄 따라가기 (11/02 사용자 제안):
+  한 줄로 이어진 콘들(다음 콘 = 진행 방향 side_max_turn_deg 안, side_max_step 안에서 가장 가까운 콘)을
+  선으로 잇고, 차가 그 선의 어느 쪽에 있는지로 왼쪽/오른쪽 줄을 정한다 (차 기준 y 부호로 나누면
+  곡선·S자에서 같은 줄 콘이 양쪽으로 갈림 - 11/02 시험).
+  side_use_rollout true  (기본) 그 선을 통로 반폭만큼 안쪽으로 옮긴 "가상 가운데 길"을 위 미리 굴려보기로 따라감
+                         (콘에 안 닿는지 차 몸통으로 검사됨).
+                   false 차선 따라가기처럼 조향 = side_kp_heading x 선과 틀어진 각도 + side_kp_lateral x 옆 오차.
+  통로 반폭은 마지막으로 본 게이트 폭의 절반 (없으면 side_half_width).
+끝내는 때: 라이다에서 콘이 다 빠져도, 마지막으로 본 게이트(또는 콘 줄 끝) 선을 앞바퀴가 pass_margin 넘게
+  지날 때까지는 계속 간다 (한쪽 콘만 있으면 마지막 콘이 일찍 시야에서 빠지기 때문).
+그 쪽 콘이 1개뿐이면 그 콘에서 옆으로 고정 거리, 콘이 아예 없으면 Follow the Gap.
+odom 이 없으면 예전 방식(게이트 Pure Pursuit)으로 간다.
 """
 
 import math
@@ -36,6 +47,10 @@ class AvoidCone(SafeState):
         self.steer_model = 0.0    # 실제 바퀴 조향 추정 (steer_rate_deg > 0 일 때)
         self.last_time = None
         self.warned_at = None
+        self.half_width = None    # 마지막으로 본 게이트 폭의 절반 (한쪽 선 따라가기용)
+        self.side = None          # 한쪽 선 따라가기에서 따라가는 쪽 (+1 왼쪽, -1 오른쪽)
+        self.last_pair = None     # 가장 먼 게이트의 (왼쪽 콘, 오른쪽 콘) base_link
+        self.final_gate = None    # 지금까지 본 가장 먼 게이트 선 (odom 점 x, y, 앞쪽 방향 nx, ny)
 
     def on_enter(self):
         self.miss = 0
@@ -45,6 +60,10 @@ class AvoidCone(SafeState):
         self.steer_model = 0.0
         self.last_time = None
         self.warned_at = None
+        self.half_width = None
+        self.side = None
+        self.last_pair = None
+        self.final_gate = None
 
     def run(self):
         node = self.node
@@ -63,6 +82,12 @@ class AvoidCone(SafeState):
             node.dbg('cone/count', len(cones))
 
             if not cones:
+                if self._gate_not_passed(cfg):
+                    # 라이다 시야(앞쪽)에선 빠졌지만 마지막 게이트 선을 앞바퀴가 아직 안 넘음 - 넘을 때까지 계속
+                    # (한쪽 콘만 있으면 마지막 콘이 일찍 시야에서 빠져, 앞바퀴가 마지막 줄 전에 끝나던 문제)
+                    self._publish(cfg['speed'], self.last_steer, now)
+                    self.sleep()
+                    continue
                 # 라바콘이 안 보임 - 구간 종료로 판단 (몇 회 유예)
                 self.miss += 1
                 if self.miss >= node.perception['exit_miss_count']:
@@ -74,14 +99,23 @@ class AvoidCone(SafeState):
 
             self.miss = 0
 
-            if cfg['use_rollout']:
-                pose = node.odom_pose()
-                gates = self._gates(cones, cfg)
-                if pose is not None and gates:
-                    self._remember(pose, cfg)
-                    self._drive_rollout(pose, gates, cfg, now)
-                    self.sleep()
-                    continue
+            gates = self._gates(cones, cfg)
+            pose = node.odom_pose()
+            if pose is not None:
+                self._remember(pose, cfg)
+            if gates:
+                self.side = None                     # 게이트가 다시 보이면 따라갈 쪽은 다음에 새로 정함
+                if pose is not None:
+                    (lx, ly), (rx, ry) = self.last_pair
+                    self._note_gate(pose, (0.5 * (lx + rx), 0.5 * (ly + ry)), (ly - ry, rx - lx))
+            if cfg['use_rollout'] and pose is not None and gates:
+                self._drive_rollout(pose, gates, cfg, now)
+                self.sleep()
+                continue
+
+            if not gates and self._drive_side_line(cones, pose, cfg, now):
+                self.sleep()
+                continue
 
             target = self._make_target(cones, cfg)
 
@@ -128,11 +162,169 @@ class AvoidCone(SafeState):
             # 전후 거리가 크게 어긋나면 잘못된 짝
             if abs(l.x - r.x) > cfg['pair_max_dx']:
                 break
+            # 두 콘을 이은 선이 차 진행 방향과 거의 나란하면 게이트가 아니라 같은 줄의 콘 2개
+            # (곡선에서 한쪽 줄만 보일 때 차가 틀어지면 같은 줄 콘이 왼쪽/오른쪽으로 갈려 짝지어지던 문제)
+            if math.degrees(math.atan2(abs(l.x - r.x), l.y - r.y)) > cfg['pair_max_angle_deg']:
+                break
             width = distance(l.x, l.y, r.x, r.y) - (l.radius + r.radius)
             if width < cfg['min_gate_width']:
                 break
             gates.append((0.5 * (l.x + r.x), 0.5 * (l.y + r.y)))
+            self.last_pair = ((l.x, l.y), (r.x, r.y))
+            if len(gates) == 1:
+                self.half_width = 0.5 * distance(l.x, l.y, r.x, r.y)
         return gates
+
+    def _note_gate(self, pose, m, n):
+        """base_link 의 게이트 선 (점 m, 앞쪽 방향 n) 을 odom 으로 바꿔, 지금까지 본 것보다 더 앞이면 기억."""
+        k = math.hypot(n[0], n[1])
+        if k < 1e-6:
+            return
+        x, y, yaw = pose
+        c, s = math.cos(yaw), math.sin(yaw)
+        mx, my = x + c * m[0] - s * m[1], y + s * m[0] + c * m[1]
+        nx, ny = (c * n[0] - s * n[1]) / k, (s * n[0] + c * n[1]) / k
+        g = self.final_gate
+        if g is None or (mx - g[0]) * g[2] + (my - g[1]) * g[3] > 0.05:
+            self.final_gate = (mx, my, nx, ny)
+
+    def _gate_not_passed(self, cfg):
+        """마지막 게이트 선을 앞바퀴가 아직 pass_margin 넘게 안 지났나 (그 선에서 0.8 m 안일 때만)."""
+        node = self.node
+        g = self.final_gate
+        pose = node.odom_pose()
+        if g is None or pose is None:
+            return False
+        x, y, yaw = pose
+        fx = x + node.front_wheel_x * math.cos(yaw)
+        fy = y + node.front_wheel_x * math.sin(yaw)
+        along = (fx - g[0]) * g[2] + (fy - g[1]) * g[3]
+        return along < cfg['pass_margin'] and math.hypot(fx - g[0], fy - g[1]) < 0.8
+
+    def _drive_side_line(self, cones, pose, cfg, now):
+        """한쪽 콘 줄을 따라간다. 줄을 못 찾으면 False."""
+        node = self.node
+        ahead = sorted((c.x, c.y) for c in cones)
+        if not ahead:
+            return False
+        beside = []                       # 라이다 시야 밖으로 지나간 콘 (odom 기억)
+        if pose is not None:
+            x, y, yaw = pose
+            c, s = math.cos(yaw), math.sin(yaw)
+            for m in self.memory:
+                bx = c * (m[0] - x) + s * (m[1] - y)
+                by = -s * (m[0] - x) + c * (m[1] - y)
+                if bx < ahead[0][0] - 0.05 and abs(by) < 1.0:
+                    beside.append((bx, by))
+        found = self._side_line(beside, ahead, cfg)
+        if found is None:
+            return False
+        side, chain = found
+        self.side = side
+        half = self.half_width if self.half_width is not None else cfg['side_half_width']
+        if pose is not None:
+            (px, py), (qx, qy) = chain[-2], chain[-1]
+            self._note_gate(pose, (qx, qy), (qx - px, qy - py))   # 줄 끝 콘에서 줄에 수직인 선
+
+        if cfg['side_use_rollout'] and pose is not None:
+            mids = [m for m in self._line_to_center(chain, side, half) if m[0] > 0.05]
+            if mids:
+                self._drive_rollout(pose, mids, cfg, now)
+                node.dbg('cone/mode', 'side_roll_left' if side > 0 else 'side_roll_right')
+                return True
+
+        # 차선 따라가기처럼 조향: 차 옆(또는 가장 가까운) 콘 a 와 그 다음 콘 b 를 이은 선
+        k = 0
+        while k + 2 < len(chain) and chain[k + 1][0] <= 0.0:
+            k += 1
+        a, b = chain[k], chain[k + 1]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        n = math.hypot(dx, dy)
+        heading = math.atan2(dy, dx)                       # 선 방향 = 차가 틀어진 각도 (왼쪽 +)
+        dist = (dx * (0.0 - a[1]) - dy * (0.0 - a[0])) / n  # 차 중심이 선 왼쪽이면 +
+        want = -half if side > 0 else half                 # 왼쪽 줄이면 선 오른쪽에, 오른쪽 줄이면 왼쪽에
+        lateral = want - dist                              # + 면 왼쪽으로 가야 함
+        steer = clamp(cfg['side_kp_heading'] * heading + cfg['side_kp_lateral'] * lateral,
+                      -node.max_steer, node.max_steer)
+        speed = cfg['speed'] / (1.0 + cfg['curve_gain'] * abs(math.tan(steer) / node.wheel_base))
+        speed = max(cfg['creep_speed'], speed)
+        self._publish(speed, steer, now)
+        node.dbg('cone/mode', 'side_left' if side > 0 else 'side_right')
+        node.dbg('cone/side_heading', heading)
+        node.dbg('cone/side_lateral', lateral)
+        return True
+
+    def _side_line(self, beside, ahead, cfg):
+        """한 줄로 이어진 콘 묶음 하나를 고른다 -> (쪽 +1 왼쪽/-1 오른쪽, [콘...] 뒤에서 앞 순) 또는 None.
+
+        차에 가까운 콘 몇 개에서 각각 줄을 이어 보고, 가장 멀리까지 이어지는 줄을 고른다
+        (가운데 콘이 빠진 줄보다 끝까지 이어지는 반대쪽 줄이 낫다). 같으면 전에 따라가던 쪽.
+        """
+        pool = beside + ahead
+        seeds = sorted(pool, key=lambda p: math.hypot(p[0], p[1]))[:4]
+        best = None
+        for seed in seeds:
+            chain = [seed]
+            ref = (1.0, 0.0)                   # 첫 연결은 차 진행 방향 기준
+            while True:
+                p = self._link(chain[-1], ref, pool, chain, cfg)
+                if p is None:
+                    break
+                ref = (p[0] - chain[-1][0], p[1] - chain[-1][1])
+                chain.append(p)
+            if len(chain) < 2 or chain[-1][0] <= 0.0:
+                continue
+            side = self._which_side(chain)
+            key = chain[-1][0] + (0.05 if side == self.side else 0.0)
+            if best is None or key > best[0]:
+                best = (key, side, chain)
+        return None if best is None else (best[1], best[2])
+
+    @staticmethod
+    def _link(cur, ref, pool, used, cfg):
+        """cur 다음 콘: ref 방향에서 side_max_turn_deg 안, side_max_step 안에서 가장 가까운 콘."""
+        lim = math.radians(cfg['side_max_turn_deg'])
+        best = None
+        for p in pool:
+            if p in used:
+                continue
+            dx, dy = p[0] - cur[0], p[1] - cur[1]
+            d = math.hypot(dx, dy)
+            if d < 0.05 or d > cfg['side_max_step']:
+                continue
+            if abs(math.atan2(ref[0] * dy - ref[1] * dx, ref[0] * dx + ref[1] * dy)) > lim:
+                continue
+            if best is None or d < best[0]:
+                best = (d, p)
+        return None if best is None else best[1]
+
+    @staticmethod
+    def _which_side(chain):
+        """차(원점)가 줄의 오른쪽에 있으면 왼쪽 줄(+1), 왼쪽에 있으면 오른쪽 줄(-1).
+
+        차 옆을 지나는 선분(없으면 첫 선분)으로 판단.
+        """
+        k = 0
+        while k + 2 < len(chain) and chain[k + 1][0] <= 0.0:
+            k += 1
+        (ax, ay), (bx, by) = chain[k], chain[k + 1]
+        cross = (bx - ax) * (0.0 - ay) - (by - ay) * (0.0 - ax)
+        return -1.0 if cross > 0.0 else 1.0
+
+    @staticmethod
+    def _line_to_center(chain, side, half):
+        """콘 줄을 줄에 수직으로 half 만큼 통로 안쪽으로 옮긴 점들 (가상 게이트 중점)."""
+        out = []
+        for k, p in enumerate(chain):
+            q0 = chain[k - 1] if k > 0 else p
+            q1 = chain[k + 1] if k + 1 < len(chain) else p
+            tx, ty = q1[0] - q0[0], q1[1] - q0[1]
+            n = math.hypot(tx, ty)
+            if n < 1e-6:
+                continue
+            # 줄 왼쪽 방향 (-ty, tx). 왼쪽 줄이면 통로는 줄 오른쪽
+            out.append((p[0] + side * half * ty / n, p[1] - side * half * tx / n))
+        return out
 
     def _make_target(self, cones, cfg):
         """게이트 중점 시퀀스 -> lookahead 목표점 (예전 방식).

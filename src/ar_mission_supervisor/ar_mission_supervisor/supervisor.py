@@ -232,6 +232,7 @@ PARAM_DEFAULTS = {
         'roi_max_y': 1.0,
         'max_radius': 0.18,
         'pair_max_dx': 0.45,
+        'pair_max_angle_deg': 45.0,  # 게이트 두 콘을 이은 선이 차 옆방향에서 이만큼 넘게 틀어지면 게이트 아님
         'min_gate_width': 0.30,
         'side_offset': 0.22,
         'robot_width': 0.22,
@@ -250,6 +251,14 @@ PARAM_DEFAULTS = {
         'steer_rate_deg': 0.0,     # 바퀴 조향이 바뀌는 속도 [도/s] 흉내. 0 = 바로 바뀜
         'memory_merge': 0.10,      # 같은 콘으로 볼 거리 [m]
         'memory_behind': 0.6,      # 차 뒤로 이만큼 지나간 콘은 잊음 [m]
+        # 게이트를 못 만들 때 한쪽 콘 선 따라가기 (11/02 사용자 제안)
+        'side_use_rollout': True,  # 한쪽 줄 -> 가상 가운데 길을 미리 굴려보기로 (false: 차선식 조향)
+        'side_kp_lateral': 1.2,    # 선에서 원하는 거리와의 차이 게인 (차선 주행과 같은 값)
+        'side_kp_heading': 0.8,    # 선과 틀어진 각도 게인
+        'side_half_width': 0.36,   # 게이트를 한 번도 못 봤을 때 쓰는 통로 반폭 [m]
+        'side_max_step': 0.62,     # 같은 줄 다음 콘으로 볼 최대 거리 [m]
+        'side_max_turn_deg': 60.0, # 같은 줄 다음 콘은 지금 줄 방향에서 이 각도 안 (건너편 콘은 거의 90도)
+        'pass_margin': 0.10,       # 마지막 게이트 선을 앞바퀴가 이만큼 더 지날 때까지 구간을 안 끝냄 [m]
     },
     'parking': {
         'search_speed': 0.15,

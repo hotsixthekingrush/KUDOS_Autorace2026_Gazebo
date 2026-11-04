@@ -8,9 +8,16 @@ import numpy as np
 import cv2
 
 DEFAULTS = {
+    # 노란 선 색 필터: 'hls'(기본, 기존 동작) 또는 'lab'
+    'color_space': 'hls',
     # 색 임계값 (HLS)
     'lane_h_l': 0, 'lane_l_l': 90, 'lane_s_l': 100,
     'lane_h_h': 60, 'lane_l_h': 220, 'lane_s_h': 255,
+    # 색 임계값 (LAB, OpenCV 8bit: L 0~255, a/b 128이 무채색).
+    # 시뮬 렌더 영상의 노란 선 픽셀 분포로 정한 임시값. 선배 임계값 아님, 실차에서 다시 맞출 것.
+    'lab_l_min': 100, 'lab_l_max': 255,
+    'lab_a_min': 90, 'lab_a_max': 140,
+    'lab_b_min': 175, 'lab_b_max': 255,
     # 선 추적 (영상 px)
     'side': 'both',           # both | left | right
     'center_x': 320,          # 처음 시작할 때만 좌/우 선을 가르는 기준
@@ -92,6 +99,19 @@ class LaneCore:
             R = None
         return L, R
 
+    def lane_mask(self, img):
+        """노란 선 마스크 (uint8, 0/255). color_space 파라미터로 HLS / LAB 선택."""
+        g = self.p.get
+        if g('color_space') == 'lab':
+            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+            return cv2.inRange(lab,
+                               np.array([g('lab_l_min'), g('lab_a_min'), g('lab_b_min')]),
+                               np.array([g('lab_l_max'), g('lab_a_max'), g('lab_b_max')]))
+        hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
+        return cv2.inRange(hls,
+                           np.array([g('lane_h_l'), g('lane_l_l'), g('lane_s_l')]),
+                           np.array([g('lane_h_h'), g('lane_l_h'), g('lane_s_h')]))
+
     def track(self, img, want_debug=False):
         """반환: gap(px, 필터 후), newL, newR, pairs, debug 영상(또는 None).
 
@@ -99,10 +119,7 @@ class LaneCore:
         """
         g = self.p.get
         h, w = img.shape[:2]
-        hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
-        mask = cv2.inRange(hls,
-                           np.array([g('lane_h_l'), g('lane_l_l'), g('lane_s_l')]),
-                           np.array([g('lane_h_h'), g('lane_l_h'), g('lane_s_h')]))
+        mask = self.lane_mask(img)
         cx0 = int(g('center_x'))
         side = g('side')
         hz = g('horizon_y')

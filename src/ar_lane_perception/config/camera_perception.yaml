@@ -6,6 +6,9 @@ camera_perception_node:
     publish_debug_image: false
     debug_image_num: 2                     # 0: 색 마스크, 그 외: 검출 표시 영상
 
+    # 노란 선 색 필터: hls(기본, 기존 동작) | lab. 런타임 변경 가능 (ros2 param set ... color_space lab)
+    color_space: hls
+
     # 색 임계값 (HLS) - 실차에서 다시 맞출 것
     lane_h_l: 0
     lane_h_h: 60
@@ -13,6 +16,17 @@ camera_perception_node:
     lane_l_h: 220
     lane_s_l: 100
     lane_s_h: 255
+
+    # 색 임계값 (LAB, OpenCV 8bit: L 0~255, a/b 128 = 무채색) - color_space: lab일 때만 사용
+    # !! 시뮬 기준 임시값. 선배(실차) 임계값이 아니다. 실차 영상으로 다시 맞출 것 !!
+    # 근거(시뮬 렌더 + Gazebo 프레임 실측): 노란 선 L246 a108 b222, 노란 50% 가장자리 L163 a114 b189,
+    #   바닥 L72 a127 b132, 흰 선 L255 a128 b128, 라바콘 L152 a190 b197. README 참고
+    lab_l_min: 100
+    lab_l_max: 255
+    lab_a_min: 90      # a: 노랑 106~119, 바닥/흰색 126~128 -> a로는 못 가름. 상한 140은 라바콘(a190) 제외용
+    lab_a_max: 140
+    lab_b_min: 175     # b: 배경 최대 133, 노랑 222 사이. 노랑 50% 이상 가장자리(b189)까지 포함
+    lab_b_max: 255
 
     # 선 추적 (영상 px)
     side: both

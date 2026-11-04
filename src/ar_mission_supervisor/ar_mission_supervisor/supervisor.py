@@ -204,19 +204,30 @@ PARAM_DEFAULTS = {
         'lane_width': 0.52,        # 차선 중앙 간격 (도면: 차선 500 + 점선 20 mm)
         'speed': 0.25,
         'lookahead': 0.45,         # 차선 따라가기 Pure Pursuit 거리 [m]
+        'lookahead_short': 0.25,   # 보통으로는 막힐 때 급하게 꺾어 보는 거리 (0 이면 안 씀) [m] (11/04)
         'plan_horizon': 1.8,       # 후보 차선마다 이 거리만큼 미리 굴려 보고 충돌 검사 [m]
         'limo_length': 0.322,      # 장애물 LIMO 박스 (진행방향 길이 x 폭) [m]
         'limo_width': 0.22,
         'car_length': 0.322,       # 우리 차
         'car_width': 0.22,
+        'wheel_box_length': 0.0,   # 바퀴 네 개를 감싼 사각형도 따로 검사 (0 이면 안 씀. Gazebo 만 씀) [m]
+        'wheel_box_width': 0.0,
         'clearance': 0.03,         # 장애물 박스에 더하는 여유 [m]
         'commit_distance': 0.9,    # 고른 차선으로 이 거리도 못 가면 감속 [m]
         'slow_speed': 0.10,        # 그때 감속 속도
-        'stop_distance': 0.25,     # 그래도 이 거리 안에서 닿게 되면 정지하고 기다림 [m]
+        'stop_distance': 0.25,     # 그래도 이 거리 안에서 닿게 되면 정지 [m]
+        'backup_after': 1.0,       # 이만큼 서 있으면 후진 [s] (11/04)
+        'backup_distance': 0.20,   # 한 번에 후진하는 거리 [m]
+        'backup_speed': 0.10,      # 후진 속도 [m/s]
+        'backup_max': 3,           # 한 미션에 후진하는 최대 횟수
+        'backup_k_heading': 1.5,   # 후진하며 차 방향을 차선 방향으로 펴는 게인 [rad/rad]
         'settle_tolerance': 0.08,  # 목표 차선 중앙 +- 이 안 + 방향 오차 settle_heading 이하면 변경 완료
         'settle_heading': 0.20,
         'merge_distance': 0.20,
         'confirm_hits': 2,
+        'map_average': True,       # LIMO 위치 = 지금까지 본 것의 평균 (false = 예전 방식, 새 값 쪽으로 0.3) (11/04)
+        'ghost_min_hits': 5,       # 이만큼 본 LIMO 박스와 겹치는 새 검출은 버림 (0 = 안 함) (11/04)
+        'ghost_margin': 0.05,      # 겹침 판정 때 박스 길이·폭에 더하는 값 [m]
         'exit_clear_distance': 0.8,  # 마지막 장애물을 지나 이만큼 더 가면 종료 [m]
         'max_distance': 7.0,       # 진입 후 최대 주행거리 (3차선 직선 5.5 m) [m]
         'max_duration': 40.0,

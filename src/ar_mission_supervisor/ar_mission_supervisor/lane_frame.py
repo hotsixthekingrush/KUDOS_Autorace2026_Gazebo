@@ -22,15 +22,23 @@ class LaneFrame(object):
         return self.origin is not None
 
     def begin(self, pose, lane=None):
-        """pose = (x, y, yaw) odom. lane = node.lane_error() 값(없으면 None)."""
+        """pose = (x, y, yaw) odom. lane = node.lane_error() 값(없으면 None).
+
+        lane 의 차선 중앙 점은 차 앞 x_ref(lane[3], 없으면 0), 옆 lateral 위치.
+        그 점에서 차선 방향으로 거슬러 올라가 차 옆(s = 0)에 원점을 둔다 (직선 차선이면 정확).
+        """
         x, y, yaw = pose
         ox, oy, oyaw = x, y, yaw
         if lane is not None:
             lateral, heading = lane[0], lane[1]
+            x_ref = lane[3] if len(lane) > 3 else 0.0
             # lateral: 로봇 기준 차선 중앙의 위치 (왼쪽 +), heading: 차선 방향 - 차 방향
-            ox = x - math.sin(yaw) * lateral
-            oy = y + math.cos(yaw) * lateral
             oyaw = yaw + heading
+            px = x + math.cos(yaw) * x_ref - math.sin(yaw) * lateral
+            py = y + math.sin(yaw) * x_ref + math.cos(yaw) * lateral
+            back = (px - x) * math.cos(oyaw) + (py - y) * math.sin(oyaw)
+            ox = px - back * math.cos(oyaw)
+            oy = py - back * math.sin(oyaw)
         self.origin = (ox, oy, oyaw)
 
     def odom_to_frame(self, x, y):

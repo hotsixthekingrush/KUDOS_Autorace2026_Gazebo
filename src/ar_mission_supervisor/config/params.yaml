@@ -10,6 +10,8 @@ mission_supervisor:
     cmd_angular_is_steering: false   # 실차 limo_base 는 angular.z = 각속도. (Gazebo 만 true)
 
     lane:
+      reference_distance_m: 0.5  # 차선 노드가 lateral 을 재는 차 앞 거리 (차선 노드 값과 같아야 함, 11/04 0.5)
+                                 # > 0: 그 점을 Pure Pursuit 로 따라감 / 0: 예전 PD (아래 이득)
       kp_lateral: 1.2
       kd_lateral: 0.15
       kp_heading: 0.8
@@ -141,6 +143,10 @@ mission_supervisor:
       car_length: 0.322          # 검사하는 차 몸통 (실차 LIMO)
       car_width: 0.22
       clearance: 0.02            # 라이다 콘 반지름에 더하는 여유 [m]
+      lookahead_short: 0.25      # 후보: 짧게 보고 꽉 꺾어 도는 길 [m] (11/04, 0 = 안 씀)
+      lookahead_long: 0.60       # 후보: 길게 보고 부드럽게 가는 길 [m] (0 = 안 씀)
+      w_lookahead: 0.1           # 기본 lookahead 와 다른 만큼 벌점
+      tight_speed: 0.15          # 안 닿는 길이 없을 때 속도 [m/s] (멈추지 않고 덜 닿는 쪽으로. 0.05 는 기어가다 40초 넘김 - 11/04 녹화)
       w_offset: 1.0              # 길을 옆으로 옮긴 만큼 벌점 (가운데 선호)
       w_margin: 1.0              # 콘과 여유 보너스 (margin_cap 까지)
       margin_cap: 0.10

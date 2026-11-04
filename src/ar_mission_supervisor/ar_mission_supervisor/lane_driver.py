@@ -1,6 +1,8 @@
 """차선 추종 주행 로직. lane_following 과 미션 State 들이 공유한다."""
 
-from ar_mission_supervisor.controllers import pd_steering, steering_to_omega
+import math
+
+from ar_mission_supervisor.controllers import clamp, steering_to_omega
 
 
 class LaneDriver(object):
@@ -11,7 +13,8 @@ class LaneDriver(object):
 
     def reset(self):
         self.prev_lateral = 0.0
-        self.prev_time = None
+        self.prev_stamp = None
+        self.d_term = 0.0
         self.lost_since = None
         self.last_cmd = (0.0, 0.0)
 
@@ -35,20 +38,35 @@ class LaneDriver(object):
     def lane_steer(self, lane, now, offset=0.0):
         """차선 오차 -> 조향각(rad). 발행은 하지 않는다 (다른 제어와 섞을 때 사용).
 
-        lane = node.lane_error() 반환값 (lateral, heading, confidence).
+        lane = node.lane_error() 반환값 (lateral, heading, confidence, x_ref, stamp).
+        x_ref > 0 (11/04 기본): 차 앞 x_ref 지점의 차선 중앙(+ offset)을 Pure Pursuit 로 따라간다.
+          곡률 = 2 y / (x^2 + y^2). 카메라가 실제로 보는 지점이라 코너에서도 값이 맞고, 앞을 보고 미리 꺾는다.
+        x_ref = 0: 예전 PD. D 는 새 차선 값이 왔을 때만 (찍은 시각 차이로) 다시 계산한다.
+          (제어는 20 Hz, 차선은 3~5 Hz 라 매 주기 미분하면 새 값이 올 때만 튐)
         """
         node = self.node
-        lateral, heading = lane[0], lane[1]
         # lateral = 로봇 기준 차선 중앙의 위치 (왼쪽 +).
         # 목표 지점은 차선 중앙에서 offset 만큼 옆이므로 로봇 기준 위치는 lateral + offset.
-        lateral = lateral + offset
-        dt = 0.0 if self.prev_time is None else (now - self.prev_time)
+        lateral = lane[0] + offset
+        heading = lane[1]
+        x_ref = lane[3] if len(lane) > 3 else 0.0
+        stamp = lane[4] if len(lane) > 4 else now
 
-        steer = pd_steering(lateral, heading, self.prev_lateral, dt,
-                            node.lane_gains, node.max_steer)
-        self.prev_lateral = lateral
-        self.prev_time = now
-        return steer
+        if self.prev_stamp is None or stamp != self.prev_stamp:
+            if self.prev_stamp is not None and stamp > self.prev_stamp:
+                self.d_term = (lateral - self.prev_lateral) / (stamp - self.prev_stamp)
+            else:
+                self.d_term = 0.0
+            self.prev_lateral = lateral
+            self.prev_stamp = stamp
+
+        if x_ref > 1e-3:
+            kappa = 2.0 * lateral / (x_ref * x_ref + lateral * lateral)
+            return clamp(math.atan(node.wheel_base * kappa), -node.max_steer, node.max_steer)
+
+        g = node.lane_gains
+        steer = g['kp_lateral'] * lateral + g['kd_lateral'] * self.d_term + g['kp_heading'] * heading
+        return clamp(steer, -node.max_steer, node.max_steer)
 
     def _drive(self, lane, now, target_speed, offset=0.0):
         node = self.node

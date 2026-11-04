@@ -113,6 +113,11 @@ class MissionCheck(Node):
         self.t_move = 0
         self.deadline = 0.0
         self.done = False
+        self.robot_xy = None
+        self.moved = False
+        self.tries = 0
+        self.fail_note = ''
+        self.tp_deadline = 0.0
         self.t0 = time.monotonic()
         self.seen_models = []
         self.n_msgs = 0
@@ -123,15 +128,18 @@ class MissionCheck(Node):
 
     def states_cb(self, msg):
         self.seen_models = list(msg.name)
-        if self.robot_z is None and self.robot in msg.name:
-            self.robot_z = msg.pose[msg.name.index(self.robot)].position.z
+        if self.robot in msg.name:
+            p = msg.pose[msg.name.index(self.robot)].position
+            self.robot_xy = (p.x, p.y)
+            if self.robot_z is None:
+                self.robot_z = p.z
 
     def obj_cb(self, msg):
         self.n_msgs += 1
         if self.phase != 'collect':
             return
         st = msg.header.stamp.sec * 1000000000 + msg.header.stamp.nanosec
-        if st >= self.t_move + self.settle_ns:
+        if self.moved and st >= self.t_move + self.settle_ns:
             self.buf.append(msg)
 
     def teleport(self, x, y, yaw):
@@ -142,7 +150,15 @@ class MissionCheck(Node):
         s.pose.orientation.z, s.pose.orientation.w = math.sin(yaw / 2.0), math.cos(yaw / 2.0)
         req = SetEntityState.Request()
         req.state = s
-        self.cli.call_async(req)
+        self.cli.call_async(req).add_done_callback(self._tp_done)
+
+    def _tp_done(self, fut):
+        try:
+            r = fut.result()
+            if not r.success:
+                self.get_logger().error('set_entity_state 실패: %s' % getattr(r, 'status_message', ''))
+        except Exception as e:
+            self.get_logger().error('set_entity_state 호출 오류: %s' % e)
 
     def tick(self):
         if self.phase == 'wait':
@@ -168,11 +184,34 @@ class MissionCheck(Node):
             self.teleport(q['x'], q['y'], q['yaw'])
             self.t_move = self.get_clock().now().nanoseconds
             self.buf = []
+            self.moved = False
+            self.tries = 1
+            self.fail_note = ''
+            self.tp_deadline = time.monotonic() + 3.0
             self.deadline = time.monotonic() + self.timeout
             self.phase = 'collect'
         elif self.phase == 'collect':
+            q = self.points[self.i]
+            if not self.moved:
+                # 차가 정말 그 자리로 갔는지 model_states 로 확인 (11/4 밤: 순간이동 안 된 채 점검된 문제)
+                rx, ry = self.robot_xy if self.robot_xy else (1e9, 1e9)
+                if math.hypot(rx - q['x'], ry - q['y']) < 0.15:
+                    self.moved = True
+                    self.t_move = self.get_clock().now().nanoseconds
+                    self.buf = []
+                elif time.monotonic() > self.tp_deadline:
+                    if self.tries < 3:
+                        self.tries += 1
+                        self.teleport(q['x'], q['y'], q['yaw'])
+                        self.tp_deadline = time.monotonic() + 3.0
+                    else:
+                        self.fail_note = '순간이동 실패 (차 위치 %.2f, %.2f)' % (rx, ry)
+                        self.get_logger().error('%s: %s' % (q['name'], self.fail_note))
+                        self.judge(q, [])
+                        self.phase = 'next'
+                return
             if len(self.buf) >= self.frames or time.monotonic() > self.deadline:
-                self.judge(self.points[self.i], self.buf[:self.frames])
+                self.judge(q, self.buf[:self.frames])
                 self.phase = 'next'
 
     def judge(self, q, msgs):
@@ -213,7 +252,10 @@ class MissionCheck(Node):
             verdict = 'OK'
         else:
             verdict = '약함'
-        if cls == 'crosswalk' and hits and not xs and ex <= 0.3:
+        if getattr(self, 'fail_note', ''):
+            note = self.fail_note
+            verdict = '이동실패'
+        elif cls == 'crosswalk' and hits and not xs and ex <= 0.3:
             note = '위치 없음(화면 하단 닿음 → 판단이 odom 으로)'
         else:
             note = ''

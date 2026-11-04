@@ -1,0 +1,5 @@
+# 시뮬(Gazebo kudos_arena) 전용 덮어쓰기. camera_perception.yaml 다음에 읽는다.
+camera_perception_node:
+  ros__parameters:
+    # 시뮬 트랙(track_paint/track.png) 실측 선 중심 간 차선 폭. 실차 기본값은 0.55
+    lane_width_m: 0.52

@@ -1,0 +1,45 @@
+camera_perception_node:
+  ros__parameters:
+    # 입력/부가 출력
+    image_topic: /camera/color/image_raw   # 실차. 시뮬은 launch에서 /rgb/image_raw로 덮어씀
+    publish_distance_y: false              # true면 기존 limo_control용 /distance_y(Int32, px)도 발행
+    publish_debug_image: false
+    debug_image_num: 2                     # 0: 색 마스크, 그 외: 검출 표시 영상
+
+    # 색 임계값 (HLS) - 실차에서 다시 맞출 것
+    lane_h_l: 0
+    lane_h_h: 60
+    lane_l_l: 90
+    lane_l_h: 220
+    lane_s_l: 100
+    lane_s_h: 255
+
+    # 선 추적 (영상 px)
+    side: both
+    center_x: 320
+    y_top: 320
+    y_bot: 470
+    n_rows: 8
+    horizon_y: 260
+    lane_w_bottom: 560
+    track_tol: 90
+    track_predict: false
+    lost_hold: 5
+    smooth: 0.7       # /distance_y 필터에만 사용
+    max_step: 100.0   # /distance_y 필터에만 사용
+
+    # lane_error (base_link 지면 좌표)
+    lane_width_m: 0.55          # 선 중심 간 차선 폭. 실차 기본 0.55(규정집 값, 실물 미측정). 시뮬은 _sim.yaml에서 0.52
+    # lateral_offset_m, heading_error_rad의 기준점: base_link 원점(차 중심)에서 전방 거리 [m]
+    # !! 판단팀 ar_mission_supervisor의 lane.reference_distance_m과 같은 값이어야 한다 !!
+    reference_distance_m: 0.5
+    cam_height_m: 0.21          # 지면~카메라 광심 (시뮬 값, 실차 재측정)
+    cam_x_m: 0.10               # base_link -> 카메라 전방 거리
+    cam_pitch_rad: 0.0          # 아래로 숙이면 +
+    focal_px: 381.0             # hfov 80deg, 640px
+
+    # 옆 도로 선 가드 (README 참고)
+    guard_enable: true
+    guard_width_tol_m: 0.10     # 한 줄의 두 선 폭이 lane_width_m에서 이만큼 넘게 다르면 옆 도로 선이 섞인 것으로 봄
+    guard_jump_m: 0.10          # 그런 프레임은 직전 정상 lateral과 이 안으로 이어질 때만 valid
+    guard_memory_sec: 1.0       # 직전 정상값을 비교 기준으로 쓰는 최대 시간

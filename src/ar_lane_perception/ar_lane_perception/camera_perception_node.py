@@ -2,8 +2,6 @@
 
 검출 로직은 lane_core.LaneCore에 있다 (limo_ros2_application/detect_line.py 기반).
 """
-import cv2
-import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
@@ -36,10 +34,17 @@ class CameraPerceptionNode(Node):
         self.debug_pub = self.create_publisher(Image, 'debug_image', 10)
         topic = self.get_parameter('image_topic').value
         self.create_subscription(Image, topic, self.image_callback, qos_profile_sensor_data)
-        self.get_logger().info('구독 %s -> /perception/lane_error (reference_distance_m=%.2f, lane_width_m=%.2f)'
-                               % (topic, self.core.p['reference_distance_m'], self.core.p['lane_width_m']))
+        p = self.core.p
+        self.get_logger().info(
+            '구독 %s -> /perception/lane_error (reference_distance_m=%.2f, lane_width_m=%.2f, '
+            'color_space=%s)'
+            % (topic, p['reference_distance_m'], p['lane_width_m'], p['color_space']))
 
     def _on_params(self, params):
+        for prm in params:
+            if prm.name == 'color_space' and prm.value not in ('hls', 'lab'):
+                return SetParametersResult(successful=False,
+                                           reason="color_space는 'hls' 또는 'lab'")
         for prm in params:
             if prm.name in DEFAULTS:
                 self.core.p[prm.name] = prm.value
@@ -73,10 +78,7 @@ class CameraPerceptionNode(Node):
             self.dis_pub.publish(Int32(data=r['gap']))
         if self.get_parameter('publish_debug_image').value:
             if self.get_parameter('debug_image_num').value == 0:
-                g = self.core.p
-                hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
-                mask = cv2.inRange(hls, np.array([g['lane_h_l'], g['lane_l_l'], g['lane_s_l']]),
-                                   np.array([g['lane_h_h'], g['lane_l_h'], g['lane_s_h']]))
+                mask = self.core.lane_mask(img)   # color_space에 따라 HLS / LAB
                 self.debug_pub.publish(self.br.cv2_to_imgmsg(mask, 'mono8'))
             elif r['debug'] is not None:
                 self.debug_pub.publish(self.br.cv2_to_imgmsg(r['debug'], 'bgr8'))

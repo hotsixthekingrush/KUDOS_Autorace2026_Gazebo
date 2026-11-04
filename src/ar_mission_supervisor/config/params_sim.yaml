@@ -19,3 +19,14 @@ mission_supervisor:
       car_width: 0.31
       # Gazebo 조향은 초당 약 55도 (11/03 녹화). 굴려볼 때 이걸 흉내 내면 콘 놓칠 때 더 나음 (11/04 계산)
       steer_rate_deg: 55.0
+
+    avoid_static:
+      # (11/04) 정적 장애물에서 옆을 긁던 문제. Gazebo 차 충돌 모양 그대로 검사 (Gazebo 파일은 안 고침):
+      #   몸통 상자 앞뒤 0.19 x 좌우 0.31 (limo_car/gazebo/ackermann.xacro base_x/y_size, 실차는 0.322 x 0.22)
+      #   + 바퀴 네 개를 감싼 사각형 0.33 x 0.258 (축간 0.24 + 바퀴 지름, 윤거 0.168 + 바퀴 폭 x 2)
+      car_length: 0.19
+      car_width: 0.31
+      wheel_box_length: 0.33
+      wheel_box_width: 0.258
+      # 여유 0.03 이면 Gazebo 월드 배치(0.55 m 간격)에서 3대 지나고 막힘 -> 0.015 (계산: 7/7, Gazebo 모양 틈 2.4 cm)
+      clearance: 0.015

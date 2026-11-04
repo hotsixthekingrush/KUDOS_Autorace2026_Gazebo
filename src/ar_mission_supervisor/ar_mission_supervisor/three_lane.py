@@ -10,13 +10,19 @@
 odom 으로 계산한 실제 위치(d)와 계속 어긋나면 odom 쪽을 따른다.
 
 step(now, goal) 한 번 = 한 제어 주기:
-  - 라이다 장애물 지도 갱신 (LIMO 는 차선 방향으로 놓인 0.322 x 0.22 m 박스로 본다)
+  - 라이다 장애물 지도 갱신 (LIMO 는 차선 방향으로 놓인 0.322 x 0.22 m 박스 + 여유 clearance 로 본다)
+    (11/04) 위치는 본 것의 평균(map_average), 이미 확실한 LIMO 와 겹치는 새 검출은 버림(ghost_*).
   - 후보 차선 3곳(차선 가운데)마다, 그 차선으로 가는 주행을 실제 조향 한계(max_steer, wheel_base)로
     앞 plan_horizon 만큼 미리 굴려 보고(rollout) 장애물과 닿는지 검사한다.
+    (11/04) 보통(lookahead)으로 굴려서 막히는 차선은 급하게 꺾는 것(lookahead_short)도 굴려 보고
+    더 멀리 가는 쪽으로 따라간다. 차 모양은 몸통 사각형 + (Gazebo 만) 바퀴를 감싼 사각형.
   - 지금 목표 차선이 끝까지(plan_horizon) 안 닿으면 유지한다 (goal 차선이 끝까지 비면 goal 로).
     아니면 '가장 멀리 갈 수 있는' 차선을 고른다 (지금 목표 +0.15 m, goal +0.3 m 가산).
   - 차선 사이(선 위)로 가는 경로는 쓰지 않는다. 고른 차선도 commit_distance 보다 짧게 닿으면
-    감속하고, stop_distance 안에서 닿게 되면 서서 기다린다 (지도가 바뀌면 다시 계산).
+    감속하고, stop_distance 안에서 닿게 되면 선다.
+  - (11/04 사용자 요청) 선 채로 backup_after 초가 지나면, 뒤가 비어 있을 때 backup_speed 로 backup_distance 만큼
+    후진하고(차 방향을 차선 방향으로 펴면서) 다시 계산한다. 한 미션에 backup_max 번까지. LIMO 는 안 움직여서
+    서서 기다리기만 하면 계속 막혀 있고, 규정상 진행 불가는 미션 처음부터 재출발이라서.
 """
 
 import math
@@ -49,6 +55,9 @@ class ThreeLanePlanner(object):
         self.mismatch_since = None
         self.logged_blocked = False
         self.max_obstacle_s = None
+        self.blocked_since = None
+        self.backing = None         # 후진 중이면 시작 (x, y)
+        self.backups = 0
 
     @property
     def cfg(self):
@@ -63,12 +72,20 @@ class ThreeLanePlanner(object):
             self.active = False
             return False
         self.frame.begin(pose, self.node.lane_error())
-        self.map = ObstacleMap(merge=self.cfg['merge_distance'])
+        cfg = self.cfg
+        ghost = None
+        if cfg['ghost_min_hits'] > 0:
+            ghost = (cfg['limo_length'] + cfg['ghost_margin'], cfg['limo_width'] + cfg['ghost_margin'],
+                     cfg['ghost_min_hits'])
+        self.map = ObstacleMap(merge=cfg['merge_distance'], average=cfg['map_average'], ghost=ghost)
         self.lane = self.target = int(lane)
         self.changing = False
         self.mismatch_since = None
         self.logged_blocked = False
         self.max_obstacle_s = None
+        self.blocked_since = None
+        self.backing = None
+        self.backups = 0
         self.active = True
         self.released_at = None
         return True
@@ -160,8 +177,24 @@ class ThreeLanePlanner(object):
                 for it in self.map.confirmed(cfg['confirm_hits'])
                 if it['s'] + hl > s_car - 0.5]
 
+    def _shapes(self):
+        """검사할 차 모양 [(반 길이, 반 폭), ...]. 실차는 몸통 하나.
+        Gazebo 는 몸통 상자(앞뒤 0.19 x 좌우 0.31) + 바퀴 네 개를 감싼 사각형(0.33 x 0.258) 두 개 (11/04)."""
+        cfg = self.cfg
+        shapes = [(0.5 * cfg['car_length'], 0.5 * cfg['car_width'])]
+        if cfg['wheel_box_length'] > 0.0 and cfg['wheel_box_width'] > 0.0:
+            shapes.append((0.5 * cfg['wheel_box_length'], 0.5 * cfg['wheel_box_width']))
+        return shapes
+
+    @classmethod
+    def _car_hits(cls, s_, d, psi, boxes, shapes):
+        for half_l, half_w in shapes:
+            if cls._rect_hits(s_, d, psi, boxes, half_l, half_w):
+                return True
+        return False
+
     @staticmethod
-    def _car_hits(s_, d, psi, boxes, half_l, half_w):
+    def _rect_hits(s_, d, psi, boxes, half_l, half_w):
         c, sn = math.cos(psi), math.sin(psi)
         car = [(s_ + a * c - b * sn, d + a * sn + b * c)
                for a, b in ((half_l, half_w), (half_l, -half_w), (-half_l, -half_w), (-half_l, half_w))]
@@ -184,15 +217,18 @@ class ThreeLanePlanner(object):
                 return True
         return False
 
-    def rollout(self, s0, d0, psi0, d_target, boxes, horizon):
-        """d_target 차선으로 가는 주행을 horizon m 앞까지 굴려 보고, 닿기 전까지 간 거리 [m]."""
+    def rollout(self, s0, d0, psi0, d_target, boxes, horizon, la=None):
+        """d_target 차선으로 가는 주행을 horizon m 앞까지 굴려 보고, 닿기 전까지 간 거리 [m].
+        la: Pure Pursuit 따라가는 거리 (None 이면 lookahead). 짧을수록 급하게 꺾는다."""
         node = self.node
         cfg = self.cfg
-        wb, ms, la = node.wheel_base, node.max_steer, cfg['lookahead']
-        half_l, half_w = 0.5 * cfg['car_length'], 0.5 * cfg['car_width']
+        wb, ms = node.wheel_base, node.max_steer
+        if la is None:
+            la = cfg['lookahead']
+        shapes = self._shapes()
         ds = 0.04
         s_, d, psi = s0, d0, psi0
-        if self._car_hits(s_, d, psi, boxes, half_l, half_w):
+        if self._car_hits(s_, d, psi, boxes, shapes):
             return 0.0
         traveled = 0.0
         while traveled < horizon:
@@ -206,9 +242,53 @@ class ThreeLanePlanner(object):
             s_ += ds * math.cos(psi)
             d += ds * math.sin(psi)
             traveled += ds
-            if self._car_hits(s_, d, psi, boxes, half_l, half_w):
+            if self._car_hits(s_, d, psi, boxes, shapes):
                 return traveled
         return horizon
+
+    def _all_boxes(self):
+        cfg = self.cfg
+        hl = 0.5 * cfg['limo_length'] + cfg['clearance']
+        hw = 0.5 * cfg['limo_width'] + cfg['clearance']
+        return [(it['s'], it['d'], hl, hw) for it in self.map.confirmed(cfg['confirm_hits'])]
+
+    def back_steer(self, psi):
+        """후진하면서 차 방향을 차선 방향(psi = 0)으로 펴는 조향각. 후진(v < 0)이면 psi 가 줄어든다."""
+        return clamp(self.cfg['backup_k_heading'] * psi, -self.node.max_steer, self.node.max_steer)
+
+    def rollout_back(self, s0, d0, psi0, boxes, dist):
+        """후진하며 back_steer 로 dist 만큼 굴려 보고, 닿기 전까지 간 거리 [m]."""
+        wb = self.node.wheel_base
+        shapes = self._shapes()
+        ds = 0.02
+        s_, d, psi = s0, d0, psi0
+        traveled = 0.0
+        while traveled < dist:
+            steer = self.back_steer(psi)
+            psi -= ds * math.tan(steer) / wb
+            s_ -= ds * math.cos(psi)
+            d -= ds * math.sin(psi)
+            traveled += ds
+            if self._car_hits(s_, d, psi, boxes, shapes):
+                return traveled - ds
+        return dist
+
+    def _back_step(self, pose, s_, d, psi, now, who):
+        """후진 중 한 주기. 다 했으면 False (다시 계산으로)."""
+        cfg = self.cfg
+        node = self.node
+        x0, y0 = self.backing
+        done = math.hypot(pose[0] - x0, pose[1] - y0)
+        if done >= cfg['backup_distance'] or self.rollout_back(s_, d, psi, self._all_boxes(), 0.04) < 0.04:
+            node.get_logger().info('[%s] 후진 %.2fm 끝 - 다시 계산' % (who, done))
+            self.backing = None
+            self.blocked_since = None
+            self.logged_blocked = False
+            return False
+        v = -cfg['backup_speed']
+        node.publish_cmd(v, steering_to_omega(v, self.back_steer(psi), node.wheel_base))
+        node.dbg('static/mode', 'backup')
+        return True
 
     # ------------------------------------------------------------------
     # 한 제어 주기
@@ -230,10 +310,24 @@ class ThreeLanePlanner(object):
         if not self.changing:
             self.check_lane(d, now, who)
 
+        if self.backing is not None and self._back_step(pose, s_, d, psi, now, who):
+            return StepResult(pose, s_, d, psi, blocked=True)
+
         horizon = cfg['plan_horizon']
         boxes = self._boxes(s_)
-        free = dict((lane, self.rollout(s_, d, psi, self.center(lane), boxes, horizon))
-                    for lane in self.LANES)
+        # 차선마다 보통(lookahead)으로 굴려 보고, 막히면 급하게 꺾는 것(lookahead_short)도 굴려 봄 (11/04)
+        las = [cfg['lookahead']]
+        if cfg['lookahead_short'] > 0.0:
+            las.append(cfg['lookahead_short'])
+        free, best_la = {}, {}
+        for lane in self.LANES:
+            free[lane], best_la[lane] = -1.0, las[0]
+            for la in las:
+                f = self.rollout(s_, d, psi, self.center(lane), boxes, horizon, la)
+                if f > free[lane] + 1e-6:
+                    free[lane], best_la[lane] = f, la
+                if f >= horizon - 1e-6:
+                    break
         clear = [lane for lane in self.LANES if free[lane] >= horizon - 1e-6]
         node.dbg('static/free_target', free[self.target])
 
@@ -269,16 +363,31 @@ class ThreeLanePlanner(object):
                 self.logged_blocked = True
             if free[self.target] <= cfg['stop_distance']:
                 node.publish_stop()
+                node.dbg('static/mode', 'stop')
+                if self.blocked_since is None:
+                    self.blocked_since = now
+                elif (now - self.blocked_since >= cfg['backup_after'] and self.backups < cfg['backup_max']):
+                    room = self.rollout_back(s_, d, psi, self._all_boxes(), cfg['backup_distance'])
+                    if room >= 0.05:
+                        self.backups += 1
+                        self.backing = (pose[0], pose[1])
+                        log.warn('[%s] %.1f초 막힘 - %.2fm 후진 후 다시 계산 (%d/%d번째, 차선별 갈 거리 %s)'
+                                 % (who, now - self.blocked_since, min(room, cfg['backup_distance']),
+                                    self.backups, cfg['backup_max'],
+                                    ' '.join('%s=%.2f' % (self.name(ln), free[ln]) for ln in self.LANES)))
                 return StepResult(pose, s_, d, psi, blocked=True)
             v = cfg['slow_speed']
+            self.blocked_since = None
         else:
             self.logged_blocked = False
+            self.blocked_since = None
 
         node.dbg('static/lane', self.lane)
         node.dbg('static/target', self.target)
         node.dbg('static/d', d)
         node.dbg('static/s', s_)
-        node.publish_cmd(v, self.steer(pose, s_, self.center(self.target), v))
+        node.dbg('static/lookahead', best_la[self.target])
+        node.publish_cmd(v, self.steer(pose, s_, self.center(self.target), v, best_la[self.target]))
         return StepResult(pose, s_, d, psi)
 
     def settled(self, d, psi):
@@ -300,9 +409,9 @@ class ThreeLanePlanner(object):
             self.lane = self.target = actual
             self.mismatch_since = None
 
-    def steer(self, pose, s_car, d_target, v):
+    def steer(self, pose, s_car, d_target, v, la=None):
         omega, _ = pursue(self.node, self.frame, pose,
-                          s_car + self.cfg['lookahead'], d_target, v)
+                          s_car + (self.cfg['lookahead'] if la is None else la), d_target, v)
         return omega
 
     def gap_step(self):

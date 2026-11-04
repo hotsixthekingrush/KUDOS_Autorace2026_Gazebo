@@ -429,7 +429,13 @@ class AvoidCone(SafeState):
         self.memory = keep
 
     def _drive_rollout(self, pose, gates, cfg, now):
-        """게이트 길을 옆으로 옮긴 후보들을 Pure Pursuit 로 따라가 보고, 안 닿는 것 중 가운데에 가까운 것."""
+        """게이트 길을 옆으로 옮긴 후보들을 Pure Pursuit 로 따라가 보고, 안 닿는 것 중 가운데에 가까운 것.
+
+        후보 = 옆으로 옮긴 양(0, ±offset_step … ±offset_max) x 따라가는 거리(lookahead, lookahead_short, lookahead_long).
+        짧게 보면 급한 곳을 꽉 꺾어 돌고, 길게 보면 부드럽게 간다 (11/04 추가).
+        다 닿으면 여유가 가장 큰 후보로 tight_speed 로 계속 간다 (멈추면 규정상 진행 불가 -> 재출발).
+        Gazebo 처럼 차가 넓으면 1~2 mm 차이로 '다 닿음'이 자주 나와서, 너무 느리면 기어가다 제한시간을 넘긴다 (11/04 녹화).
+        """
         node = self.node
         wb, ms = node.wheel_base, node.max_steer
         x, y, yaw = pose
@@ -448,29 +454,36 @@ class AvoidCone(SafeState):
         n = int(round(cfg['offset_max'] / step))
         offsets = [0.0] + [k * step * sgn for k in range(1, n + 1) for sgn in (1.0, -1.0)]
 
-        best = None          # (score, offset, first_steer, end, margin)
+        las = [cfg['lookahead']]
+        for la in (cfg['lookahead_short'], cfg['lookahead_long']):
+            if la > 0.0 and all(abs(la - q) > 1e-6 for q in las):
+                las.append(la)
+
+        best = None          # (score, offset, first_steer, end, margin, lookahead)
         fallback = None      # 다 닿으면: 여유가 가장 큰 것
         for off in offsets:
             path = self._shift(gates, off)
-            first, end, margin = self._roll(path, self.steer_model, per_m, wb, ms, obs, cfg)
-            cand = (off, first, end, margin)
-            if fallback is None or margin > fallback[3]:
-                fallback = cand
-            if margin < 0.0:
-                continue
-            score = -cfg['w_offset'] * abs(off) + cfg['w_margin'] * min(margin, cfg['margin_cap'])
-            if best is None or score > best[0]:
-                best = (score,) + cand
+            for la in las:
+                first, end, margin = self._roll(path, self.steer_model, per_m, wb, ms, obs, cfg, la)
+                cand = (off, first, end, margin, la)
+                if fallback is None or margin > fallback[3]:
+                    fallback = cand
+                if margin < 0.0:
+                    continue
+                score = (-cfg['w_offset'] * abs(off) - cfg['w_lookahead'] * abs(la - cfg['lookahead'])
+                         + cfg['w_margin'] * min(margin, cfg['margin_cap']))
+                if best is None or score > best[0]:
+                    best = (score,) + cand
 
         if best is not None:
-            _, off, steer, end, margin = best
+            _, off, steer, end, margin, la = best
             node.dbg('cone/mode', 'roll')
             v = cfg['speed'] / (1.0 + cfg['curve_gain'] * abs(math.tan(steer) / wb))
             v = max(cfg['creep_speed'], v)
         else:
-            off, steer, end, margin = fallback
+            off, steer, end, margin, la = fallback
             node.dbg('cone/mode', 'roll_tight')
-            v = cfg['creep_speed']
+            v = cfg['tight_speed']
             if self.warned_at is None or now - self.warned_at > 1.0:
                 node.get_logger().warn('[CONE] 안 닿는 길을 못 찾음 - 여유가 가장 큰 쪽으로 천천히 (여유 %.3fm)'
                                        % margin)
@@ -481,6 +494,7 @@ class AvoidCone(SafeState):
         node.dbg('cone/target_y', end[1])
         node.dbg('cone/kappa', math.tan(steer) / wb)
         node.dbg('cone/margin', margin)
+        node.dbg('cone/lookahead', la)
         node.dbg('cone/offset', off)
 
     @staticmethod
@@ -501,14 +515,14 @@ class AvoidCone(SafeState):
             out.append((pts[k][0] - dy / n * off, pts[k][1] + dx / n * off))
         return out
 
-    def _roll(self, path, steer, per_m, wb, ms, obs, cfg):
+    def _roll(self, path, steer, per_m, wb, ms, obs, cfg, la=None):
         """path 를 Pure Pursuit 로 horizon 만큼 따라가 본다 (조향 한계, 조향 속도 per_m 반영).
 
         반환: (첫 조향 명령, 끝 위치, 가장 작은 여유[m]). 여유 < 0 이면 콘에 닿음.
         """
         x = y = yaw = 0.0
         ds = 0.05
-        la = cfg['lookahead']
+        la = cfg['lookahead'] if la is None else la
         hl, hw = 0.5 * cfg['car_length'], 0.5 * cfg['car_width']
         reach = math.hypot(hl, hw)
         margin = 9.0

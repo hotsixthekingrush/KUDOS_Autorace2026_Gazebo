@@ -10,6 +10,7 @@ State 9개
 CROSSWALK_STOP 으로 바로 넘어간다 (두 미션이 붙어 있음).
 """
 
+import collections
 import math
 import threading
 
@@ -121,6 +122,9 @@ PARAM_DEFAULTS = {
         'cmd_angular_is_steering': False,  # True: /cmd_vel angular.z 에 조향각[rad]을 넣음 (Gazebo 아커만 플러그인용)
     },
     'lane': {
+        # 차선 노드가 lateral 을 재는 지점 = 차 앞 몇 m (차선 노드 reference_distance_m 과 같아야 함, 11/04 0.5 로 정함)
+        # > 0: 그 점(차선 중앙 + 옮길 양)을 Pure Pursuit 로 따라감. 0: 예전 PD (아래 이득)
+        'reference_distance_m': 0.5,
         'kp_lateral': 1.2,
         'kd_lateral': 0.15,
         'kp_heading': 0.8,
@@ -245,6 +249,10 @@ PARAM_DEFAULTS = {
         'car_length': 0.322,       # 판단이 검사하는 차 몸통 (실차 LIMO)
         'car_width': 0.22,
         'clearance': 0.02,         # 콘 반지름(라이다)에 더하는 여유 [m]
+        'lookahead_short': 0.25,   # 후보: 짧게 보고 꽉 꺾어 도는 길 [m] (11/04, 0 = 안 씀)
+        'lookahead_long': 0.60,    # 후보: 길게 보고 부드럽게 가는 길 [m] (0 = 안 씀)
+        'w_lookahead': 0.1,        # 기본 lookahead 와 다른 만큼 벌점
+        'tight_speed': 0.15,       # 안 닿는 길이 없을 때 속도 [m/s] (멈추지 않고 덜 닿는 쪽으로. 0.05 는 기어가다 40초 넘김 - 11/04 녹화)
         'w_offset': 1.0,           # 길을 옆으로 옮긴 만큼 벌점 (가운데 선호)
         'w_margin': 1.0,           # 콘과 여유 보너스 (margin_cap 까지만)
         'margin_cap': 0.10,
@@ -368,6 +376,11 @@ def _stamp_sec(header):
     return header.stamp.sec + header.stamp.nanosec * 1e-9
 
 
+# 차선 인지 한 개. lateral/heading 은 차 앞 x_ref 지점 값 (x_ref 는 찍은 뒤 간 거리만큼 줄인 값),
+# stamp 는 영상 찍은 시각 (없으면 받은 시각). 예전처럼 [0] [1] [2] 로도 읽힌다.
+LaneSample = collections.namedtuple('LaneSample', 'lateral heading confidence x_ref stamp')
+
+
 # ----------------------------------------------------------------------
 # 노드
 # ----------------------------------------------------------------------
@@ -465,9 +478,13 @@ class MissionSupervisor(Node):
 
     def _cb_lane(self, msg):
         if msg.valid:
+            now = self.clock_sec()
+            stamp = _stamp_sec(msg.header)
+            if stamp <= 0.0 or stamp > now:
+                stamp = now
             self.buf['lane'].set((float(msg.lateral_offset_m),
                                   float(msg.heading_error_rad),
-                                  float(msg.confidence)), self.clock_sec())
+                                  float(msg.confidence), stamp), now)
         else:
             self.buf['lane'].value = None        # 차선 유실 -> 페일세이프
 
@@ -609,10 +626,23 @@ class MissionSupervisor(Node):
     # 인지 조회 (State 들이 사용)
     # ------------------------------------------------------------------
     def lane_error(self, now=None):
-        """(lateral_offset_m, heading_error_rad, confidence) 또는 None."""
+        """LaneSample(lateral, heading, confidence, x_ref, stamp) 또는 None.
+
+        x_ref = 차선 노드 기준점(lane.reference_distance_m) - 영상 찍은 뒤 지금까지 간 거리 (0.1 m 아래로는 안 줄임).
+        기준점이 0 이면 x_ref 도 0 (예전 방식).
+        """
         if now is None:
             now = self.clock_sec()
-        return self.buf['lane'].get(now)
+        value = self.buf['lane'].get(now)
+        if value is None:
+            return None
+        lateral, heading, confidence, stamp = value
+        ref = float(self.lane_gains.get('reference_distance_m', 0.0))
+        x_ref = 0.0
+        if ref > 0.0:
+            age = min(max(0.0, now - stamp), self.MAX_AGE)
+            x_ref = max(0.1, ref - self.last_v * age)
+        return LaneSample(lateral, heading, confidence, x_ref, stamp)
 
     def merged_event(self, now=None, allowed=None, skip_locked=False):
         """여러 인지 노드의 이벤트를 하나로 합친다. 해당 없으면 None.

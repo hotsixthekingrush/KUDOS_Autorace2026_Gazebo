@@ -23,7 +23,7 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 
-from ar_msgs.msg import (ObstacleArray, WallArray, LaneError,
+from ar_msgs.msg import (ObstacleArray, LaneError,
                          MissionObject, MissionObjectArray)
 
 from ar_mission_supervisor.stopline import StopLineTracker
@@ -136,8 +136,6 @@ PARAM_DEFAULTS = {
         'hold_sec': 1.0,
         'creep_speed': 0.12,
         'stop_after_sec': 5.0,
-        'wall_sector_deg': 30.0,
-        'wall_max_range': 0.8,
     },
     'perception': {
         'stale_sec': 0.5,
@@ -150,6 +148,12 @@ PARAM_DEFAULTS = {
         'pedestrian_range': 1.5,   # 보행자 표지판만 따로 (유도선보다 먼저 잡혀 SLOW_ZONE 을 건너뛰지 않게)
         'confirm_frames': 2,       # 같은 이벤트가 연속 N 프레임 검출돼야 인정 (오인식 방지)
         'hold_sec': 1.0,           # YOLO 결과 유지시간 (추론이 느려도 프레임 사이가 끊기지 않게)
+        # (11/05) 옆 길 표지판 거르기: 위치가 있으면 |y_m| 이 이 안일 때만 씀 (이벤트·거리·신호등 색 전부)
+        'max_lateral': 0.7,        # 표지판·신호등·유도선 [m]
+        'sign_ab_max_lateral': 1.1,    # A/B 표지판 (3차선 가운데 섬 앞이라 옆 차선에서도 봐야 함) [m]
+        'crosswalk_max_lateral': 0.35, # 정지 기준 횡단보도 [m]
+        # (11/05) 정지선은 YOLO 횡단보도(줄무늬) 앞끝보다 이만큼 차 쪽에 있음 -> 그만큼 앞에서 선다 [m]
+        'crosswalk_to_stopline': 0.06,
     },
     'traffic_light': {
         'approach_speed': 0.2,
@@ -170,7 +174,10 @@ PARAM_DEFAULTS = {
     },
     'bump': {
         'speed': 0.2,              # 규정: 기본 속도의 1/2, 최대 0.2 m/s
-        'duration_sec': 8.0,
+        'after_sign_distance': 1.8,    # 표지판을 지나 이만큼 더 가면 끝 (odom) [m] (11/05)
+        'unknown_sign_distance': 2.0,  # 표지판 위치를 한 번도 못 받았을 때 표지판까지 거리로 침 [m]
+        'duration_sec': 8.0,       # odom 이 없을 때만: 진입 후 이 시간 뒤 끝 (예전 방식)
+        'max_duration': 30.0,      # 안전용 최대 시간 [s]
     },
     'slow_zone': {
         'speed': 0.2,
@@ -407,11 +414,12 @@ LaneSample = collections.namedtuple('LaneSample', 'lateral heading confidence x_
 # ----------------------------------------------------------------------
 class MissionSupervisor(Node):
 
-    BUFFER_KEYS = ('lane', 'scan', 'stopline', 'obstacles', 'walls', 'odom',
+    BUFFER_KEYS = ('lane', 'scan', 'stopline', 'obstacles', 'odom',
                    'event_yolo', 'event_lidar', 'event_test',
-                   'light_color', 'marker_type', 'marker_dist', 'ped_dist', 'slowline_dist')
+                   'light_color', 'marker_type', 'marker_dist', 'ped_dist', 'slowline_dist',
+                   'bump_dist')
     YOLO_KEYS = ('event_yolo', 'light_color', 'marker_type', 'marker_dist', 'ped_dist',
-                 'slowline_dist')
+                 'slowline_dist', 'bump_dist')
 
     def __init__(self):
         super().__init__('mission_supervisor')
@@ -447,8 +455,6 @@ class MissionSupervisor(Node):
             sub(String, topic, store('event_' + src, lambda m: m.data), 10)
         sub(ObstacleArray, '/perception/obstacles',
             store('obstacles', lambda m: list(m.obstacles)), 10)
-        sub(WallArray, '/perception/parking_walls',
-            store('walls', lambda m: list(m.walls)), 10)
         sub(Odometry, '/odom', store('odom', _pose_from_odom), 10)
         sub(Bool, '/supervisor/reset', self._cb_reset, 10)
 
@@ -490,6 +496,23 @@ class MissionSupervisor(Node):
 
     MAX_AGE = 1.0   # 지연 보정 상한 [s]. 시계가 어긋났을 때 거리가 터무니없이 줄지 않게
 
+    def _yolo_lateral_ok(self, o):
+        """YOLO 물체가 우리 길 것인지 (옆 거리로). 위치를 못 구했으면 판단 못 하니 인정.
+        11/05 lane_yolo_run1/run2: 위쪽 길에서 안쪽 길의 신호등(오른쪽 1.15 m)·주차 표지판(1.2 m)·
+        횡단보도(0.6~0.7 m)를 보고 TRAFFIC_LIGHT·PARKING 에 잘못 들어감.
+        트랙 파일 기준 우리 길 표지판은 차선 중앙에서 0~0.43 m.
+        LIMO 는 따로 (avoid_static.trigger_half_width, 주차는 라이다)."""
+        if o.class_id == MissionObject.LIMO or not o.position_valid:
+            return True
+        cfg = self.yolo
+        if o.class_id == MissionObject.CROSSWALK:
+            limit = cfg['crosswalk_max_lateral']
+        elif o.class_id in (MissionObject.SIGN_A, MissionObject.SIGN_B):
+            limit = cfg['sign_ab_max_lateral']
+        else:
+            limit = cfg['max_lateral']
+        return abs(o.y_m) <= limit
+
     def _latency_compensated(self, x_m, header, now):
         """사진 촬영 후 지금까지 이동한 거리만큼 앞쪽 거리를 줄인다."""
         stamp = _stamp_sec(header)
@@ -524,6 +547,8 @@ class MissionSupervisor(Node):
 
         best = {}                                    # 클래스별 가장 확실한 1개
         for o in msg.objects:
+            if not self._yolo_lateral_ok(o):
+                continue                             # 옆 길 표지판 (11/05)
             prev = best.get(o.class_id)
             if prev is None or o.confidence > prev.confidence:
                 best[o.class_id] = o
@@ -567,7 +592,8 @@ class MissionSupervisor(Node):
         # 위치를 못 구한 프레임(가까워서 박스 아래가 화면 밖 등)은 버리고, 판단이 odom 으로 이어서 추정한다.
         cw = best.get(MissionObject.CROSSWALK)
         if cw is not None and cw.position_valid:
-            dist, age = self._latency_compensated(float(cw.x_m), msg.header, now)
+            line_x = float(cw.x_m) - self.yolo['crosswalk_to_stopline']
+            dist, age = self._latency_compensated(line_x, msg.header, now)
             self.buf['stopline'].set(dist, now)
             self.dbg('stopline/age', age)
 
@@ -577,6 +603,17 @@ class MissionSupervisor(Node):
             if o is not None and o.position_valid:
                 dist, _ = self._latency_compensated(float(o.x_m), msg.header, now)
                 self.buf[key].set(dist, now)
+
+        # 방지턱·서행 표지판까지 거리 -> BUMP 가 서행을 끝낼 곳을 정할 때 씀 (11/05).
+        # 옆으로 먼 검출은 위 _yolo_lateral_ok 에서 이미 빠짐 (lane_yolo_run1: 왼쪽 2.2 m 오검출 1번).
+        # 둘 다 보이면 먼 쪽 (서행을 더 길게 = 안전한 쪽)
+        bump_signs = [o for o in (best.get(MissionObject.BUMP_SIGN),
+                                  best.get(MissionObject.SLOW_SIGN))
+                      if o is not None and o.position_valid]
+        if bump_signs:
+            far = max(bump_signs, key=lambda o: o.x_m)
+            dist, _ = self._latency_compensated(float(far.x_m), msg.header, now)
+            self.buf['bump_dist'].set(dist, now)
 
         light = best.get(MissionObject.TRAFFIC_LIGHT)
         if light is not None:
@@ -773,6 +810,10 @@ class MissionSupervisor(Node):
         """보행자 표지판까지 전방 거리 [m] 또는 None."""
         return self._latest('ped_dist')
 
+    def bump_sign_measurement(self):
+        """(방지턱·서행 표지판까지 전방 거리 [m], 수신 시각) 또는 None. 새 측정인지 시각으로 구분."""
+        return self.buf['bump_dist'].get_with_stamp(self.clock_sec())
+
     def light_color(self):
         """MissionObject.LIGHT_* 값 또는 None(최근에 신호등을 못 봄)."""
         return self._latest('light_color')
@@ -790,9 +831,6 @@ class MissionSupervisor(Node):
     def marker_distance(self):
         return self._latest('marker_dist')
 
-    def parking_walls(self):
-        return self._latest('walls')
-
     def odom_pose(self):
         """(x, y, yaw) 또는 None."""
         return self._latest('odom')
@@ -800,26 +838,6 @@ class MissionSupervisor(Node):
     def odom_yaw(self):
         pose = self._latest('odom')
         return None if pose is None else pose[2]
-
-    def wall_distances(self):
-        """좌/우 섹터 최소거리. 양쪽 모두 유효할 때만 반환."""
-        scan = self._latest('scan')
-        if scan is None:
-            return None
-        half = math.radians(self.failsafe['wall_sector_deg']) * 0.5
-        max_r = self.failsafe['wall_max_range']
-        left, right = [], []
-        for i, r in enumerate(scan.ranges):
-            if not math.isfinite(r) or r <= scan.range_min or r > max_r:
-                continue
-            a = scan.angle_min + i * scan.angle_increment
-            if abs(a - math.pi / 2.0) < half:
-                left.append(r)
-            elif abs(a + math.pi / 2.0) < half:
-                right.append(r)
-        if not left or not right:
-            return None
-        return (min(left), min(right))
 
     def forward_scan_points(self, max_range):
         """전방 스캔을 (각도, 거리) 목록으로. Follow the Gap 용."""

@@ -20,6 +20,12 @@ mission_supervisor:
       # Gazebo 조향은 초당 약 55도 (11/03 녹화). 굴려볼 때 이걸 흉내 내면 콘 놓칠 때 더 나음 (11/04 계산)
       steer_rate_deg: 55.0
 
+    bump:
+      # (11/05) Gazebo 방지턱은 0.2 m/s 로 넘으면 차가 오르막에서 0.03 m/s 로 기다가 꼭대기에서 튕겨 나감
+      # (bump_test1 방향 10도, lane_yolo_run2 88도 꺾임, 판단 명령은 0.2 직진). 0.4 는 부드럽게 넘음 (lane_run1).
+      # Gazebo 물리 문제로 보여 시뮬에서만 0.4 (사용자 선택). 실차는 params.yaml 0.2 그대로.
+      speed: 0.4
+
     avoid_static:
       # (11/04) 정적 장애물에서 옆을 긁던 문제. Gazebo 차 충돌 모양 그대로 검사 (Gazebo 파일은 안 고침):
       #   몸통 상자 앞뒤 0.19 x 좌우 0.31 (limo_car/gazebo/ackermann.xacro base_x/y_size, 실차는 0.322 x 0.22)

@@ -6,3 +6,8 @@ camera_perception_node:
 
     # 노란 선 색 필터. 기본 hls. lab 임계값은 camera_perception.yaml 값(시뮬 기준 임시값)을 그대로 씀
     color_space: hls
+
+    # 흰 점선, 가로선 제거, 선 쌍 가드는 camera_perception.yaml 값을 그대로 씀 (시뮬 기준 임시값)
+    white_enable: true
+    clean_enable: true
+    guard_need_pair: true

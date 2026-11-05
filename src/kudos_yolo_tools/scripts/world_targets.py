@@ -612,7 +612,49 @@ def viewpoints_yaml(objs, others, include):
             'regions': regions, 'avoid': avoid}
 
 
-def mission_points(objs, include):
+def obstacles(objs, others):
+    """순간이동하면 안 되는 곳 [((x, y), 반경)] — 정차 LIMO·표지판·신호등 기둥·방지턱·라바콘 (11/5)
+    차를 다른 물체와 겹치게 놓으면 물리 엔진이 터져서 로봇이 원점에 묶이고 Gazebo 화면이 죽는다"""
+    out = []
+    for o in objs:
+        if o['class'] == 'limo':
+            out.append(((float(o['center'][0]), float(o['center'][1])), 0.45))
+        elif o['class'] not in ('crosswalk', 'slow_guide_line'):
+            out.append(((float(o['center'][0]), float(o['center'][1])), 0.3))
+    r = {'sign_support': 0.3, 'speed_bump': 0.4, 'cone': 0.3, 'pedestrian_figure': 0.35}
+    for o in others:
+        if o['kind'] in r:
+            out.append(((float(o['xy'][0]), float(o['xy'][1])), r[o['kind']]))
+    return out
+
+
+def free_points(pts, obs, margin=0.25):
+    """점검 지점이 경기장 밖이거나 물체와 겹치면 옆으로 0.25/0.45 m 옮기고, 그래도 안 되면 뺀다.
+    반환 (남은 지점, 뺀 이름)"""
+    ok = lambda x, y: (ARENA[0] + margin <= x <= ARENA[1] - margin and ARENA[2] + margin <= y <= ARENA[3] - margin
+                       and all(math.hypot(x - a, y - b) > r for (a, b), r in obs))
+    out, drop = [], []
+    for p in pts:
+        d = float(p['expect_x']); yaw = float(p['yaw'])
+        tx, ty = p['x'] + d * math.cos(yaw), p['y'] + d * math.sin(yaw)
+        px, py = -math.sin(yaw), math.cos(yaw)
+        for l in (0.0, 0.25, -0.25, 0.45, -0.45):
+            x, y = p['x'] + l * px, p['y'] + l * py
+            if ok(x, y):
+                q = dict(p)
+                q['x'], q['y'] = round(x, 3), round(y, 3)
+                q['yaw'] = round(math.atan2(ty - y, tx - x), 4)
+                q['expect_x'] = round(math.hypot(d, l), 3)
+                if l:
+                    q['name'] = '%s (옆 %+.2f)' % (p['name'], l)
+                out.append(q)
+                break
+        else:
+            drop.append(p['name'])
+    return out, drop
+
+
+def mission_points(objs, include, others=()):
     pts = []
     for o in objs:
         cls = o['class']
@@ -637,6 +679,9 @@ def mission_points(objs, include):
             x, y = tx + d * math.cos(n), ty + d * math.sin(n)
             pts.append({'name': '%s %.1fm' % (o['model'], d), 'class': cls, 'x': round(x, 3), 'y': round(y, 3),
                         'yaw': round(math.atan2(ty - y, tx - x), 4), 'expect_x': d})
+    pts, drop = free_points(pts, obstacles(objs, others))
+    if drop:
+        print('점검 지점 %d개 뺌 (경기장 밖이거나 물체와 겹침): %s' % (len(drop), drop))
     return {'points': pts}
 
 
@@ -668,7 +713,7 @@ def main():
                        default_flow_style=None)
     with open(os.path.join(out, 'mission_points.yaml'), 'w') as f:
         f.write('# mission_check.py 가 차를 세울 위치 (물체 앞 거리 expect_x)\n')
-        yaml.safe_dump(mission_points(objs, include), f, allow_unicode=True, sort_keys=False,
+        yaml.safe_dump(mission_points(objs, include, others), f, allow_unicode=True, sort_keys=False,
                        default_flow_style=None)
 
     rep = ['world: %s' % world, '갈림길 표지판 그림: %s' % (sign_ab or '못 읽음'), '',

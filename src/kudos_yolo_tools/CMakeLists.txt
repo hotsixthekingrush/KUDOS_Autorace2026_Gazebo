@@ -22,6 +22,7 @@ install(PROGRAMS
   scripts/train_yolo.py
   scripts/world_targets.py
   scripts/mission_check.py
+  scripts/crosswalk_from_paint.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

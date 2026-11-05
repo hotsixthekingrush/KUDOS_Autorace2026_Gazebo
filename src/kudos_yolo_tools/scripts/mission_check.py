@@ -244,7 +244,9 @@ class MissionCheck(Node):
         tol = max(0.05, 0.10 * ex) if cls == 'crosswalk' else max(0.15, 0.15 * ex)
         mx = sum(xs) / len(xs) if xs else None
         my = sum(ys) / len(ys) if ys else None
-        if n == 0:
+        if cls == 'crosswalk' and ex <= 0.3 and hits == 0:
+            verdict = '해당없음'      # 0.3 m 안쪽은 횡단보도가 화면 아래로 사라짐 → 판단이 odom 으로 (정상)
+        elif n == 0:
             verdict = '결과없음'
         elif hits == 0:
             verdict = '없음'
@@ -290,7 +292,8 @@ class MissionCheck(Node):
                  r['err_cm'], r['light'], r['other'], r['note']))
         by = {}
         for r in self.rows:
-            by.setdefault(r['class'], []).append(r['verdict'])
+            if r['verdict'] != '해당없음':
+                by.setdefault(r['class'], []).append(r['verdict'])
         P('\n클래스별 OK: ' + ', '.join('%s %d/%d' % (c, v.count('OK'), len(v)) for c, v in by.items()))
         P('YOLO 결과 받은 수: %d | 저장: %s\n' % (self.n_msgs, self.csv_path if self.rows else '(없음)'))
         self.done = True

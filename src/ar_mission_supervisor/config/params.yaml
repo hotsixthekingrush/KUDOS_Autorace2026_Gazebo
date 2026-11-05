@@ -12,6 +12,10 @@ mission_supervisor:
     lane:
       reference_distance_m: 0.5  # 차선 노드가 lateral 을 재는 차 앞 거리 (차선 노드 값과 같아야 함, 11/04 0.5)
                                  # > 0: 그 점을 Pure Pursuit 로 따라감 / 0: 예전 PD (아래 이득)
+      # 미션 기준 좌표(3차선·주차)를 잡을 때 카메라 차선은 이 조건일 때만 씀. 아니면 차 위치·방향 그대로 (11/05,
+      # static_run4: 3차선 안에서 카메라 차선 confidence 0.00, 방향 -24도 -> 기준 좌표가 틀어져 트랙 밖으로 감)
+      frame_min_confidence: 0.3
+      frame_max_heading_deg: 15.0
       kp_lateral: 1.2
       kd_lateral: 0.15
       kp_heading: 0.8
@@ -98,7 +102,14 @@ mission_supervisor:
       speed: 0.25
       lookahead: 0.45          # 차선 따라가기 Pure Pursuit 거리 [m]
       lookahead_short: 0.25    # 보통(lookahead)으로 굴려서 막히면 이걸로 급하게 꺾어 봄 (0 이면 안 씀) [m]
-      plan_horizon: 1.8        # 후보 차선(가운데 3곳)마다 이 거리만큼 미리 굴려 보고 충돌 검사 [m]
+      plan_horizon: 1.8        # 후보 차선(가운데 3곳)마다 이 거리만큼 미리 굴려 보고 충돌 검사 [m] (감속·정지 판단)
+      plan_depth: 2            # 2: 그 차선으로 가다가 옆 차선으로 한 번 더 옮기는 길까지 봄 (1 = 차선 하나만, 11/04 까지 방식) (11/05)
+      plan_horizon_long: 3.0   # plan_depth 2 일 때 굴려 보는 거리 [m]
+      switch_step: 0.3         # 이 거리마다 '여기서 옆 차선으로 옮기면' 을 굴려 봄 [m]
+      switch_margin: 0.15      # 목표 차선은 이만큼 더 멀리 갈 수 있을 때만 바꿈 [m]
+      switch_hold: 0.5         # 목표 차선을 바꾼 뒤 이 시간은 유지 (지금 목표가 곧 막히면 예외) [s]
+      edge_check: true         # 굴려 볼 때 3차선 바깥 선을 넘으면 막힌 것으로 봄 (바퀴 기준)
+      edge_margin: 0.0         # 바깥 선(1.5 x lane_width)에 더하는 여유 [m]
       limo_length: 0.322       # 장애물 LIMO 박스 (진행방향 길이 x 폭) [m]
       limo_width: 0.22
       car_length: 0.322        # 우리 차

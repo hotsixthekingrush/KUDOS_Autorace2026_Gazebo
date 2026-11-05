@@ -125,6 +125,9 @@ PARAM_DEFAULTS = {
         # 차선 노드가 lateral 을 재는 지점 = 차 앞 몇 m (차선 노드 reference_distance_m 과 같아야 함, 11/04 0.5 로 정함)
         # > 0: 그 점(차선 중앙 + 옮길 양)을 Pure Pursuit 로 따라감. 0: 예전 PD (아래 이득)
         'reference_distance_m': 0.5,
+        # 미션 기준 좌표(3차선·주차)를 잡을 때 카메라 차선을 믿는 조건 (아니면 차 위치·방향 그대로) (11/05)
+        'frame_min_confidence': 0.3,
+        'frame_max_heading_deg': 15.0,
         'kp_lateral': 1.2,
         'kd_lateral': 0.15,
         'kp_heading': 0.8,
@@ -206,6 +209,13 @@ PARAM_DEFAULTS = {
         'lookahead': 0.45,         # 차선 따라가기 Pure Pursuit 거리 [m]
         'lookahead_short': 0.25,   # 보통으로는 막힐 때 급하게 꺾어 보는 거리 (0 이면 안 씀) [m] (11/04)
         'plan_horizon': 1.8,       # 후보 차선마다 이 거리만큼 미리 굴려 보고 충돌 검사 [m]
+        'plan_depth': 2,           # 2: 그 차선으로 가다가 옆 차선으로 한 번 더 옮기는 길까지 봄 (1 = 차선 하나만, 예전) (11/05)
+        'plan_horizon_long': 3.0,  # plan_depth 2 일 때 굴려 보는 거리 [m]
+        'switch_step': 0.3,        # 이 거리마다 '여기서 옆 차선으로 옮기면' 을 굴려 봄 [m]
+        'switch_margin': 0.15,     # 목표 차선은 이만큼 더 멀리 갈 수 있을 때만 바꿈 [m]
+        'switch_hold': 0.5,
+        'edge_check': True,        # 굴려 볼 때 3차선 바깥 선을 넘으면 막힌 것으로 봄 (11/05)
+        'edge_margin': 0.0,        # 바깥 선(1.5 x lane_width)에 더하는 여유 [m]        # 목표 차선을 바꾼 뒤 이 시간은 유지 (지금 목표가 곧 막히면 예외) [s]
         'limo_length': 0.322,      # 장애물 LIMO 박스 (진행방향 길이 x 폭) [m]
         'limo_width': 0.22,
         'car_length': 0.322,       # 우리 차
@@ -654,6 +664,21 @@ class MissionSupervisor(Node):
             age = min(max(0.0, now - stamp), self.MAX_AGE)
             x_ref = max(0.1, ref - self.last_v * age)
         return LaneSample(lateral, heading, confidence, x_ref, stamp)
+
+    def lane_for_frame(self, now=None):
+        """(차선값 또는 None, 이유). 미션 기준 좌표(LaneFrame)를 잡을 때 쓸 카메라 차선 - 믿을 만할 때만.
+        None 이면 차 위치·방향을 그대로 기준으로 쓴다 (가짜 인지 때와 같음).
+        11/05 static_run4: 3차선 안에서 카메라 차선이 valid 인데 confidence 0.00, 방향 -24도라
+        기준 좌표가 24도 틀어져 트랙 밖으로 감."""
+        lane = self.lane_error(now)
+        if lane is None:
+            return None, '카메라 차선 없음'
+        g = self.lane_gains
+        if lane[2] < g['frame_min_confidence']:
+            return None, '카메라 차선 confidence %.2f < %.2f' % (lane[2], g['frame_min_confidence'])
+        if abs(lane[1]) > math.radians(g['frame_max_heading_deg']):
+            return None, '카메라 차선 방향 %.1f도 > %.1f도' % (math.degrees(lane[1]), g['frame_max_heading_deg'])
+        return lane, '카메라 차선 (방향 %.1f도, 옆 %+.2fm)' % (math.degrees(lane[1]), lane[0])
 
     def merged_event(self, now=None, allowed=None, skip_locked=False):
         """여러 인지 노드의 이벤트를 하나로 합친다. 해당 없으면 None.

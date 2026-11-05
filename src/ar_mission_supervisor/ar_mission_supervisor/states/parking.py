@@ -57,7 +57,9 @@ class Parking(SafeState):
             self.phase, self.phase_started = self.SEARCH, now
             self._fail('odom 없음')
             return
-        self.frame.begin(pose, node.lane_error())
+        lane_ref, why = node.lane_for_frame()
+        self.frame.begin(pose, lane_ref)
+        node.get_logger().info('[PARKING] 기준 좌표: %s' % (why if lane_ref is not None else '차 방향 그대로 (' + why + ')'))
         self._set_phase(self.SEARCH, now, '진입 - 오른쪽 빈칸(양옆 LIMO) 찾는 중')
 
     def run(self):

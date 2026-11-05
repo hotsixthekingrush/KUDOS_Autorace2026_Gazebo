@@ -16,8 +16,12 @@ step(now, goal) 한 번 = 한 제어 주기:
     앞 plan_horizon 만큼 미리 굴려 보고(rollout) 장애물과 닿는지 검사한다.
     (11/04) 보통(lookahead)으로 굴려서 막히는 차선은 급하게 꺾는 것(lookahead_short)도 굴려 보고
     더 멀리 가는 쪽으로 따라간다. 차 모양은 몸통 사각형 + (Gazebo 만) 바퀴를 감싼 사각형.
-  - 지금 목표 차선이 끝까지(plan_horizon) 안 닿으면 유지한다 (goal 차선이 끝까지 비면 goal 로).
-    아니면 '가장 멀리 갈 수 있는' 차선을 고른다 (지금 목표 +0.15 m, goal +0.3 m 가산).
+  - (11/05) plan_depth 2: 차선마다 '그 차선으로 가다가 switch_step 마다 옆 차선으로 한 번 더 옮기면' 까지
+    plan_horizon_long 만큼 굴려 보고 가장 멀리 가는 거리(reach)로 비교한다 (막다른 차선 피하기, static_run3).
+    굴릴 때 3차선 바깥 선을 넘어도 막힌 것으로 본다 (edge_check).
+  - 지금 목표 차선이 끝까지 안 닿으면 유지한다 (goal 차선이 끝까지 비면 goal 로).
+    아니면 reach 가 switch_margin 이상 긴 차선으로 바꾸되, 바꾼 뒤 switch_hold 초는 유지한다
+    (지금 목표가 commit_distance 안에서 막히면 바로 바꿈). goal 은 +0.3 m 가산.
   - 차선 사이(선 위)로 가는 경로는 쓰지 않는다. 고른 차선도 commit_distance 보다 짧게 닿으면
     감속하고, stop_distance 안에서 닿게 되면 선다.
   - (11/04 사용자 요청) 선 채로 backup_after 초가 지나면, 뒤가 비어 있을 때 backup_speed 로 backup_distance 만큼
@@ -58,6 +62,7 @@ class ThreeLanePlanner(object):
         self.blocked_since = None
         self.backing = None         # 후진 중이면 시작 (x, y)
         self.backups = 0
+        self.target_since = -1e9
 
     @property
     def cfg(self):
@@ -71,7 +76,9 @@ class ThreeLanePlanner(object):
         if pose is None:
             self.active = False
             return False
-        self.frame.begin(pose, self.node.lane_error())
+        lane_ref, why = self.node.lane_for_frame()
+        self.frame.begin(pose, lane_ref)
+        self.node.get_logger().info('[3차선] 기준 좌표: %s' % (why if lane_ref is not None else '차 방향 그대로 (' + why + ')'))
         cfg = self.cfg
         ghost = None
         if cfg['ghost_min_hits'] > 0:
@@ -86,6 +93,7 @@ class ThreeLanePlanner(object):
         self.blocked_since = None
         self.backing = None
         self.backups = 0
+        self.target_since = -1e9
         self.active = True
         self.released_at = None
         return True
@@ -220,6 +228,10 @@ class ThreeLanePlanner(object):
     def rollout(self, s0, d0, psi0, d_target, boxes, horizon, la=None):
         """d_target 차선으로 가는 주행을 horizon m 앞까지 굴려 보고, 닿기 전까지 간 거리 [m].
         la: Pure Pursuit 따라가는 거리 (None 이면 lookahead). 짧을수록 급하게 꺾는다."""
+        return self._roll(s0, d0, psi0, d_target, boxes, horizon, la, 0.0)[0]
+
+    def _roll(self, s0, d0, psi0, d_target, boxes, horizon, la, mark_step):
+        """rollout + mark_step [m] 마다 지나간 상태 [(간 거리, s, d, psi)] (0 이면 기록 안 함)."""
         node = self.node
         cfg = self.cfg
         wb, ms = node.wheel_base, node.max_steer
@@ -228,8 +240,10 @@ class ThreeLanePlanner(object):
         shapes = self._shapes()
         ds = 0.04
         s_, d, psi = s0, d0, psi0
+        marks = []
+        next_mark = mark_step if mark_step > 0.0 else float('inf')
         if self._car_hits(s_, d, psi, boxes, shapes):
-            return 0.0
+            return 0.0, marks
         traveled = 0.0
         while traveled < horizon:
             c, sn = math.cos(psi), math.sin(psi)
@@ -242,9 +256,61 @@ class ThreeLanePlanner(object):
             s_ += ds * math.cos(psi)
             d += ds * math.sin(psi)
             traveled += ds
-            if self._car_hits(s_, d, psi, boxes, shapes):
-                return traveled
-        return horizon
+            if self._car_hits(s_, d, psi, boxes, shapes) or self._off_edge(d, psi):
+                return traveled, marks
+            if traveled >= next_mark - 1e-9:
+                marks.append((traveled, s_, d, psi))
+                next_mark += mark_step
+        return horizon, marks
+
+    def _off_edge(self, d, psi):
+        """바퀴(Gazebo 는 바퀴 사각형, 실차는 몸통)가 3차선 바깥 선을 넘는지 (edge_check, 11/05)."""
+        cfg = self.cfg
+        if not cfg['edge_check']:
+            return False
+        if cfg['wheel_box_length'] > 0.0 and cfg['wheel_box_width'] > 0.0:
+            hl, hw = 0.5 * cfg['wheel_box_length'], 0.5 * cfg['wheel_box_width']
+        else:
+            hl, hw = 0.5 * cfg['car_length'], 0.5 * cfg['car_width']
+        reach = abs(d) + hl * abs(math.sin(psi)) + hw * abs(math.cos(psi))
+        return reach > 1.5 * self.width() + cfg['edge_margin']
+
+    def _las(self):
+        cfg = self.cfg
+        las = [cfg['lookahead']]
+        if cfg['lookahead_short'] > 0.0:
+            las.append(cfg['lookahead_short'])
+        return las
+
+    def plan(self, s_, d, psi, boxes):
+        """차선마다 {'reach', 'la', 'free'} 와 굴려 보는 거리 H.
+        reach: 그 차선으로 가다가 switch_step 마다 '여기서 옆 차선으로 한 번 더 옮기면' 까지 굴려 보고
+               가장 멀리 가는 거리 (H 까지). 막다른 차선을 피하려고 (11/05, static_run3). plan_depth 1 이면 그 차선만.
+        free:  그 차선으로만 갈 때 닿기 전까지 거리 (plan_horizon 까지, 감속·정지 판단에 씀).
+        la:    그 차선으로 갈 때 따라갈 거리 (lookahead / lookahead_short 중 reach 가 긴 것)."""
+        cfg = self.cfg
+        depth = int(cfg['plan_depth'])
+        H = max(cfg['plan_horizon_long'], cfg['plan_horizon']) if depth >= 2 else cfg['plan_horizon']
+        step = cfg['switch_step'] if depth >= 2 else 0.0
+        out = {}
+        for l1 in self.LANES:
+            best = None
+            for la in self._las():
+                f1, marks = self._roll(s_, d, psi, self.center(l1), boxes, H, la, step)
+                r = f1
+                if depth >= 2 and f1 < H - 1e-6:
+                    for a, ss, dd, pp in marks:
+                        if a >= f1 - 1e-6 or r >= H - 1e-6:
+                            break
+                        for l2 in self.LANES:
+                            if l2 != l1:
+                                r = max(r, a + self.rollout(ss, dd, pp, self.center(l2), boxes, H - a))
+                if best is None or r > best['reach'] + 1e-6:
+                    best = {'reach': r, 'la': la, 'free': min(f1, cfg['plan_horizon'])}
+                if best['reach'] >= H - 1e-6:
+                    break
+            out[l1] = best
+        return out, H
 
     def _all_boxes(self):
         cfg = self.cfg
@@ -313,45 +379,41 @@ class ThreeLanePlanner(object):
         if self.backing is not None and self._back_step(pose, s_, d, psi, now, who):
             return StepResult(pose, s_, d, psi, blocked=True)
 
-        horizon = cfg['plan_horizon']
         boxes = self._boxes(s_)
-        # 차선마다 보통(lookahead)으로 굴려 보고, 막히면 급하게 꺾는 것(lookahead_short)도 굴려 봄 (11/04)
-        las = [cfg['lookahead']]
-        if cfg['lookahead_short'] > 0.0:
-            las.append(cfg['lookahead_short'])
-        free, best_la = {}, {}
-        for lane in self.LANES:
-            free[lane], best_la[lane] = -1.0, las[0]
-            for la in las:
-                f = self.rollout(s_, d, psi, self.center(lane), boxes, horizon, la)
-                if f > free[lane] + 1e-6:
-                    free[lane], best_la[lane] = f, la
-                if f >= horizon - 1e-6:
-                    break
-        clear = [lane for lane in self.LANES if free[lane] >= horizon - 1e-6]
+        # 차선마다 굴려 봄: 보통(lookahead) / 급하게(lookahead_short, 11/04) x 한 번 더 옆 차선으로 옮기기(11/05)
+        info, horizon = self.plan(s_, d, psi, boxes)
+        reach = dict((ln, info[ln]['reach']) for ln in self.LANES)
+        free = dict((ln, info[ln]['free']) for ln in self.LANES)
+        full = [ln for ln in self.LANES if reach[ln] >= horizon - 1e-6]
         node.dbg('static/free_target', free[self.target])
+        node.dbg('static/reach_target', reach[self.target])
 
         def score(ln):
-            sc = free[ln] - 0.02 * abs(ln - self.lane)
-            if ln == self.target:
-                sc += 0.15                      # 자꾸 바꾸지 않게
+            sc = reach[ln] - 0.02 * abs(ln - self.lane)
             if goal is not None and ln == goal:
                 sc += 0.3
             return sc
 
         old = self.target
-        if goal is not None and goal in clear:
+        if goal is not None and goal in full:
             new = goal
-        elif self.target in clear:
-            new = self.target
+        elif old in full:
+            new = old
         else:
-            new = max(self.LANES, key=score)
+            # 자꾸 바꾸지 않게: switch_margin 이상 나을 때만, 바꾼 뒤 switch_hold 초는 유지
+            # (지금 목표가 commit_distance 안에서 막히면 바로 바꿈)
+            best = max(self.LANES, key=score)
+            new = old
+            if best != old and score(best) > score(old) + cfg['switch_margin']:
+                if now - self.target_since >= cfg['switch_hold'] or free[old] < cfg['commit_distance']:
+                    new = best
 
         if new != old:
             log.info('[%s] 목표 차선 %s -> %s (지금 %s / 앞 %.1fm 굴려본 결과 %s)'
                      % (who, self.name(old), self.name(new), self.name(self.lane), horizon,
-                        ' '.join('%s=%.2f' % (self.name(ln), free[ln]) for ln in self.LANES)))
+                        ' '.join('%s=%.2f' % (self.name(ln), reach[ln]) for ln in self.LANES)))
             self.target = new
+            self.target_since = now
         if self.target != self.lane:
             self.changing = True
 
@@ -386,8 +448,8 @@ class ThreeLanePlanner(object):
         node.dbg('static/target', self.target)
         node.dbg('static/d', d)
         node.dbg('static/s', s_)
-        node.dbg('static/lookahead', best_la[self.target])
-        node.publish_cmd(v, self.steer(pose, s_, self.center(self.target), v, best_la[self.target]))
+        node.dbg('static/lookahead', info[self.target]['la'])
+        node.publish_cmd(v, self.steer(pose, s_, self.center(self.target), v, info[self.target]['la']))
         return StepResult(pose, s_, d, psi)
 
     def settled(self, d, psi):

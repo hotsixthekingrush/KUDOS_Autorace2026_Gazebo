@@ -1,4 +1,4 @@
-"""기본 주행 State. 터널 대응 페일세이프는 LaneDriver 내부에서 처리한다."""
+"""기본 주행 State. 차선 유실 페일세이프(직전 명령 유지 -> 저속 직진 -> 정지)는 LaneDriver 내부에서 처리한다."""
 
 from ar_mission_supervisor.base_state import SafeState
 from ar_mission_supervisor.lane_driver import LaneDriver

@@ -82,7 +82,10 @@ class LaneDriver(object):
         node.dbg('lane/steer', steer)
 
     def _failsafe(self, lost_sec):
-        """유실 지속시간에 따른 단계적 대응."""
+        """유실 지속시간에 따른 단계적 대응: 직전 명령 유지 -> 저속 직진 -> 정지.
+        (11/05) 예전 규정(터널)용 '양옆 벽 따라가기' 단계는 뺌. 2026 규정 트랙엔 벽이 없고
+        (규정집 VII 시설물: 신호등·광고판·표지판·LIMO·방지턱·라바콘·노면 표시뿐),
+        lane_yolo_run3 에서 벽이 없는데도 라이다가 양옆 0.8 m 안에 뭔가를 봐서 켜졌음."""
         node = self.node
         cfg = node.failsafe
         node.dbg('lane/lost_sec', lost_sec)
@@ -94,24 +97,12 @@ class LaneDriver(object):
             node.publish_cmd(v, omega)
             return
 
-        # (2) 양측 벽 감지 - 벽 추종 (터널 구간 포함)
-        walls = node.wall_distances()
-        if walls is not None:
-            left, right = walls
-            node.dbg('lane/mode', 'wall')
-            node.dbg('lane/wall_err', left - right)
-            steer = node.lane_gains['kp_lateral'] * (left - right)
-            steer = max(-node.max_steer, min(node.max_steer, steer))
-            v = cfg['creep_speed']
-            node.publish_cmd(v, steering_to_omega(v, steer, node.wheel_base))
-            return
-
-        # (3) 벽도 없음 - 각속도 0으로 저속 직진
+        # (2) 각속도 0으로 저속 직진
         if lost_sec < cfg['stop_after_sec']:
             node.dbg('lane/mode', 'creep')
             node.publish_cmd(cfg['creep_speed'], 0.0)
             return
 
-        # (4) 장시간 유실 - 정차 후 재검출 대기
+        # (3) 장시간 유실 - 정차 후 재검출 대기
         node.dbg('lane/mode', 'stop')
         node.publish_stop()

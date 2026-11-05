@@ -62,6 +62,11 @@ class FakePerception(Node):
         self.declare_parameter('lateral_error', 0.0)
         self.declare_parameter('heading_error', 0.0)
         self.declare_parameter('distance', 1.5)        # 정지선/표지판까지 거리 (시나리오 시작 기준)
+        self.declare_parameter('sign_position_valid', True)  # bump: false 면 표지판 위치 없이 보냄 (시험용)
+        self.declare_parameter('sign_lateral', -0.35)        # bump: 표지판 좌우 위치 (왼쪽 +) [m]
+        self.declare_parameter('side_lateral', -1.15)        # side_signs: 신호등·주차 표지판 좌우 위치 (왼쪽 +) [m]
+        self.declare_parameter('lane_valid', True)           # false 면 차선 valid=false (차선 유실 시험)
+        self.declare_parameter('crosswalk_after_line', 0.06) # 정지선 -> 횡단보도 줄무늬 앞끝 (판단 yolo.crosswalk_to_stopline 과 같게)
         self.declare_parameter('light_color', 'red')
         self.declare_parameter('stopline_visible', 1.2)   # 횡단보도(정지 기준) 위치가 이 거리 안에서만 나옴
         self.declare_parameter('stopline_min', 0.25)      # 이보다 가까우면 박스 아래가 화면 밖 (위치 없음)
@@ -184,7 +189,7 @@ class FakePerception(Node):
 
         lane = LaneError()
         lane.header = self._header()
-        lane.valid = True
+        lane.valid = bool(self._p('lane_valid'))
         lane.lateral_offset_m = float(self._p('lateral_error'))
         lane.heading_error_rad = float(self._p('heading_error'))
         lane.confidence = 1.0
@@ -223,9 +228,11 @@ class FakePerception(Node):
         self.objects.append(o)
 
     def _stopline(self, dist):
-        """정지 기준 = YOLO 횡단보도의 가까운 끝. 보이는 거리 안일 때만 위치와 함께 보냄."""
-        if self._p('stopline_min') <= dist <= self._p('stopline_visible'):
-            self._object(MissionObject.CROSSWALK, dist, 0.0)
+        """dist = 정지선까지 거리. YOLO 처럼 횡단보도 줄무늬 앞끝(정지선 + crosswalk_after_line)을 보낸다.
+        보이는 거리 안일 때만 위치와 함께 보냄."""
+        cw = dist + float(self._p('crosswalk_after_line'))
+        if self._p('stopline_min') <= cw <= self._p('stopline_visible'):
+            self._object(MissionObject.CROSSWALK, cw, 0.0)
 
     # ------------------------------------------------------------------
     # 시나리오
@@ -245,7 +252,20 @@ class FakePerception(Node):
         self._stopline(line)
 
     def _s_bump(self):
-        self._object(MissionObject.SLOW_SIGN, self._ahead(self._p('distance')), -0.35)
+        self._object(MissionObject.SLOW_SIGN, self._ahead(self._p('distance')),
+                     float(self._p('sign_lateral')))
+        if self.objects and not self._p('sign_position_valid'):
+            self.objects[-1].position_valid = False
+
+    def _s_side_signs(self):
+        """옆 길 표지판 시험 (11/05): 빨간 신호등(distance+0.3)·주차 표지판(distance+2.0)을 side_lateral 옆에,
+        정지 기준 횡단보도(distance)를 side_lateral x 0.6 옆에 둔다 (Gazebo 위쪽 길에서 본 안쪽 길과 비슷)."""
+        d = self._ahead(self._p('distance'))
+        lat = float(self._p('side_lateral'))
+        self._object(MissionObject.TRAFFIC_LIGHT, d + 0.3, lat, MissionObject.LIGHT_RED)
+        self._object(MissionObject.PARKING_SIGN, d + 2.0, lat)
+        if self._p('stopline_min') <= d <= self._p('stopline_visible'):
+            self._object(MissionObject.CROSSWALK, d, 0.6 * lat)
 
     def _s_slow_zone(self):
         """distance 앞에서 유도선 시작, zigzag_length 뒤 끝, 그 0.2m 뒤 보행자 정지선."""

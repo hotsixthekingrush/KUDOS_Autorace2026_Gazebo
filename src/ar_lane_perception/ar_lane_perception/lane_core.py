@@ -8,32 +8,9 @@ import numpy as np
 import cv2
 
 DEFAULTS = {
-    # 노란 선 색 필터: 'hls'(기본, 기존 동작) 또는 'lab'
-    'color_space': 'hls',
     # 색 임계값 (HLS)
     'lane_h_l': 0, 'lane_l_l': 90, 'lane_s_l': 100,
     'lane_h_h': 60, 'lane_l_h': 220, 'lane_s_h': 255,
-    # 색 임계값 (LAB, OpenCV 8bit: L 0~255, a/b 128이 무채색).
-    # 시뮬 렌더 영상의 노란 선 픽셀 분포로 정한 임시값. 선배 임계값 아님, 실차에서 다시 맞출 것.
-    'lab_l_min': 100, 'lab_l_max': 255,
-    'lab_a_min': 90, 'lab_a_max': 140,
-    'lab_b_min': 175, 'lab_b_max': 255,
-    # 흰 선 (3차선 흰 점선). color_space를 따라 HLS / LAB 임계값을 씀.
-    # 시뮬 흰 선 실측 LAB (255,128,128), HLS (0,255,0) 기준 임시값. 실차 미확인.
-    'white_enable': True,
-    'white_lab_l_min': 170, 'white_lab_l_max': 255,
-    'white_lab_a_min': 118, 'white_lab_a_max': 138,
-    'white_lab_b_min': 118, 'white_lab_b_max': 138,
-    'white_h_l': 0, 'white_l_l': 170, 'white_s_l': 0,
-    'white_h_h': 180, 'white_l_h': 255, 'white_s_h': 60,
-    # 가로선 / 가로 줄무늬 제거 (노랑, 흰색 마스크 각각에 적용)
-    'clean_enable': True,
-    'blob_angle_max_deg': 30.0,  # (a) 지면 덩어리 장축이 현재 헤딩과 이 각도 넘게 다르면 제거
-    'blob_min_len_m': 0.08,      # (a) 장축 길이가 이보다 짧으면 방향 검사 안 함 (방향이 불안정)
-    'blob_max_width_m': 0.08,    # (a) 덩어리 평균 폭(지면 면적/장축 길이)이 이보다 넓으면 제거
-    'row_width_ratio': 0.6,      # (b) 한 행의 한 구간 지면 폭 >= lane_width_m * 이 값이면 그 행 제외
-    'row_max_runs': 3,           # (b) 한 행에서 같은 색 구간이 차선 폭 하나(lane_width_m + guard_width_tol_m)
-                                 #     안에 이 개수 이상 들어 있으면 그 행 제외. 옆 도로 선(0.2 m 바깥)은 세지 않음
     # 선 추적 (영상 px)
     'side': 'both',           # both | left | right
     'center_x': 320,          # 처음 시작할 때만 좌/우 선을 가르는 기준
@@ -59,29 +36,6 @@ DEFAULTS = {
     'guard_width_tol_m': 0.10,   # 두 선 간격이 lane_width_m에서 이만큼 넘게 벗어나면 잘못 잡은 것
     'guard_jump_m': 0.10,        # 직전 정상값 대비 lateral이 한 번에 이만큼 넘게 바뀌면 의심
     'guard_memory_sec': 1.0,     # 직전 정상값을 이 시간까지만 비교 기준으로 씀
-    'guard_head_jump_rad': 0.35,  # 애매한 프레임은 헤딩도 직전 정상값과 이 안(약 20도)으로 이어져야 valid
-    # 폭이 lane_width_m에 맞는 선 쌍이 한 줄도 없는 프레임(한쪽 선 추정만 있음)은
-    # 인접 차선 선일 수 있으므로 직전 정상값과 이어질 때만 valid
-    'guard_need_pair': True,
-    # 판단팀은 confidence를 보지 않고 valid만 본다. 그래서 confidence가 이보다 낮으면 valid=false로 내린다
-    # (선 점들이 직선에 안 맞거나 가까운/먼 헤딩이 크게 다름: 지그재그, 줄무늬, 잘못 이은 선). 0이면 끔
-    'min_confidence': 0.05,
-    # 차선 갈라짐 (3차선 서쪽 섬 끝 접근): valid=false.
-    # 흰 선을 차선 선으로 쓴 프레임에서, 직전 정상 차선(중심 ± lane_width_m/2 - fork_margin_m) 안쪽에
-    # 노란 구간(제거 전 마스크)이 있는 줄이 fork_min_rows 이상이면 갈라짐. (b)로 뺀 줄(방지턱 줄무늬)은 세지 않는다.
-    # 갈라짐을 본 뒤에는 갈라짐 직전 차선과 lateral guard_jump_m 안으로 다시 이어질 때까지,
-    # 또는 마지막 갈라짐 뒤 fork_timeout_sec가 지날 때까지 valid=false (섬을 지나며 옆 차선을 잡는 것 방지).
-    'single_tol_m': 0.05,       # 두 선 줄의 중심선에서 이만큼 넘게 벗어난 한쪽 선 추정 줄 = 충돌. 0이면 끔
-    'single_conflict': 'invalid',  # 충돌 처리: 'invalid'(그 프레임 valid=false) | 'reject'(그 줄만 버림)
-    # 시작 확인: 직전 프레임이 invalid였으면, 이번 추정이 직전 프레임의 추정(raw)과 heading confirm_head_rad,
-    # lateral confirm_lat_m 안으로 맞을 때만 valid (invalid 구간 뒤 첫 프레임 하나의 튀는 값 차단). 0이면 끔
-    'confirm_head_rad': 0.035,
-    'confirm_lat_m': 0.03,
-    'fork_enable': True,
-    'fork_margin_m': 0.08,
-    'fork_min_rows': 2,
-    'fork_timeout_sec': 3.0,
-    'fork_min_white_rows': 2,   # 흰 선을 차선 선으로 쓴 줄이 이만큼 있을 때만 갈라짐 검사 (3차선 구간에서만)
 }
 
 
@@ -96,14 +50,6 @@ class LaneCore:
         # 가드 상태: 마지막으로 내보낸 정상(valid) lateral과 그 시각
         self.ref_lat = None
         self.ref_t = None
-        self.ref_head = None      # 마지막 valid 헤딩 (덩어리 방향 검사 기준)
-        self.ref_head_t = None
-        self.invalid_run = 0
-        self.prev_raw, self.last_ok = None, False
-        self.fork_active, self.fork_t, self.fork_ref = False, None, 0.0
-        self.stats = dict(blobs_removed=0, rows_dropped=0, fork_rows=0, white_rows=0, single_rejected=0)
-        self._gmap_key = None
-        self._gmap = None
 
     # ------------------------------------------------------------------
     # 선 추적 (detect_line.py와 동일)
@@ -146,154 +92,6 @@ class LaneCore:
             R = None
         return L, R
 
-    def lane_mask(self, img):
-        """노란 선 마스크 (uint8, 0/255). color_space 파라미터로 HLS / LAB 선택."""
-        g = self.p.get
-        if g('color_space') == 'lab':
-            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-            return cv2.inRange(lab,
-                               np.array([g('lab_l_min'), g('lab_a_min'), g('lab_b_min')]),
-                               np.array([g('lab_l_max'), g('lab_a_max'), g('lab_b_max')]))
-        hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
-        return cv2.inRange(hls,
-                           np.array([g('lane_h_l'), g('lane_l_l'), g('lane_s_l')]),
-                           np.array([g('lane_h_h'), g('lane_l_h'), g('lane_s_h')]))
-
-    def white_mask(self, img):
-        """흰 선 마스크 (uint8, 0/255). color_space를 따른다."""
-        g = self.p.get
-        if g('color_space') == 'lab':
-            lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-            return cv2.inRange(lab,
-                               np.array([g('white_lab_l_min'), g('white_lab_a_min'), g('white_lab_b_min')]),
-                               np.array([g('white_lab_l_max'), g('white_lab_a_max'), g('white_lab_b_max')]))
-        hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
-        return cv2.inRange(hls,
-                           np.array([g('white_h_l'), g('white_l_l'), g('white_s_l')]),
-                           np.array([g('white_h_h'), g('white_l_h'), g('white_s_h')]))
-
-    def ground_maps(self, w, h):
-        """픽셀별 지면 좌표 (X 전방, Y 왼쪽)와 지면 면적 [m^2]. 지평선 위는 nan. 파라미터가 같으면 캐시."""
-        p = self.p
-        key = (w, h, p['focal_px'], p['cam_height_m'], p['cam_pitch_rad'], p['cam_x_m'])
-        if key != self._gmap_key:
-            f, hc, th = p['focal_px'], p['cam_height_m'], p['cam_pitch_rad']
-            uu, vv = np.meshgrid(np.arange(w, dtype=np.float64), np.arange(h, dtype=np.float64))
-            xc, yc = (uu - w / 2.0) / f, (vv - h / 2.0) / f
-            down = yc * np.cos(th) + np.sin(th)
-            fwd = np.cos(th) - yc * np.sin(th)
-            ok = down > 1e-6
-            t = np.where(ok, hc / np.where(ok, down, 1.0), np.nan)
-            X = t * fwd + p['cam_x_m']
-            Y = -t * xc
-            # 한 픽셀이 덮는 지면 면적 = |dX/dv| * |dY/du|
-            dxdv = np.abs(np.gradient(X, axis=0))
-            dydu = t / f
-            self._gmap = (X, Y, dxdv * dydu)
-            self._gmap_key = key
-        return self._gmap
-
-    def clean_mask(self, mask, y0, y1):
-        """(a) 가로 방향이거나 너무 넓은 지면 덩어리 제거. mask[y0:y1]만 본다. 반환 (마스크, 제거 개수)."""
-        g = self.p.get
-        h, w = mask.shape[:2]
-        X, Y, A = self.ground_maps(w, h)
-        sub = mask[y0:y1]
-        n, lab, stats, _ = cv2.connectedComponentsWithStats((sub > 0).astype(np.uint8), connectivity=8)
-        if n <= 1:
-            return mask, 0
-        ref = self.ref_head if self.ref_head is not None else 0.0
-        amax = np.radians(g('blob_angle_max_deg'))
-        out = mask.copy()
-        removed = 0
-        idx = lab.ravel()
-        order = np.argsort(idx, kind='stable')
-        bounds = np.searchsorted(idx[order], np.arange(n + 1))
-        Xs, Ys, As = X[y0:y1].ravel(), Y[y0:y1].ravel(), A[y0:y1].ravel()
-        for k in range(1, n):
-            pix = order[bounds[k]:bounds[k + 1]]
-            px, py = Xs[pix], Ys[pix]
-            ok = np.isfinite(px)
-            if ok.sum() < 3:
-                continue
-            px, py, area = px[ok], py[ok], As[pix][ok].sum()
-            cx, cy = px.mean(), py.mean()
-            cov = np.cov(np.vstack([px - cx, py - cy]))
-            ev, evec = np.linalg.eigh(cov)
-            v = evec[:, 1]
-            proj = (px - cx) * v[0] + (py - cy) * v[1]
-            length = max(proj.max() - proj.min(), 1e-3)
-            width = area / length
-            ang = np.arctan2(v[1], v[0])
-            d = (ang - ref + np.pi / 2) % np.pi - np.pi / 2
-            bad = width > g('blob_max_width_m') or (length >= g('blob_min_len_m') and abs(d) > amax)
-            if bad:
-                sl = lab == k
-                out[y0:y1][sl] = 0
-                removed += 1
-        return out, removed
-
-    def row_groups(self, mask, y, w, h):
-        """한 추적 줄의 구간 중심 목록. (b) 넓은 구간이나 구간 수 초과면 None (그 줄 제외)."""
-        band = mask[max(y - 2, 0):y + 3, :]
-        cols = np.nonzero(band.any(axis=0))[0]
-        if len(cols) == 0:
-            return []
-        groups = np.split(cols, np.where(np.diff(cols) > 8)[0] + 1)
-        if self.p['clean_enable']:
-            _, Y, _ = self.ground_maps(w, h)
-            lim = self.p['row_width_ratio'] * self.p['lane_width_m']
-            for gp in groups:
-                if abs(Y[y, gp[0]] - Y[y, gp[-1]]) >= lim:
-                    return None
-            k = int(self.p['row_max_runs'])
-            if k >= 2 and len(groups) >= k:
-                span = self.p['lane_width_m'] + self.p['guard_width_tol_m']
-                yc = sorted(Y[y, int(round(gp.mean()))] for gp in groups)
-                if any(yc[i + k - 1] - yc[i] <= span for i in range(len(yc) - k + 1)):
-                    return None
-        return [gp.mean() for gp in groups]
-
-    @staticmethod
-    def _line_at(pts, y):
-        """점 (idx, y, u) 마지막 두 개를 이은 직선의 줄 y 위치. 점이 2개 미만이면 None."""
-        if len(pts) < 2:
-            return None
-        (_, ya, ua), (_, yb, ub) = pts[-2], pts[-1]
-        if ya == yb:
-            return None
-        return ub + (ub - ua) / (yb - ya) * (y - yb)
-
-    def _predict(self, pts, other, y, cx0, vh):
-        """이번 프레임 점들로 줄 y의 선 위치 예측. 점이 2개 이상이면 직선 연장,
-        1개면 소실점(다른 쪽 선을 지평선까지 연장한 곳, 없으면 center_x)을 향해 원근 축소."""
-        u = self._line_at(pts, y)
-        if u is not None:
-            return u
-        _, y1, u1 = pts[-1]
-        if y1 - vh < 1.0:
-            return u1
-        vp = self._line_at(other, vh)
-        vp = cx0 if vp is None else vp
-        return vp + (u1 - vp) * (y - vh) / (y1 - vh)
-
-    def _has_pair(self, means, y, w, h):
-        return self._pick_pair(means, y, w, h) is not None
-
-    def _pick_pair(self, means, y, w, h):
-        """이력이 없을 때: 지면 간격이 lane_width_m에 맞는 이웃 선 쌍 중 차 중심에 가장 가까운 쌍."""
-        _, Y, _ = self.ground_maps(w, h)
-        lw, tol = self.p['lane_width_m'], self.p['guard_width_tol_m']
-        best, bd = None, None
-        ms = sorted(means)
-        for a, b in zip(ms, ms[1:]):
-            ya, yb = Y[y, int(round(a))], Y[y, int(round(b))]
-            if abs(abs(ya - yb) - lw) <= tol:
-                d = abs((ya + yb) / 2.0)
-                if bd is None or d < bd:
-                    best, bd = (a, b), d
-        return best
-
     def track(self, img, want_debug=False):
         """반환: gap(px, 필터 후), newL, newR, pairs, debug 영상(또는 None).
 
@@ -301,19 +99,10 @@ class LaneCore:
         """
         g = self.p.get
         h, w = img.shape[:2]
-        y0 = max(int(min(g('y_top'), g('y_bot'))) - 2, 0)
-        y1 = min(int(max(g('y_top'), g('y_bot'))) + 3, h)
-        mask = self.lane_mask(img)
-        self._ymask_raw = mask
-        self._dropped_rows = set()
-        wmask = self.white_mask(img) if g('white_enable') else None
-        self.stats = dict(blobs_removed=0, rows_dropped=0, fork_rows=0, white_rows=0, single_rejected=0)
-        if g('clean_enable'):
-            mask, k = self.clean_mask(mask, y0, y1)
-            self.stats['blobs_removed'] += k
-            if wmask is not None:
-                wmask, k = self.clean_mask(wmask, y0, y1)
-                self.stats['blobs_removed'] += k
+        hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS)
+        mask = cv2.inRange(hls,
+                           np.array([g('lane_h_l'), g('lane_l_l'), g('lane_s_l')]),
+                           np.array([g('lane_h_h'), g('lane_l_h'), g('lane_s_h')]))
         cx0 = int(g('center_x'))
         side = g('side')
         hz = g('horizon_y')
@@ -324,59 +113,31 @@ class LaneCore:
         if want_debug:
             dbg = img.copy()
             dbg[mask > 0] = (0, 0, 255)
-            if wmask is not None:
-                dbg[wmask > 0] = (255, 0, 255)
             cv2.line(dbg, (cx0, 0), (cx0, h), (0, 255, 0), 2)
 
         centers, weights, modes = [], [], ''
         newL, newR, pairs = {}, {}, []
         lastL = lastR = None
-        # 한 선을 바로 아래 줄에서 못 찾았으면(점선 끊김, (b)로 뺀 줄) 멀리 떨어진 아래 줄 위치를 그대로 쓰지 않고
-        # 이번 프레임에서 찾은 점들을 이은 직선(차선은 영상에서도 직선)으로 연장해 찾는다. _predict 참고.
-        ptsL, ptsR = [], []
-        vh = h / 2.0 - g('focal_px') * np.tan(g('cam_pitch_rad'))   # 지평선 줄
         l2 = r2 = None
         predict = bool(g('track_predict'))
-        for idx, y in enumerate(ys):
+        for y in ys:
             y = int(y)
-            means = self.row_groups(mask, y, w, h)
-            dropped = means is None
-            wset = set()
-            if wmask is not None and not (means and self._has_pair(means, y, w, h)):
-                # 흰 선은 노란 선만으로 폭이 맞는 쌍을 못 만드는 줄에서만 쓴다 (3차선 가운데 차선 등).
-                # 일반 구간의 정지선 조각, 글자, 마름모가 선 후보로 끼어드는 것을 막는다.
-                wm = self.row_groups(wmask, y, w, h)
-                wset = set(wm or [])
-                dropped = dropped or wm is None
-                means = None if means is None and wm is None else sorted((means or []) + (wm or []))
-            if dropped:
-                # 한 색이라도 (b)로 빠진 줄: 남은 색 구간은 쓰되, 다음 줄 예측은 직선 연장으로
-                self.stats['rows_dropped'] += 1
-                self._dropped_rows.add(y)
-            if means is None:
+            band = mask[max(y - 2, 0):y + 3, :]
+            cols = np.nonzero(band.any(axis=0))[0]
+            if len(cols) == 0:
                 continue
-            if len(means) == 0:
-                continue
+            groups = np.split(cols, np.where(np.diff(cols) > 8)[0] + 1)
+            means = [gp.mean() for gp in groups]
 
             exp = self.wrow.get(y, g('lane_w_bottom') * max(y - hz, 1) / max(h - hz, 1))
             pl = lastL if lastL is not None else self.prevL.get(y)
             pr = lastR if lastR is not None else self.prevR.get(y)
-            if ptsL and idx - ptsL[-1][0] >= 2:
-                pl = self._predict(ptsL, ptsR, y, cx0, vh)
-            if ptsR and idx - ptsR[-1][0] >= 2:
-                pr = self._predict(ptsR, ptsL, y, cx0, vh)
             if predict:
                 if lastL is not None and l2 is not None:
                     pl = 2 * lastL - l2
                 if lastR is not None and r2 is not None:
                     pr = 2 * lastR - r2
-            pair = None
-            if pl is None and pr is None and side == 'both':
-                pair = self._pick_pair(means, y, w, h)
-            if pair is not None:
-                L, R = pair
-            else:
-                L, R = self.find_row(means, cx0, side, exp, tol, pl, pr)
+            L, R = self.find_row(means, cx0, side, exp, tol, pl, pr)
 
             c = None
             if L is not None and R is not None:
@@ -406,16 +167,12 @@ class LaneCore:
             if c is None:
                 continue
 
-            if (L is not None and L in wset) or (R is not None and R in wset):
-                self.stats['white_rows'] += 1
             if L is not None:
                 newL[y] = L
                 l2, lastL = lastL, L
-                ptsL.append((idx, y, L))
             if R is not None:
                 newR[y] = R
                 r2, lastR = lastR, R
-                ptsR.append((idx, y, R))
             centers.append(c)
             weights.append(1.0 + (g('y_bot') - y) / max(g('y_bot') - g('y_top'), 1))
             if dbg is not None:
@@ -488,10 +245,6 @@ class LaneCore:
             C.append(G[side][y] + (-left if side == 'L' else left) * half)
             W.append(0.5)
             n_one += 1
-        C, W, n_rej = self._reject_singles(C, W)
-        if self.p['single_conflict'] == 'reject':
-            n_one -= n_rej
-        self.stats['single_rejected'] = n_rej
         if len(C) < 2:
             return 0.0, 0.0, False, 0.0, n_both, n_one
         C, W = np.array(C), np.array(W)
@@ -514,168 +267,56 @@ class LaneCore:
             conf *= np.exp(-(np.degrees(abs(np.arctan(bn) - np.arctan(coef[1]))) / 10.0) ** 2)
         return lateral, heading, True, float(np.clip(conf, 0.0, 1.0)), n_both, n_one
 
-    def _reject_singles(self, C, W):
-        """두 선 줄(W=1) 중심선과 single_tol_m 넘게 어긋나는 한쪽 선 추정 줄(W=0.5)을 찾는다.
-        중심선: 두 선 줄이 2개 이상이고 전방 0.10 m 넘게 퍼져 있으면 그 줄들의 직선,
-        아니면 두 선 줄 중심을 지나고 직전 valid 헤딩(없으면 0) 방향인 직선.
-        넓어지는 구간의 비스듬한 노란 선 하나가 맞는 쌍과 섞여 헤딩을 끌어당기는 것을 막는다.
-        single_conflict='reject'면 그 줄을 버리고, 'invalid'면 줄은 두고 개수만 돌려준다(process에서 valid=false)."""
-        tol = self.p['single_tol_m']
-        P = np.array([c for c, wt in zip(C, W) if wt == 1.0])
-        # 흰 선을 쓴 프레임(3차선 구간)에서만. 일반 코너에서는 굽은 선 때문에 한쪽 선 줄이 직선에서 벗어나는 게 정상
-        if self.stats['white_rows'] < 1:
-            return C, W, 0
-        if tol <= 0 or len(P) == 0 or len(P) == len(C):
-            return C, W, 0
-        if len(P) >= 2 and np.ptp(P[:, 0]) > 0.10:
-            b, a = np.polyfit(P[:, 0], P[:, 1], 1)
-        else:
-            b = np.tan(self.ref_head) if self.ref_head is not None else 0.0
-            a = P[:, 1].mean() - b * P[:, 0].mean()
-        cs = np.cos(np.arctan(b))
-        keep = [wt == 1.0 or abs(c[1] - (a + b * c[0])) * cs <= tol for c, wt in zip(C, W)]
-        n_bad = len(keep) - sum(keep)
-        if self.p['single_conflict'] != 'reject':
-            return C, W, n_bad
-        return [c for c, k in zip(C, keep) if k], [wt for wt, k in zip(W, keep) if k], n_bad
-
-    def pair_width_error(self, pairs, w, h, heading, newL=None, newR=None):
-        """L, R이 같이 잡힌 줄들의 차선 폭 - lane_width_m 중 절댓값 최대(없으면 None)와,
-        폭이 guard_width_tol_m 안으로 맞고 최종적으로 두 선을 다 쓴 줄 수.
+    def pair_width_error(self, pairs, w, h, heading):
+        """L, R이 같이 잡힌 줄들의 차선 폭 - lane_width_m 중 절댓값 최대. 없으면 None.
 
         영상 가로줄은 차선을 비스듬히 자르므로 base_link y 간격에 cos(heading)을 곱해 수직 폭으로 바꾼다.
         """
         c = abs(np.cos(heading))
         worst = None
-        n_good = 0
         for y, L, R in pairs:
             a, b = self.pix_to_base(L, y, w, h), self.pix_to_base(R, y, w, h)
             if a is None or b is None:
                 continue
             e = abs(abs(a[1] - b[1]) * c - self.p['lane_width_m'])
             worst = e if worst is None else max(worst, e)
-            if (e <= self.p['guard_width_tol_m'] and newL is not None
-                    and newL.get(y) == L and newR.get(y) == R):
-                n_good += 1
-        return worst, n_good
+        return worst
 
-    def fork_rows(self, lat, head, w, h):
-        """차선 띠(중심선 lat/head 기준, 양쪽에서 fork_margin_m 안쪽) 안에 노란 구간이 있는 추적 줄 수."""
-        X, Y, _ = self.ground_maps(w, h)
-        g = self.p.get
-        c1 = np.tan(head)
-        c0 = lat * np.hypot(1.0, c1) - c1 * g('reference_distance_m')
-        half = g('lane_width_m') / 2.0 - g('fork_margin_m')
-        ys = np.linspace(g('y_bot'), g('y_top'), int(g('n_rows'))).astype(int)
-        n = 0
-        for y in ys:
-            y = int(y)
-            if y in self._dropped_rows:
-                continue
-            band = self._ymask_raw[max(y - 2, 0):y + 3, :]
-            cols = np.nonzero(band.any(axis=0))[0]
-            if len(cols) == 0:
-                continue
-            for gp in np.split(cols, np.where(np.diff(cols) > 8)[0] + 1):
-                u = int(round(gp.mean()))
-                d = (Y[y, u] - (c0 + c1 * X[y, u])) * np.cos(head)
-                if abs(d) < half:
-                    n += 1
-                    break
-        return n
-
-    def _fork_check(self, ok, why, lat, head, t, w, h):
-        """차선 갈라짐 검사와 갈라짐 뒤 유지. 반환 (valid, 사유)."""
-        g = self.p.get
-        fresh = self.ref_t is not None and 0.0 <= t - self.ref_t <= g('guard_memory_sec')
-        n = 0
-        if self.stats['white_rows'] >= g('fork_min_white_rows'):
-            # 직전 정상 차선 기준 (없으면 이번 추정)
-            bl, bh = (self.ref_lat, self.ref_head if self.ref_head is not None else head) if fresh else (lat, head)
-            n = self.fork_rows(bl, bh, w, h)
-        self.stats['fork_rows'] = n
-        if n >= g('fork_min_rows'):
-            if not self.fork_active:
-                self.fork_ref = self.ref_lat if fresh else lat
-            self.fork_active, self.fork_t = True, t
-            return False, 'lane_fork'
-        if self.fork_active:
-            if not 0.0 <= t - self.fork_t <= g('fork_timeout_sec'):
-                self.fork_active = False
-            elif ok and abs(lat - self.fork_ref) <= g('guard_jump_m'):
-                self.fork_active = False
-            else:
-                return False, 'fork_hold'
-        return ok, why
-
-    def guard(self, lat, valid, n_one, width_err, t, n_good=1, head=0.0):
+    def guard(self, lat, valid, n_one, width_err, t):
         """옆 도로 선 오검출 가드. 반환: (valid, 사유 문자열 또는 '').
 
         애매한 프레임 = 한 줄에서 잡힌 두 선의 지면 간격이 lane_width_m과 크게 다르고
         (옆 도로 선이 섞였다는 뜻), 그 때문에 한쪽 선만으로 중심을 추정한 줄이 있는 경우.
         이때 남긴 선이 자기 차선 선인지 옆 도로 선인지는 한 프레임만으로는 대칭이라 알 수 없으므로,
         직전 정상값과 이어질 때만 믿는다. 직전 값이 없거나 오래됐으면 valid=false.
-        guard_need_pair가 켜져 있으면, 폭이 맞는 선 쌍(n_good)이 한 줄도 없는 프레임
-        (한쪽 선 추정만 있음: 인접 차선 선 하나만 잡았을 수도 있음)도 같은 방식으로 다룬다.
         기준값을 언제 갱신하는지는 process() 참고.
         """
         if not valid or not self.p['guard_enable']:
             return valid, ''
-        kind = ''
-        if n_one > 0 and width_err is not None and width_err > self.p['guard_width_tol_m']:
-            kind = 'ambiguous'
-        elif self.p['guard_need_pair'] and n_good == 0:
-            kind = 'single'
-        if not kind:
+        ambiguous = (n_one > 0 and width_err is not None
+                     and width_err > self.p['guard_width_tol_m'])
+        if not ambiguous:
             return True, ''
         fresh = self.ref_t is not None and 0.0 <= t - self.ref_t <= self.p['guard_memory_sec']
         if not fresh:
-            return False, kind + '_no_history'
+            return False, 'ambiguous_no_history'
         if abs(lat - self.ref_lat) > self.p['guard_jump_m']:
-            return False, kind + '_jump'
-        if (self.ref_head is not None and self.ref_head_t is not None
-                and abs(head - self.ref_head) > self.p['guard_head_jump_rad']):
-            return False, kind + '_head_jump'
+            return False, 'ambiguous_jump'
         return True, ''
 
     def process(self, img, t, want_debug=False):
         """한 프레임 처리. t: 촬영 시각 [s]. 반환 dict."""
         h, w = img.shape[:2]
-        if self.ref_head_t is not None and not 0.0 <= t - self.ref_head_t <= self.p['guard_memory_sec']:
-            self.ref_head = None      # 오래된 헤딩은 덩어리 방향 검사 기준으로 쓰지 않음 (0으로 봄)
         gap, newL, newR, pairs, dbg = self.track(img, want_debug)
         lat, head, valid, conf, n_both, n_one = self.lane_error(newL, newR, w, h)
-        werr, n_good = self.pair_width_error(pairs, w, h, head, newL, newR)
-        ok, why = self.guard(lat, valid, n_one, werr, t, n_good, head)
-        if ok and self.p['single_conflict'] != 'reject' and self.stats['single_rejected'] > 0:
-            ok, why = False, 'single_conflict'
-        if self.p['fork_enable']:
-            ok, why = self._fork_check(ok, why, lat, head, t, w, h)
-        if ok and conf < self.p['min_confidence']:
-            ok, why = False, 'low_confidence'
-        prev = self.prev_raw
-        self.prev_raw = (lat, head) if valid else None
-        if ok and not self.last_ok and self.p['confirm_head_rad'] > 0:
-            if (prev is None or abs(head - prev[1]) > self.p['confirm_head_rad']
-                    or abs(lat - prev[0]) > self.p['confirm_lat_m']):
-                ok, why = False, 'confirm'
-        self.last_ok = ok
+        werr = self.pair_width_error(pairs, w, h, head)
+        ok, why = self.guard(lat, valid, n_one, werr, t)
         if ok:
-            # 가드 기준값 갱신. 폭이 맞는 선 쌍이 없는 프레임은 옆 도로 선 하나만 잡은 것일 수도 있으므로
+            # 가드 기준값 갱신. 한쪽 선만 보인 프레임은 옆 도로 선 하나만 잡은 것일 수도 있으므로
             # 새 기준을 세우지 못하고, 이미 있는 기준을 이어 갈 때만 쓴다.
             fresh = self.ref_t is not None and 0.0 <= t - self.ref_t <= self.p['guard_memory_sec']
-            if n_good > 0 or (fresh and abs(lat - self.ref_lat) <= self.p['guard_jump_m']):
+            if n_both > 0 or (fresh and abs(lat - self.ref_lat) <= self.p['guard_jump_m']):
                 self.ref_lat, self.ref_t = lat, t
-            self.ref_head, self.ref_head_t = head, t
-            self.invalid_run = 0
-        else:
-            # valid=false가 lost_hold 프레임 넘게 이어지면 선 추적 이력을 지운다.
-            # 잘못 잡은 선을 계속 따라가며 invalid에 갇히는 것을 막고, 이력 없는 쌍 선택(차 중심에 가까운
-            # 폭 맞는 쌍)으로 다시 잡게 한다.
-            self.invalid_run += 1
-            if self.invalid_run > self.p['lost_hold']:
-                self.prevL, self.prevR = {}, {}
-                self.invalid_run = 0
         return dict(gap=gap, lateral=lat, heading=head, valid=ok, raw_valid=valid,
                     confidence=conf, single=n_one > 0, guard=why, width_err=werr,
-                    n_one=n_one, n_good=n_good, debug=dbg, **self.stats)
+                    n_one=n_one, debug=dbg)

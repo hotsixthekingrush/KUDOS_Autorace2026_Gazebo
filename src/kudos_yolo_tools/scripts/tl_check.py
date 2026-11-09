@@ -19,7 +19,13 @@ ap = argparse.ArgumentParser()
 ap.add_argument('model'); ap.add_argument('dirs', nargs='+')
 ap.add_argument('--conf', type=float, default=0.25)
 ap.add_argument('--s_min', type=int, default=90); ap.add_argument('--v_min', type=int, default=150)
+ap.add_argument('--method', default='lamp', choices=['lamp', 'hue'],
+                help='색 판정: lamp = 켜진 램프 위치 (실차, 11/9), hue = 램프 색상 (시뮬)')
+ap.add_argument('--aspect', default='1.2,3.0',
+                help='노드의 신호등 모양 검사처럼 세로/가로가 이 범위인 박스만 판정 ("" = 검사 안 함)')
+ap.add_argument('--verbose', action='store_true', help='틀린 사진마다 판정 근거(램프 밝기) 출력')
 a = ap.parse_args()
+asp = [float(v) for v in a.aspect.split(',')] if a.aspect else None
 m = YOLO(a.model)
 tl_ids = [i for i, n in m.names.items() if n == 'traffic_light']
 if not tl_ids:
@@ -28,7 +34,8 @@ TRUTH = {'red': 1, 'yellow': 2, 'green': 3, 'off': 0}
 
 for d in a.dirs:
     truth = next((v for k, v in TRUTH.items() if k in os.path.basename(os.path.normpath(d)).lower()), None)
-    imgs = sorted(glob.glob(os.path.join(d, '*.jpg')) + glob.glob(os.path.join(d, '*.png')))
+    imgs = sorted(p for p in glob.glob(os.path.join(d, '*.jpg')) + glob.glob(os.path.join(d, '*.png'))
+                  if not os.path.basename(p).startswith('_'))     # _color_debug.jpg 등 제외
     os.makedirs(os.path.join(d, 'labels'), exist_ok=True); os.makedirs(os.path.join(d, '_check'), exist_ok=True)
     found = right = 0; wrong = {}
     for p in imgs:
@@ -38,15 +45,21 @@ for d in a.dirs:
         for b, c in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.conf.cpu().numpy()):
             x1, y1, x2, y2 = b
             lines.append('0 %.6f %.6f %.6f %.6f' % ((x1+x2)/2/w, (y1+y2)/2/h, (x2-x1)/w, (y2-y1)/h))
+            if asp and not (asp[0] <= (y2 - y1) / max(x2 - x1, 1) <= asp[1]):
+                continue          # 노드에서도 버려질 박스 (신호등 모양 아님)
             if best is None or c > best[1]: best = (b, c)
         open(os.path.join(d, 'labels', os.path.splitext(os.path.basename(p))[0] + '.txt'), 'w').write('\n'.join(lines))
         tag = 'NOBOX_'
         if best is not None:
             found += 1
-            col, why = lc.classify(im, best[0], a.s_min, a.v_min)
+            col, why = lc.classify_by(a.method, im, best[0], a.s_min, a.v_min)
             ok = truth is None or col == truth
             right += ok
-            if not ok: wrong[lc.NAMES[col]] = wrong.get(lc.NAMES[col], 0) + 1
+            if not ok:
+                wrong[lc.NAMES[col]] = wrong.get(lc.NAMES[col], 0) + 1
+                if a.verbose:
+                    bw, bh = best[0][2] - best[0][0], best[0][3] - best[0][1]
+                    print('  %s %dx%d %s → %s' % (os.path.basename(p), bw, bh, lc.NAMES[col], why))
             tag = '' if ok else 'WRONG_'
             x1, y1, x2, y2 = [int(v) for v in best[0]]
             cv2.rectangle(im, (x1, y1), (x2, y2), (0, 255, 0) if ok else (0, 0, 255), 2)

@@ -130,6 +130,9 @@ class YoloDetectorNode(Node):
         p('edge_reject_classes', ['marker_left', 'marker_right', 'sign_a', 'sign_b', 'parking_sign'])
         p('light_s_min', 90)        # 신호등 색 판정: 켜진 램프로 볼 최소 채도
         p('light_v_min', 150)       #                 최소 밝기
+        # 색 판정 방식 (11/9): 'hue' = 램프 색상 투표 (시뮬), 'lamp' = 어느 램프가 켜졌나 + 위치 (실차.
+        #   실물 렌즈가 꺼져 있어도 빨강/주황/초록이라 hue 는 판정 불가였음)
+        p('light_method', 'hue')
         # 신호등 모양 검사 (11/4, M1 광고 모니터 대응). 화면 속 그림 신호등·원은 크기나 비율이 다름
         #   실제 본체 12 x 20.5 cm → 세로/가로 1.71. 깊이가 있으면 박스 높이로 실제 높이(m)를 계산해 검사
         #   통과한 후보 중 가장 확실한 1개를 보냄 (예전: 무조건 conf 최고 1개)
@@ -167,6 +170,7 @@ class YoloDetectorNode(Node):
         self.edge_classes = set(x for x in g('edge_reject_classes') if x)
         self.light_s_min = int(g('light_s_min'))
         self.light_v_min = int(g('light_v_min'))
+        self.light_method = str(g('light_method'))
         self.light_check = bool(g('light_check'))
         self.light_aspect = (float(g('light_aspect_min')), float(g('light_aspect_max')))
         self.light_h = (float(g('light_h_min_m')), float(g('light_h_max_m')))
@@ -333,7 +337,7 @@ class YoloDetectorNode(Node):
                 obj.position_source = src
             color = None
             if d['name'] == 'traffic_light':
-                color, why = lc.classify(frame, d['box'], self.light_s_min, self.light_v_min)
+                color, why = lc.classify_by(self.light_method, frame, d['box'], self.light_s_min, self.light_v_min)
                 if self.has_light:
                     obj.light_color = int(color)
             out.objects.append(obj)

@@ -30,6 +30,7 @@ yolo_detector_node:
     ema_reset_sec: 0.5
     edge_reject_px: 4               # 화면 가장자리에 잘린 A/B/P 박스 버림 (0 = 끔)
     light_s_min: 90                 # 신호등 색: 켜진 램프 최소 채도 [실차 튜닝]
+    light_method: "hue"            # 시뮬: 램프 색상 투표 (11/5 점검 빨강 15/15)
     light_v_min: 150                #             최소 밝기 [실차 튜닝]
     light_check: true               # 신호등 모양 검사 (광고 모니터 대응, 11/4). 끄면 예전처럼 conf 최고 1개
     light_aspect_min: 1.2           # 박스 세로/가로 (실물 20.5/12 = 1.71)

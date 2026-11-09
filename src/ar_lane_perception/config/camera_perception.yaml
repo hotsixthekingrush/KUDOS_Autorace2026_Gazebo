@@ -6,9 +6,6 @@ camera_perception_node:
     publish_debug_image: false
     debug_image_num: 2                     # 0: 색 마스크, 그 외: 검출 표시 영상
 
-    # 노란 선 색 필터: hls(기본, 기존 동작) | lab. 런타임 변경 가능 (ros2 param set ... color_space lab)
-    color_space: hls
-
     # 색 임계값 (HLS) - 실차에서 다시 맞출 것
     lane_h_l: 0
     lane_h_h: 60
@@ -16,42 +13,6 @@ camera_perception_node:
     lane_l_h: 220
     lane_s_l: 100
     lane_s_h: 255
-
-    # 색 임계값 (LAB, OpenCV 8bit: L 0~255, a/b 128 = 무채색) - color_space: lab일 때만 사용
-    # !! 시뮬 기준 임시값. 선배(실차) 임계값이 아니다. 실차 영상으로 다시 맞출 것 !!
-    # 근거(시뮬 렌더 + Gazebo 프레임 실측): 노란 선 L246 a108 b222, 노란 50% 가장자리 L163 a114 b189,
-    #   바닥 L72 a127 b132, 흰 선 L255 a128 b128, 라바콘 L152 a190 b197. README 참고
-    lab_l_min: 100
-    lab_l_max: 255
-    lab_a_min: 90      # a: 노랑 106~119, 바닥/흰색 126~128 -> a로는 못 가름. 상한 140은 라바콘(a190) 제외용
-    lab_a_max: 140
-    lab_b_min: 175     # b: 배경 최대 133, 노랑 222 사이. 노랑 50% 이상 가장자리(b189)까지 포함
-    lab_b_max: 255
-
-    # 흰 선 (3차선 흰 점선). color_space를 따라 HLS / LAB 임계값을 씀.
-    # !! 시뮬 흰 선 실측 LAB (255,128,128) / HLS (0,255,0) 기준 임시값. 실차 미확인 !!
-    # 흰 선은 노란 선만으로 폭이 맞는 쌍을 못 만드는 줄에서만 후보로 씀 (일반 구간 정지선/글자 조각 차단)
-    white_enable: true
-    white_lab_l_min: 170
-    white_lab_l_max: 255
-    white_lab_a_min: 118
-    white_lab_a_max: 138
-    white_lab_b_min: 118
-    white_lab_b_max: 138
-    white_h_l: 0
-    white_h_h: 180
-    white_l_l: 170
-    white_l_h: 255
-    white_s_l: 0
-    white_s_h: 60
-
-    # 가로선 / 가로 줄무늬 제거 (노랑, 흰 마스크 각각). README 참고
-    clean_enable: true
-    blob_angle_max_deg: 30.0    # (a) 지면 덩어리 장축이 현재 헤딩과 이 각도 넘게 다르면 제거 (정지선, 시작 테이프)
-    blob_min_len_m: 0.08        # (a) 장축이 이보다 짧은 덩어리는 방향 검사 안 함
-    blob_max_width_m: 0.08      # (a) 덩어리 평균 폭(지면 면적/장축 길이)이 이보다 넓으면 제거
-    row_width_ratio: 0.6        # (b) 한 행의 한 구간 폭 >= lane_width_m * 0.6 이면 그 행 제외
-    row_max_runs: 3             # (b) 한 행에 같은 색 구간이 차선 폭 하나(lane_width_m+guard_width_tol_m) 안에 3개 이상이면 제외 (방지턱 줄무늬)
 
     # 선 추적 (영상 px)
     side: both
@@ -82,21 +43,3 @@ camera_perception_node:
     guard_width_tol_m: 0.10     # 한 줄의 두 선 폭이 lane_width_m에서 이만큼 넘게 다르면 옆 도로 선이 섞인 것으로 봄
     guard_jump_m: 0.10          # 그런 프레임은 직전 정상 lateral과 이 안으로 이어질 때만 valid
     guard_memory_sec: 1.0       # 직전 정상값을 비교 기준으로 쓰는 최대 시간
-    guard_head_jump_rad: 0.35   # 애매한 프레임은 헤딩도 직전 정상값과 이 안(약 20도)으로 이어져야 valid
-    guard_need_pair: true       # 폭이 lane_width_m에 맞는 선 쌍이 한 줄도 없는 프레임(한쪽 선 추정만)도 직전 정상값과 이어질 때만 valid
-    min_confidence: 0.05        # confidence가 이보다 낮으면 valid=false (판단팀은 valid만 봄). 0이면 끔
-    # 흰 선을 쓴 프레임(3차선 구간)에서, 맞는 선 쌍의 중심선과 single_tol_m 넘게 어긋나는 한쪽 선 추정 줄이 섞이면
-    # single_conflict=invalid: 그 프레임 valid=false / reject: 그 줄만 버림. (넓어지는 구간 비스듬한 노란 선 차단)
-    single_tol_m: 0.05
-    single_conflict: invalid
-    # 시작 확인: 직전 프레임이 invalid였으면 이번 추정이 직전 추정과 heading 0.035 rad(2도), lateral 0.03 m 안일 때만 valid. 0이면 끔
-    confirm_head_rad: 0.035
-    confirm_lat_m: 0.03
-    # 차선 갈라짐 (3차선 서쪽 섬 끝 접근): 흰 선을 차선 선으로 쓴 줄이 fork_min_white_rows 이상인 프레임에서
-    # 직전 정상 차선 안쪽(양쪽 선에서 fork_margin_m 안)에 노란 구간이 있는 줄이 fork_min_rows 이상이면 valid=false.
-    # 그 뒤 갈라짐 직전 차선으로 다시 이어지거나 fork_timeout_sec가 지날 때까지 valid=false 유지. 시뮬 기준 임시값
-    fork_enable: true
-    fork_margin_m: 0.08
-    fork_min_rows: 2
-    fork_min_white_rows: 2
-    fork_timeout_sec: 3.0

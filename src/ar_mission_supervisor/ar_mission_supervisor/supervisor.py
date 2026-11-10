@@ -131,11 +131,18 @@ PARAM_DEFAULTS = {
         'kp_lateral': 1.2,
         'kd_lateral': 0.15,
         'kp_heading': 0.8,
+        # (11/10) 기본 주행(LANE_FOLLOWING) 코너 감속: 차선 방향이 크게 틀어졌거나 확신도가 낮으면 corner_speed.
+        # 조건이 풀려도 corner_hold_sec 동안은 감속 유지 (코너 안에서 값이 흔들려 빨라졌다 느려졌다 안 하게)
+        'corner_speed': 0.2,
+        'corner_heading_deg': 15.0,
+        'corner_min_confidence': 0.3,
+        'corner_hold_sec': 1.0,
     },
     'failsafe': {
         'hold_sec': 1.0,
         'creep_speed': 0.12,
         'stop_after_sec': 5.0,
+        'creep_keep_steer': True,  # (11/10) 저속 구간에서 직전 조향각 유지 (false = 예전처럼 직진)
     },
     'perception': {
         'stale_sec': 0.5,

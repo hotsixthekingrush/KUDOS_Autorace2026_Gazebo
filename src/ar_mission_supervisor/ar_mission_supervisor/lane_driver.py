@@ -17,6 +17,7 @@ class LaneDriver(object):
         self.d_term = 0.0
         self.lost_since = None
         self.last_cmd = (0.0, 0.0)
+        self.last_steer = 0.0
 
     def step(self, target_speed, offset=0.0):
         """차선이 보이면 추종, 유실이면 페일세이프. 매 주기 1회 호출.
@@ -74,6 +75,7 @@ class LaneDriver(object):
         omega = steering_to_omega(target_speed, steer, node.wheel_base)
         lateral, heading = lane[0] + offset, lane[1]
         self.last_cmd = (target_speed, omega)
+        self.last_steer = steer
         node.publish_cmd(target_speed, omega)
 
         node.dbg('lane/mode', 'track')
@@ -82,7 +84,9 @@ class LaneDriver(object):
         node.dbg('lane/steer', steer)
 
     def _failsafe(self, lost_sec):
-        """유실 지속시간에 따른 단계적 대응: 직전 명령 유지 -> 저속 직진 -> 정지.
+        """유실 지속시간에 따른 단계적 대응: 직전 명령 유지 -> 저속(직전 조향각 유지) -> 정지.
+        (11/10) 저속 구간은 직진 대신 직전 조향각을 유지한다 (creep_keep_steer). 직선에선 직전 조향이 거의 0이라
+        예전과 같고, 곡선에선 계속 돈다. lane_yolo_run3·차선 팀원 시험: 코너에서 차선을 놓친 뒤 직진해서 바깥 선을 넘음.
         (11/05) 예전 규정(터널)용 '양옆 벽 따라가기' 단계는 뺌. 2026 규정 트랙엔 벽이 없고
         (규정집 VII 시설물: 신호등·광고판·표지판·LIMO·방지턱·라바콘·노면 표시뿐),
         lane_yolo_run3 에서 벽이 없는데도 라이다가 양옆 0.8 m 안에 뭔가를 봐서 켜졌음."""
@@ -97,10 +101,12 @@ class LaneDriver(object):
             node.publish_cmd(v, omega)
             return
 
-        # (2) 각속도 0으로 저속 직진
+        # (2) 저속 - 직전 조향각 유지 (같은 곡률). creep_keep_steer false 면 직진
         if lost_sec < cfg['stop_after_sec']:
             node.dbg('lane/mode', 'creep')
-            node.publish_cmd(cfg['creep_speed'], 0.0)
+            v = cfg['creep_speed']
+            steer = self.last_steer if cfg['creep_keep_steer'] else 0.0
+            node.publish_cmd(v, steering_to_omega(v, steer, node.wheel_base))
             return
 
         # (3) 장시간 유실 - 정차 후 재검출 대기

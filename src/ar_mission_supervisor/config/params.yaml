@@ -19,11 +19,21 @@ mission_supervisor:
       kp_lateral: 1.2
       kd_lateral: 0.15
       kp_heading: 0.8
+      # (11/10) 기본 주행 코너 감속 (사용자 선택). 차선 방향이 corner_heading_deg 보다 틀어졌거나 확신도가
+      #   corner_min_confidence 아래면 corner_speed. 조건이 풀려도 corner_hold_sec 동안 유지.
+      #   차선 팀원 시험: 0.4 는 두 번째 코너 이탈, 0.2 는 통과. run3: 코너 0.5 m 전부터 확신도 0.
+      corner_speed: 0.2
+      corner_heading_deg: 15.0
+      corner_min_confidence: 0.3
+      corner_hold_sec: 1.0
 
     failsafe:
       hold_sec: 1.0
       creep_speed: 0.12
       stop_after_sec: 5.0
+      # (11/10) 저속 구간에서 직전 조향각 유지 (사용자 선택). 직선은 거의 0 이라 예전과 같고, 곡선에선 계속 돔.
+      #   false = 예전처럼 직진 (run3: 코너에서 직진해 맵 밖으로 떨어짐)
+      creep_keep_steer: true
       # (11/05) 예전 규정(터널)용 벽 따라가기(wall_sector_deg, wall_max_range)는 뺌 - 2026 트랙엔 벽 없음
 
     perception:

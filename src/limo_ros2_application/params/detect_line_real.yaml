@@ -1,0 +1,34 @@
+# 실차용 detect_line 설정 (예전 라인트레이싱: detect_line + limo_control). 코드는 그대로, 값만.
+#   ros2 run limo_ros2_application detect_line --ros-args --params-file <이 파일>
+# 카메라 토픽은 코드 기본값 /camera/color/image_raw (실차) 그대로라 바꿀 것이 없다.
+/detect_line:
+  ros__parameters:
+    debug_image_num: 2          # 0: 색 마스크, 그 외: 검출 표시 영상 (/debug_image)
+
+    # 노란색 HLS: 실차에서 추출한 값 (H12-30, L90-210, S50-255)
+    lane_h_l: 12
+    lane_h_h: 30
+    lane_l_l: 90
+    lane_l_h: 210
+    lane_s_l: 50
+    lane_s_h: 255
+
+    # 화면 크기에 기대는 값 (픽셀, 640x480 기준). 실차 카메라가 640x480 이면 그대로 맞다.
+    # 다른 해상도면 가로 값(center_x, lane_w_bottom, track_tol, max_step)은 폭 비율로,
+    # 세로 값(y_top, y_bot, horizon_y)은 높이 비율로 바꿔야 한다.
+    center_x: 320               # 화면 가로 가운데
+    y_top: 320                  # 추적 줄 맨 위
+    y_bot: 470                  # 추적 줄 맨 아래
+    n_rows: 8
+    horizon_y: 260              # 처음 예상 폭 계산에만 씀 (시뮬 카메라 기준 값, 실차 미확정)
+    lane_w_bottom: 560          # 처음 예상 폭 계산에만 씀 (시뮬 카메라 기준 값, 실차 미확정)
+    track_tol: 90
+    smooth: 0.7
+    max_step: 100.0
+    lost_hold: 5
+    side: both
+    track_predict: false
+
+    # 팀 차선 노드(ar_lane_perception)와 /perception/lane_error 가 겹치지 않게 끔
+    publish_lane_error: false
+    use_sim_time: false

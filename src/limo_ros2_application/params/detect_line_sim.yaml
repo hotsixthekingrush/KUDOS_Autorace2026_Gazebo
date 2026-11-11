@@ -1,0 +1,7 @@
+# 시뮬(Gazebo) 전용 덮어쓰기. tools/2_line.sh가 detect_line.yaml 다음에 읽는다.
+# 실물 launch(track_application_launch.py)는 이 파일을 읽지 않는다.
+/detect_line:
+  ros__parameters:
+    # 시뮬 트랙(kudos_arena track_paint, track.png)에서 잰 선 중심 간 차선 폭: 0.520 m
+    # (track.json의 lane.width 0.02는 칠해진 선 굵기라 차선 폭이 아님)
+    lane_width_m: 0.52

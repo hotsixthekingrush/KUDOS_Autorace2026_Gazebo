@@ -1,0 +1,12 @@
+# 실차용 limo_control 설정 (예전 라인트레이싱). /distance_y(px) -> /cmd_vel PD 제어.
+#   ros2 run limo_ros2_application limo_control --ros-args --params-file <이 파일>
+# !! 판단 노드(ar_mission_supervisor)와 같이 켜면 /cmd_vel 이 겹친다. 반드시 판단 노드를 끄고 쓸 것 !!
+/limo_control:
+  ros__parameters:
+    default_speed: 0.2          # 0.2 부터 시작
+    p_gain: 0.005               # Gazebo 에서 쓰던 값 (tools/2_line.sh 0.2 0.005). 실차에서 다시 맞출 것
+    d_gain: 0.0                 # 흔들리면 0.005 부터 올려 볼 것
+    max_ang: 1.0                # angular.z 상한
+    slow_gap: 150.0             # |gap| 이 이 값이면 속도 최저
+    min_speed_ratio: 0.4        # 최저 속도 비율 (0.2 * 0.4 = 0.08 m/s)
+    use_sim_time: false

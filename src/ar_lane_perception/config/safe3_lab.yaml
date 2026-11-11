@@ -25,9 +25,9 @@ camera_perception_node:
     width_min_m: 0.40
     width_max_m: 0.95
     width_max_step_m: 0.03
-    width_stale_sec: 3.0
-    lane_width_default_m: 0.50   # (가) 실측 없음 / 3초 넘게 지남
-    lane_width_corner_m: 0.75    # (나) 한 선 프레임에서 보이는 선이 휘었을 때
+    width_stale_sec: 30.0        # 실측 폭 기억 만료 시간 [s] (코드 기본 3.0)
+    lane_width_default_m: 0.50   # (가) 실측 없음 / width_stale_sec 넘게 지남
+    lane_width_corner_m: 0.0     # (나) 곡선 보정 끔 (0 = 기억한 실측 폭 그대로). 켜려면 0.75
     single_confidence: 0.5
     pair_return_rate_mps: 0.3    # 한 선 -> 두 선 전환 때만
 

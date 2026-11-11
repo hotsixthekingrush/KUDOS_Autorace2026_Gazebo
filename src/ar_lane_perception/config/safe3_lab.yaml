@@ -1,0 +1,40 @@
+# safe3 + 실차 노란색(LAB). 기존 safe3.yaml 과 같은 규칙 구성 (fork, 시작 확인, odom 예측 켬) + 차선 폭 실측(lane-rt-width).
+# 쓰는 법: camera_perception.launch.py lane_extra:=<이 파일>   (Gazebo 는 lane_extra:=<이 파일>,<sim_lab.yaml>)
+camera_perception_node:
+  ros__parameters:
+    # --- 거절 규칙: safe3 (fork_enable, confirm_head_rad, predict_enable 만 켬)
+    clean_enable: false
+    white_enable: false
+    guard_need_pair: false
+    single_tol_m: 0.0
+    fork_enable: true
+    confirm_head_rad: 0.035
+    predict_enable: true
+    min_confidence: 0.0
+
+    # --- 노란색: 실차에서 추출한 값 (LAB: L100-215, a118-142, b143-255)
+    color_space: lab
+    lab_l_min: 100
+    lab_l_max: 215
+    lab_a_min: 118
+    lab_a_max: 142
+    lab_b_min: 143
+    lab_b_max: 255
+
+    # --- 차선 폭 실측 / 고정 폭 (코드 기본값과 같음. 조정용으로 적어 둠)
+    width_min_m: 0.40
+    width_max_m: 0.95
+    width_max_step_m: 0.03
+    width_stale_sec: 3.0
+    lane_width_default_m: 0.50   # (가) 실측 없음 / 3초 넘게 지남
+    lane_width_corner_m: 0.75    # (나) 한 선 프레임에서 보이는 선이 휘었을 때
+    single_confidence: 0.5
+    pair_return_rate_mps: 0.3    # 한 선 -> 두 선 전환 때만
+
+    # --- 카메라 값: !! 실차 값 미확정 !! 추측으로 바꾸지 않고 기존 값(시뮬 기준) 그대로 둠.
+    # 실차에서 재서 바꿀 것. 틀리면 lateral 과 실측 차선 폭이 같이 틀어진다 (cam_height_m k배 -> 전부 k배).
+    focal_px: 381.0        # 실차 값 미확정
+    cam_height_m: 0.21     # 실차 값 미확정
+    cam_pitch_rad: 0.0     # 실차 값 미확정
+    cam_x_m: 0.10          # 실차 값 미확정
+    horizon_y: 260         # 실차 값 미확정 (지금 코드는 쓰지 않음)

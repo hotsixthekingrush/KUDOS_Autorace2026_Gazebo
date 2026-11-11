@@ -533,6 +533,24 @@ class LaneCore:
             G[side] = {y: q for y, q in G[side].items() if q is not None}
         C, W = [], []
         n_both = n_one = 0
+        if bool(G['L']) != bool(G['R']):
+            # 한 선 프레임(한쪽 선만 있음): 보이는 선에 직선을 맞춘 뒤 그 직선을 반폭만큼 옮긴다.
+            # 줄마다 따로 옮기면 급한 코너(선의 곡률 반경이 반폭과 비슷)에서 옮긴 점들이 한 점으로 모여
+            # 전방 범위가 0.10 m 아래로 줄고 valid=false가 된다.
+            side = 'L' if G['L'] else 'R'
+            P = np.array([G[side][y] for y in sorted(G[side], reverse=True)])
+            n_one = len(P)
+            if n_one < 2 or np.ptp(P[:, 0]) < 0.10:
+                return 0.0, 0.0, False, 0.0, 0, n_one
+            A = np.c_[np.ones(n_one), P[:, 0]]
+            coef = np.linalg.lstsq(A, P[:, 1], rcond=None)[0]
+            rms = float(np.sqrt(np.mean((A @ coef - P[:, 1]) ** 2)))
+            heading = float(np.arctan(coef[1]))
+            x_ref = float(self.p['reference_distance_m'])
+            lateral = float((coef[0] + coef[1] * x_ref) / np.hypot(1.0, coef[1])) + (-half if side == 'L' else half)
+            self.stats['single_rejected'] = 0
+            conf = 0.5 * n_one / n_rows * np.exp(-(rms / 0.03) ** 2) * min(np.ptp(P[:, 0]) / 0.4, 1.0)
+            return lateral, heading, True, float(np.clip(conf, 0.0, 1.0)), 0, n_one
         for y in sorted(set(G['L']) | set(G['R']), reverse=True):
             if y in G['L'] and y in G['R']:
                 C.append((G['L'][y] + G['R'][y]) / 2.0)

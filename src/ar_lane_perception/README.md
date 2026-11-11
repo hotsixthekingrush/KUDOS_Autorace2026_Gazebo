@@ -262,3 +262,20 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 
 - `ar_lane_perception/lane_core.py`: 검출·lane_error·가드 (ROS 의존 없음, 오프라인 시험 가능)
 - `ar_lane_perception/camera_perception_node.py`: ROS 노드 (파라미터, 구독/발행)
+
+## 차선 폭 실시간 측정 (lane-rt-width)
+
+고정 폭 `lane_width_m`, `lane_w_bottom`, `horizon_y`는 더 이상 쓰지 않는다 (파라미터는 호환용으로만 남김).
+
+- 두 선이 같은 줄에서 함께 보이는 프레임에서만 폭(줄별 픽셀 폭 + 미터 폭)을 재서 기억한다 (`width_alpha`로 완만하게 갱신).
+- 프레임 폭이 `width_min_m`~`width_max_m`(0.40~0.95) 밖이거나 기억값에서 `width_max_step_m`(0.03) 넘게 바뀌면 기억을 갱신하지 않고,
+  추적 기록과 이어지는 선 하나만 남겨 한 선 프레임으로 처리한다 (`width_note=width_reject`).
+- 한 선 프레임: 보이는 선에 맞춘 직선을 반폭만큼 옮긴 경로. `valid=true`, `single_lane_estimated=true`, `confidence=single_confidence`(0.5).
+- 고정 폭은 한 선 프레임의 두 경우에만 쓴다. (가) 실측이 없거나 `width_stale_sec`(3초) 넘게 지남: `lane_width_default_m`.
+  (나) 보이는 선이 휘어 있음(곡률 `corner_curv_min`~`corner_curv_full`): `max(기억 폭, lane_width_corner_m)` 쪽으로 `corner_blend_per_sec` 속도로 옮김.
+- 한 선 -> 두 선 전환 때만 lateral 변화를 `pair_return_rate_mps`(0.3 m/s)로 제한한다.
+- 없앤 판정: 픽셀 비율 관문의 고정 폭 기준, `ambiguous_*`, `single_no_history/_jump/_head_jump`. `guard_need_pair`는
+  "한 선 프레임은 최근 실측 폭이 있을 때만 valid"(`single_no_width`)로 바뀌었다.
+- `/perception/lane_status`에 `kind`(pair/single), `width_meas`, `width_mem`, `width_used`, `fixed`(a=가, b=나), `width_note`, `slew`, `lat_raw`가 추가됐다.
+  노드 로그에 `width_log_sec`(5초)마다 고정 폭 사용 프레임 수(가/나)가 나온다.
+- `lane_extra`는 쉼표로 여러 yaml을 줄 수 있다 (뒤가 우선). 예: `lane_extra:=config/step0_hls.yaml,config/sim_hls.yaml`

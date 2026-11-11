@@ -316,6 +316,9 @@ PARAM_DEFAULTS = {
         'bay_d_min': -0.95,        # 윗줄 칸에 선 LIMO 만 보기 위한 범위 (기준 차선 중앙, 왼쪽 +) [m]
         'bay_d_max': -0.30,
         'park_depth': 0.57,        # 차선 중앙 -> 칸 깊이 가운데 (차선 반폭 0.25 + 선 0.02 + 칸 반 0.30) [m]
+        # (11/10) 칸 깊이 목표 = LIMO 두 대 가운데. 차선 기준(park_depth)과 depth_max_diff 넘게 다르면 둘의 중간
+        'limo_depth': True,
+        'depth_max_diff': 0.15,    # LIMO 가 칸 안이면 칸 가운데서 최대 (0.6 - 0.322)/2 = 0.14 m 벗어남 [m]
         'min_obstacle_radius': 0.05,
         'max_obstacle_radius': 0.40,
         'merge_distance': 0.20,

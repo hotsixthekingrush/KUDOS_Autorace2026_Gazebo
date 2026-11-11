@@ -8,9 +8,17 @@
            오른쪽에서 칸 하나 건너(간격 2 x bay_pitch) 나란히 선 LIMO 2대를 찾으면
            그 가운데가 목표 칸. 뒷축이 (칸 중심 - turn_radius) 에 오면 TURN.
            (지나쳤으면 그 지점까지 천천히 후진한 뒤 TURN)
+           LIMO 는 안 움직이므로 지금까지 본 위치의 평균으로 쌓는다 (11/10).
   TURN   : 반지름 turn_radius 원호를 따라 오른쪽으로 90도 (원호 오차를 피드백으로 보정).
            turn_radius 는 실제 최소 회전반경(실차 약 0.46 m)보다 조금 크게 잡아 보정 여유를 둔다.
-  ALIGN  : 칸 깊이 가운데(park_depth)까지 전진/후진하며 방향(-90도)을 맞추고 정지.
+           시작할 때 칸 깊이 목표를 정한다 (11/10):
+             limo_depth 켜짐 = LIMO 두 대 가운데의 깊이. 기준 좌표 방향이 틀어져도 점 자체는 맞다.
+             단, 차선 기준 깊이(park_depth)와 depth_max_diff 넘게 다르면 둘의 중간 + 경고.
+             (Gazebo parking_run1: 차가 3.6도 틀어져 있는데 차선 오차 0 이라 기준 방향이 틀어짐
+              -> 차선 기준 깊이로는 칸 중심보다 10 cm 더 들어가 앞 모서리가 선에 걸침.
+              같은 녹화로 계산하면 LIMO 가운데 = 칸 중심에서 앞뒤 1 cm, 깊이 2 cm(얕은 쪽).
+              라이다가 가까운 LIMO 는 앞면만 봐서 중심이 도로 쪽으로 3~7 cm 쏠리기 때문)
+  ALIGN  : 칸 깊이 목표까지 전진/후진하며 방향(-90도)을 맞추고 정지.
   PARKED : 정지 유지 (마지막 미션이므로 기본 주행으로 돌아가지 않음).
 실패(빈칸 못 찾음, 시간 초과) 시 정지 후 외부 리셋을 기다린다.
 규정: 차체 네 모서리가 모두 칸 안이면 15점, 1곳 걸치면 7점, 2곳 이상이면 0점.
@@ -40,17 +48,21 @@ class Parking(SafeState):
         self.phase = self.SEARCH
         self.phase_started = 0.0
         self.gap_s = None
+        self.gap_d = None           # LIMO 두 대 가운데의 d (칸 깊이 가운데로 씀)
         self.gap_hits = 0
         self.center = None
+        self.target_d = None        # ALIGN 깊이 목표 (TURN 시작 때 정함)
 
     def on_enter(self):
         node = self.node
         cfg = node.parking
         self.driver.reset()
-        self.map = ObstacleMap(merge=cfg['merge_distance'])
+        self.map = ObstacleMap(merge=cfg['merge_distance'], average=True)
         self.gap_s = None
+        self.gap_d = None
         self.gap_hits = 0
         self.center = None
+        self.target_d = None
         now = node.clock_sec()
         pose = node.odom_pose()
         if pose is None:
@@ -106,12 +118,15 @@ class Parking(SafeState):
 
         gap = self._find_gap(s_, cfg)
         if gap is not None:
-            if self.gap_s is None or abs(gap - self.gap_s) > cfg['gap_match']:
-                self.gap_s, self.gap_hits = gap, 1
+            gs, gd = gap
+            if self.gap_s is None or abs(gs - self.gap_s) > cfg['gap_match']:
+                self.gap_s, self.gap_d, self.gap_hits = gs, gd, 1
             else:
-                self.gap_s += 0.3 * (gap - self.gap_s)
+                self.gap_s += 0.3 * (gs - self.gap_s)
+                self.gap_d += 0.3 * (gd - self.gap_d)
                 self.gap_hits += 1
         node.dbg('parking/gap_s', self.gap_s)
+        node.dbg('parking/gap_d', self.gap_d)
 
         wb = node.wheel_base
         rear_s = s_ - 0.5 * wb * math.cos(psi)
@@ -127,10 +142,12 @@ class Parking(SafeState):
             if rear_s >= start - 0.005:
                 rear_d = d - 0.5 * wb * math.sin(psi)
                 self.center = (rear_s, rear_d - cfg['turn_radius'])
+                self.target_d, how = self._depth_target(cfg)
+                node.dbg('parking/target_d', self.target_d)
                 node.publish_stop()
                 self._set_phase(self.TURN, now,
-                                '빈칸 확인 (칸 중심 s=%.2fm, 차 s=%.2fm) - 오른쪽 원호 진입 시작'
-                                % (self.gap_s, s_))
+                                '빈칸 확인 (칸 중심 s=%.2fm, 차 s=%.2fm, 깊이 %s) - 오른쪽 원호 진입 시작'
+                                % (self.gap_s, s_, how))
                 return
             speed = cfg['final_speed'] if start - rear_s < cfg['slow_distance'] else cfg['search_speed']
         else:
@@ -149,8 +166,22 @@ class Parking(SafeState):
             mid = 0.5 * (a['s'] + b['s'])
             if mid < s_car - cfg['turn_radius'] - 0.5:
                 continue                        # 이미 한참 지나간 칸
-            return mid
+            return mid, 0.5 * (a['d'] + b['d'])
         return None
+
+    def _depth_target(self, cfg):
+        """ALIGN 깊이 목표 d 와 로그용 설명. LIMO 가운데 깊이를 쓰되 차선 기준과 너무 다르면 중간."""
+        lane_d = -cfg['park_depth']
+        if not cfg['limo_depth'] or self.gap_d is None:
+            return lane_d, '차선 기준 %.2fm' % -lane_d
+        diff = self.gap_d - lane_d
+        if abs(diff) > cfg['depth_max_diff']:
+            target = 0.5 * (self.gap_d + lane_d)
+            self.node.get_logger().warn(
+                '[PARKING] LIMO 가운데 깊이 %.2fm 가 차선 기준 %.2fm 와 %.2fm 차이 (허용 %.2fm) - 중간 %.2fm 사용'
+                % (-self.gap_d, -lane_d, abs(diff), cfg['depth_max_diff'], -target))
+            return target, '중간 %.2fm' % -target
+        return self.gap_d, 'LIMO 가운데 %.2fm (차선 기준 %.2fm)' % (-self.gap_d, -lane_d)
 
     # ------------------------------------------------------------------
     # TURN : 원호 추종 (오른쪽 90도)
@@ -185,7 +216,8 @@ class Parking(SafeState):
     def _align(self, now, cfg, pose):
         node = self.node
         s_, d, psi = self.frame.car(pose)
-        ts, td = self.gap_s, -cfg['park_depth']
+        ts = self.gap_s
+        td = self.target_d if self.target_d is not None else -cfg['park_depth']
         c, sn = math.cos(psi), math.sin(psi)
         e_long = (ts - s_) * c + (td - d) * sn          # 차 앞 방향으로 남은 거리
         e_lat = -(ts - s_) * sn + (td - d) * c          # 차 왼쪽 방향으로 벗어난 거리

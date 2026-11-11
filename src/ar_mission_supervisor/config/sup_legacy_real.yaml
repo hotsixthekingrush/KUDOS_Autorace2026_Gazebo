@@ -1,0 +1,21 @@
+# 실차 시험용: 예전 제어기(limo_control)식 차선 추종. params.yaml 뒤에 얹는다.
+#   ros2 run ar_mission_supervisor supervisor --ros-args --params-file <config>/params.yaml --params-file <config>/sup_legacy_real.yaml
+# 판단팀 검토 전. kp/kd/slow_lat 은 Gazebo 값이라 실차에서 다시 맞출 것.
+mission_supervisor:
+  ros__parameters:
+    base_speed: 0.2                 # 0.2 부터
+    cmd_angular_is_steering: false  # 실차 limo_base: angular.z = 각속도
+    lane_legacy:
+      enable: true
+      min_ratio: 0.4                # 최저 속도 0.2 * 0.4 = 0.08 m/s
+      slow_lat: 0.17                # |lateral| 이 이 값이면 속도 최저 [m]
+      kp: 5.5                       # 각속도 = kp * lateral [rad/s per m]
+      kd: 5.5                       # + kd * lateral 변화율
+      d_smooth: 0.3
+      max_omega: 1.0                # 각속도 상한 [rad/s]
+      output_steer_angle: false     # 실차: 각속도를 그대로 angular.z 로
+    # 차선 노드만 켜고 시험할 때 다른 미션 상태로 넘어가지 않게 (LANE_FOLLOWING 에 머무름)
+    perception:
+      debounce_count: 1000000       # 미션 이벤트가 이만큼 연속으로 와야 넘어감 = 사실상 끔 (기본 3)
+    avoid_static:
+      lidar_trigger: false          # 라이다 장애물로 AVOID_STATIC 에 들어가지 않음

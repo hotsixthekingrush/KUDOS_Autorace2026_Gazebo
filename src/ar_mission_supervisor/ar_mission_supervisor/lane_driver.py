@@ -9,6 +9,7 @@ class LaneDriver(object):
 
     def __init__(self, node):
         self.node = node
+        self.legacy = False       # True: lane_legacy.enable 이면 예전 제어기식으로 (LANE_FOLLOWING 만 켠다)
         self.reset()
 
     def reset(self):
@@ -18,6 +19,8 @@ class LaneDriver(object):
         self.lost_since = None
         self.last_cmd = (0.0, 0.0)
         self.last_steer = 0.0
+        self.lg_prev = None       # lane_legacy: 직전 (lateral, 찍은 시각)
+        self.lg_rate = 0.0        # lane_legacy: 평활한 lateral 변화율 [m/s]
 
     def step(self, target_speed, offset=0.0):
         """차선이 보이면 추종, 유실이면 페일세이프. 매 주기 1회 호출.
@@ -69,8 +72,39 @@ class LaneDriver(object):
         steer = g['kp_lateral'] * lateral + g['kd_lateral'] * self.d_term + g['kp_heading'] * heading
         return clamp(steer, -node.max_steer, node.max_steer)
 
+    def _drive_legacy(self, lane, target_speed, offset=0.0):
+        """예전 제어기(limo_control)식: lateral 에 비례한 각속도 + 변화율 항, lateral 이 클수록 감속."""
+        node = self.node
+        cfg = node.lane_legacy
+        lateral, stamp = lane[0] + offset, lane[4]
+        if self.lg_prev is not None and stamp != self.lg_prev[1]:
+            dt = stamp - self.lg_prev[1]
+            if 0.02 < dt < 1.0:
+                raw = (lateral - self.lg_prev[0]) / dt
+                a = cfg['d_smooth']
+                self.lg_rate = (1.0 - a) * self.lg_rate + a * raw
+        if self.lg_prev is None or stamp != self.lg_prev[1]:
+            self.lg_prev = (lateral, stamp)
+        ratio = max(cfg['min_ratio'], 1.0 - abs(lateral) / max(cfg['slow_lat'], 1e-6))
+        if getattr(node, 'lane_single', False):
+            ratio = cfg['min_ratio']
+        v = target_speed * ratio
+        omega = clamp(cfg['kp'] * lateral + cfg['kd'] * self.lg_rate, -cfg['max_omega'], cfg['max_omega'])
+        self.last_cmd = (v, omega)
+        # 유실 때 저속 구간(creep_keep_steer)이 쓰는 직전 조향각: 같은 곡률의 조향각
+        self.last_steer = math.atan(node.wheel_base * omega / v) if v > 1e-3 else 0.0
+        node.publish_cmd(v, omega, as_steering=cfg['output_steer_angle'])
+        node.dbg('lane/mode', 'track')
+        node.dbg('lane/lateral', lateral)
+        node.dbg('lane/heading', lane[1])
+        node.dbg('lane/omega', omega)
+        node.dbg('lane/speed', v)
+
     def _drive(self, lane, now, target_speed, offset=0.0):
         node = self.node
+        if self.legacy and node.lane_legacy['enable']:
+            self._drive_legacy(lane, target_speed, offset)
+            return
         steer = self.lane_steer(lane, now, offset)
         omega = steering_to_omega(target_speed, steer, node.wheel_base)
         lateral, heading = lane[0] + offset, lane[1]

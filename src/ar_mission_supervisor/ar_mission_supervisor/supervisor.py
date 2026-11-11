@@ -144,6 +144,24 @@ PARAM_DEFAULTS = {
         'stop_after_sec': 5.0,
         'creep_keep_steer': True,  # (11/10) 저속 구간에서 직전 조향각 유지 (false = 예전처럼 직진)
     },
+    # 예전 제어기(limo_control)식 차선 추종. LANE_FOLLOWING 상태에서만 쓴다. enable=false 면 기존 동작 그대로.
+    #   속도 = base_speed * max(min_ratio, 1 - |lateral| / slow_lat). single_lane_estimated 프레임은 min_ratio 까지 감속.
+    #   각속도 = kp * lateral + kd * (lateral 변화율, d_smooth 로 평활), +-max_omega 로 자름.
+    #   켜면 lane.corner_* 코너 감속은 쓰지 않는다 (감속이 겹치지 않게).
+    # 환산: 예전 gap [px] 과 차선 노드 lateral [m] 은 Gazebo 저장 기록에서 약 880 px/m.
+    #   slow_gap 150 px -> 0.17 m, p_gain 0.005 rad/s/px -> 4.4 rad/s/m, d_gain 0.005 -> 4.4 rad/s per m/s
+    # output_steer_angle: true 면 각속도를 같은 곡률의 조향각으로 바꿔 angular.z 에 넣는다 (Gazebo 아커만 플러그인).
+    #   false 면 각속도를 그대로 angular.z 로 (실차 limo_base). cmd_angular_is_steering 과 따로 둔다.
+    'lane_legacy': {
+        'enable': False,
+        'min_ratio': 0.4,
+        'slow_lat': 0.17,
+        'kp': 4.4,
+        'kd': 4.4,
+        'd_smooth': 0.3,
+        'max_omega': 1.0,
+        'output_steer_angle': False,
+    },
     'perception': {
         'stale_sec': 0.5,
         'debounce_count': 3,
@@ -539,6 +557,7 @@ class MissionSupervisor(Node):
             self.buf['lane'].set((float(msg.lateral_offset_m),
                                   float(msg.heading_error_rad),
                                   float(msg.confidence), stamp), now)
+            self.lane_single = bool(msg.single_lane_estimated)   # lane_legacy 감속용
         else:
             self.buf['lane'].value = None        # 차선 유실 -> 페일세이프
 
@@ -868,14 +887,15 @@ class MissionSupervisor(Node):
     # ------------------------------------------------------------------
     # 제어 출력
     # ------------------------------------------------------------------
-    def publish_cmd(self, v, omega):
+    def publish_cmd(self, v, omega, as_steering=None):
+        """as_steering: None 이면 cmd_angular_is_steering 을 따름. True/False 면 그 값 (lane_legacy.output_steer_angle)."""
         if not (math.isfinite(v) and math.isfinite(omega)):
             self.get_logger().warn('비정상 제어값 - 정지')
             self.publish_stop()
             return
         msg = Twist()
         msg.linear.x = float(v)
-        if self.cmd_angular_is_steering:
+        if self.cmd_angular_is_steering if as_steering is None else as_steering:
             # Gazebo gazebo_ros_ackermann_drive 는 angular.z 를 각속도가 아니라 조향각으로 쓴다
             # (target_rot = angular.z * sign(linear.x)). 실차 limo_base 는 각속도(r = v / w).
             # 판단은 어디서나 각속도로 계산하고, 보낼 때만 같은 곡률의 조향각으로 바꾼다.

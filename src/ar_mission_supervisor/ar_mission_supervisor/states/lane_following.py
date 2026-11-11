@@ -22,6 +22,7 @@ class LaneFollowing(SafeState):
         SafeState.__init__(self, node, 'LANE_FOLLOWING', self.OUTCOMES,
                            lockout_on_exit=False)
         self.driver = LaneDriver(node)
+        self.driver.legacy = True      # lane_legacy.enable 이면 예전 제어기식 감속·조향 (이 상태에서만)
         self.slow_until = None
         self.slow = False
 
@@ -61,6 +62,9 @@ class LaneFollowing(SafeState):
             if outcome is not None:
                 return outcome
 
-            self.driver.step(self._speed(node.clock_sec()))
+            if node.lane_legacy['enable']:
+                self.driver.step(node.base_speed)      # 감속은 LaneDriver._drive_legacy 가 한다 (코너 감속과 겹치지 않게)
+            else:
+                self.driver.step(self._speed(node.clock_sec()))
             self.sleep()
         return 'aborted'

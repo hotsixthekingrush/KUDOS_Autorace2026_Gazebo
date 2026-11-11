@@ -1,0 +1,13 @@
+# Gazebo 시험용: 예전 제어기(limo_control)식 차선 추종. params.yaml, params_sim.yaml 뒤에 얹는다 (sim_full.launch.py 의 sup_extra).
+mission_supervisor:
+  ros__parameters:
+    base_speed: 0.4
+    lane_legacy:
+      enable: true
+      min_ratio: 0.4
+      slow_lat: 0.17
+      kp: 5.5
+      kd: 5.5
+      d_smooth: 0.3
+      max_omega: 1.0
+      output_steer_angle: true      # Gazebo 아커만 플러그인: 각속도 -> 조향각

@@ -48,6 +48,12 @@ import time
 
 import numpy as np
 import cv2
+try:   # launch 의 cpu_threads (기본 2) → OpenCV 스레드도 제한. torch 는 OMP_NUM_THREADS 를 import 때 읽음
+    _nt = int(__import__('os').environ.get('KUDOS_CPU_THREADS', '0') or 0)
+    if _nt > 0:
+        cv2.setNumThreads(_nt)
+except ValueError:
+    _nt = 0
 
 import rclpy
 from rclpy.node import Node
@@ -178,6 +184,25 @@ class YoloDetectorNode(Node):
 
         # --- 모델 로드 ---
         from ultralytics import YOLO
+        if _nt > 0:
+            try:
+                import torch
+                torch.set_num_threads(_nt)
+            except Exception:
+                pass
+            self.get_logger().info('CPU 스레드 %d 개로 제한 (launch cpu_threads, 0 = 제한 없음)' % _nt)
+        # GPU 가 없는 노트북(팀원 PC)에서 device '0' 이면 첫 사진에서 죽음 → CPU 로 바꾸고 알림 (11/11)
+        if self.device not in ('cpu', ''):
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    self.get_logger().warn('GPU(CUDA) 를 못 씀 → device "%s" 대신 cpu 로 실행 (느림, 차선 노드 몫은 '
+                                           'cpu_threads 로 남겨 둠)' % self.device)
+                    self.device = 'cpu'
+                    self.half = False
+            except ImportError:
+                self.device = 'cpu'
+                self.half = False
         weights = g('weights')
         self.model = YOLO(weights, task=None)
         self.names = self.model.names if isinstance(self.model.names, dict) \

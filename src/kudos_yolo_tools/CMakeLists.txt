@@ -23,6 +23,7 @@ install(PROGRAMS
   scripts/world_targets.py
   scripts/mission_check.py
   scripts/crosswalk_from_paint.py
+  scripts/guide_from_paint.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

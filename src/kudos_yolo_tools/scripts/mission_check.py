@@ -241,10 +241,11 @@ class MissionCheck(Node):
                 c = LIGHT.get(int(got.light_color), str(got.light_color))
                 colors[c] = colors.get(c, 0) + 1
         ex = float(q['expect_x'])
-        tol = max(0.05, 0.10 * ex) if cls == 'crosswalk' else max(0.15, 0.15 * ex)
+        ground = cls in ('crosswalk', 'slow_guide_line')   # 바닥 표시: 박스 하단 ∩ 바닥으로 거리 (11/10 유도선 추가)
+        tol = max(0.05, 0.10 * ex) if ground else max(0.15, 0.15 * ex)
         mx = sum(xs) / len(xs) if xs else None
         my = sum(ys) / len(ys) if ys else None
-        if cls == 'crosswalk' and ex <= 0.3 and hits == 0:
+        if ground and ex <= 0.3 and hits == 0:
             verdict = '해당없음'      # 0.3 m 안쪽은 횡단보도가 화면 아래로 사라짐 → 판단이 odom 으로 (정상)
         elif n == 0:
             verdict = '결과없음'
@@ -257,7 +258,7 @@ class MissionCheck(Node):
         if getattr(self, 'fail_note', ''):
             note = self.fail_note
             verdict = '이동실패'
-        elif cls == 'crosswalk' and hits and not xs and ex <= 0.3:
+        elif ground and hits and not xs and ex <= 0.3:
             note = '위치 없음(화면 하단 닿음 → 판단이 odom 으로)'
         else:
             note = ''

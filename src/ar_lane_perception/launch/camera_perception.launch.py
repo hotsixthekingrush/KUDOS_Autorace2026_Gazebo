@@ -4,6 +4,7 @@
 시뮬:  ros2 launch ar_lane_perception camera_perception.launch.py sim:=true
        (image_topic 기본값이 /rgb/image_raw, lane_width_m 0.52, use_sim_time true)
 다른 토픽: image_topic:=/my/image
+색 필터:   color_space:=lab (비우면 yaml 값)
 """
 from pathlib import Path
 
@@ -24,7 +25,14 @@ def _setup(context):
     params = [str(share / 'config/camera_perception.yaml')]
     if sim:
         params.append(str(share / 'config/camera_perception_sim.yaml'))
-    params.append({'image_topic': topic, 'use_sim_time': sim})
+    extra = {'image_topic': topic, 'use_sim_time': sim}
+    cs = LaunchConfiguration('color_space').perform(context)
+    if cs:
+        extra['color_space'] = cs
+    params.append(extra)
+    more = LaunchConfiguration('lane_extra').perform(context)
+    # 맨 마지막에 덮어씀 (예: config/sim_baseline.yaml). 쉼표로 여러 개: 앞에서부터 차례로 덧씌움
+    params += [m.strip() for m in more.split(',') if m.strip()]
     return [Node(package='ar_lane_perception', executable='camera_perception_node',
                  name='camera_perception_node', output='screen', parameters=params)]
 
@@ -35,5 +43,9 @@ def generate_launch_description():
                               description='true: Gazebo (camera_perception_sim.yaml, use_sim_time)'),
         DeclareLaunchArgument('image_topic', default_value='',
                               description='비우면 sim에 따라 %s / %s' % (SIM_TOPIC, REAL_TOPIC)),
+        DeclareLaunchArgument('lane_extra', default_value='',
+                              description='추가로 덮어쓸 파라미터 yaml 경로 (쉼표로 여러 개, 뒤가 우선)'),
+        DeclareLaunchArgument('color_space', default_value='',
+                              description='hls | lab. 비우면 yaml 값'),
         OpaqueFunction(function=_setup),
     ])

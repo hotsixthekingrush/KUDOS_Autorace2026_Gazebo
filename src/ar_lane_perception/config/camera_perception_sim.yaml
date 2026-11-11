@@ -3,3 +3,19 @@ camera_perception_node:
   ros__parameters:
     # 시뮬 트랙(track_paint/track.png) 실측 선 중심 간 차선 폭. 실차 기본값은 0.55
     lane_width_m: 0.52
+
+    # 노란 선 색 필터. 기본 hls. lab 임계값은 camera_perception.yaml 값(시뮬 기준 임시값)을 그대로 씀
+    color_space: hls
+
+    # 흰 점선, 가로선 제거, 선 쌍 가드는 camera_perception.yaml 값을 그대로 씀 (시뮬 기준 임시값)
+    white_enable: true
+    clean_enable: true
+    guard_need_pair: true
+
+    # (lane-lab-fix) 가제보 카메라가 3~4 Hz(간격 최대 1.7 s, llvmpipe 소프트웨어 렌더)라 판단 쪽에서 오래된 값으로
+    # 조향이 커지고 hold(직전 명령 유지)로 트랙을 벗어났다. 마지막 valid 차선을 odom으로 옮겨 20 Hz로 발행한다.
+    predict_enable: true
+    predict_rate_hz: 20.0
+    predict_max_sec: 1.0
+    # 한쪽 선 추정만 있는 프레임은 가드 기준을 못 옮김 (방지턱 위 25 cm 오차 valid 방지). 기준은 odom으로 옮김
+    single_updates_ref: false

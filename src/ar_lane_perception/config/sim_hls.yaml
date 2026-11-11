@@ -1,0 +1,11 @@
+# Gazebo 검증용: 기존 시뮬 노란색 기준값(HLS)만. step0_hls.yaml / safe3_hls.yaml 뒤에 덧씌운다.
+#   lane_extra:=<step0_hls.yaml>,<sim_hls.yaml>
+camera_perception_node:
+  ros__parameters:
+    color_space: hls
+    lane_h_l: 0
+    lane_h_h: 60
+    lane_l_l: 90
+    lane_l_h: 220
+    lane_s_l: 100
+    lane_s_h: 255

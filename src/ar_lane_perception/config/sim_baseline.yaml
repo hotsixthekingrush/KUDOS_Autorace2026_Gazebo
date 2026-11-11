@@ -1,0 +1,5 @@
+# 비교용: lane-lab-fix 수정 전 동작 (odom 예측 끔, 한쪽 선 프레임도 가드 기준 갱신). 이 두 값이면 코드 경로가 예전과 같다.
+camera_perception_node:
+  ros__parameters:
+    predict_enable: false
+    single_updates_ref: true

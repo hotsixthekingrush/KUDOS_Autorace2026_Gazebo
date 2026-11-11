@@ -80,6 +80,8 @@ class FakePerception(Node):
         self.declare_parameter('cmd_is_steering', False)  # publish_odom 일 때: angular.z 를 조향각으로 해석 (판단 sim 설정과 맞춤)
         self.declare_parameter('wheel_base', 0.24)
         self.declare_parameter('steer_rate_deg', 0.0)   # >0 이면 조향이 이 속도로만 바뀜 (Gazebo 느린 조향 흉내, 시험용)
+        self.declare_parameter('start_yaw_deg', 0.0)    # publish_odom 일 때 처음 차 방향 (차선은 계속 오차 0 으로 보냄 = 기울어진 진입 시험, 11/10)
+        self.declare_parameter('limo_depth_offset', 0.0)  # parking: 윗줄 LIMO 를 칸 가운데보다 이만큼 더 안쪽(+)에 세움 [m]
 
         pub = self.create_publisher
         self.pub_lane = pub(LaneError, '/perception/lane_error', 10)
@@ -183,8 +185,12 @@ class FakePerception(Node):
         scenario = self._p('scenario')
         if scenario != self.last_scenario:
             if self.own_odom:
-                self.x = self.y = self.yaw = 0.0
-            self.origin = (self.x, self.y, self.yaw)
+                # 트랙(시나리오 좌표)은 +x 방향 그대로, 차만 start_yaw_deg 만큼 틀어져서 시작
+                self.x = self.y = 0.0
+                self.yaw = math.radians(float(self._p('start_yaw_deg')))
+                self.origin = (0.0, 0.0, 0.0)
+            else:
+                self.origin = (self.x, self.y, self.yaw)
             self.last_scenario = scenario
             self.get_logger().info('시나리오 %s 시작 - 현재 위치를 기준점으로 사용' % scenario)
 
@@ -317,8 +323,9 @@ class FakePerception(Node):
     def parking_limos(self):
         """주차: 목표 칸 양옆(윗줄) 2대 + 목표 칸 바로 뒤 아랫줄 1대 [(x, y)]."""
         gap = float(self._p('gap'))
-        top = -(BAY_ENTRY + 0.5 * BAY_DEPTH)
-        bottom = top - BAY_DEPTH - 0.02
+        bay_mid = -(BAY_ENTRY + 0.5 * BAY_DEPTH)
+        top = bay_mid - float(self._p('limo_depth_offset'))
+        bottom = bay_mid - BAY_DEPTH - 0.02
         return [(gap - BAY_PITCH, top), (gap + BAY_PITCH, top), (gap, bottom)]
 
     def _publish_limos(self, limos):

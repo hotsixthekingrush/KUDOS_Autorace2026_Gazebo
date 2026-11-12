@@ -16,6 +16,9 @@ mission_supervisor:
       # static_run4: 3차선 안에서 카메라 차선 confidence 0.00, 방향 -24도 -> 기준 좌표가 틀어져 트랙 밖으로 감)
       frame_min_confidence: 0.3
       frame_max_heading_deg: 15.0
+      # (11/11 사용자 선택) 차선 노드가 한 선만 보고 추정한 값(single_lane_estimated)은 기준 좌표에 안 씀
+      #   (차선 팀원 새 방식: 한 선이면 '마지막 폭의 절반' 떨어진 경로 기준 -> 넓어진 곳에선 실제 중앙과 최대 15 cm 다름)
+      frame_reject_single: true
       kp_lateral: 1.2
       kd_lateral: 0.15
       kp_heading: 0.8
@@ -26,6 +29,31 @@ mission_supervisor:
       corner_heading_deg: 15.0
       corner_min_confidence: 0.3
       corner_hold_sec: 1.0
+      corner_single_lane: true   # (11/11 사용자 선택) 한 선 추정 프레임이어도 감속 (확신도가 높게 와도). 조향은 안 줄임
+      # (11/12 사용자 선택) 차선 팀원 제안 = 예전 limo_control 식. Gazebo 첫 코너 4/4·지그재그 2/2, 실차 곡선 2곳 통과
+      #   (원본 Pure Pursuit 는 실차 곡선 통과 0번. 실차 카메라 값이 아직 시뮬 값이라 lateral 의 m 단위가 안 맞음)
+      # 조향 (모든 차선 추종 State): 회전속도 = pd_kp * lateral + pd_kd * (lateral 변화율), +-pd_max_omega.
+      #   변화율은 새 차선 값 때만, pd_d_smooth 로 평활, pd_d_jump 넘게 튀면 버림. 조향각 변화는 초당 steer_rate_max 까지.
+      #   omega_pd false = Pure Pursuit (11/04)
+      omega_pd: true
+      pd_kp: 4.0               # [rad/s per m] 팀원 실차 시험값 (kp = kd = 4.0, base_speed 0.2)
+      # (11/12 Gazebo pd_lane_run1) 한 선 구간에서 옆오차가 0.1초마다 1 cm 씩 흔들려 D 항이 P 보다 커지고 핸들이 좌우로
+      #   뒤집힘 -> kd 1 + 변화율·옆오차 평활. 같은 녹화 값으로 다시 계산: 좌우 바뀜 코너1 9->4, 지그재그 25->9, 코너2 10->2,
+      #   코너에서 한쪽으로 꺾는 크기는 그대로 (0.27~0.28 rad)
+      pd_kd: 1.0               # [rad/s per m/s]
+      pd_d_smooth: 0.15        # 변화율 평활 (새 값 비중)
+      pd_lat_tau: 0.15         # 옆오차 평활 시간 상수 [s] (0 = 안 함). 10 Hz 면 새 값 비중 약 0.5, 느린 카메라면 덜 평활
+      pd_d_jump: 0.12          # 이웃 차선 값이 이만큼 넘게 다르면 변화율 버림 [m]
+      pd_max_omega: 1.0        # [rad/s]
+      steer_rate_max: 2.0      # 조향각 변화 한계 [rad/s]
+      # 속도 (LANE_FOLLOWING 만): base_speed * max(min_ratio, 1 - |lateral| / slow_lat), 한 선 추정이면 min_ratio,
+      #   최저 min_speed, 가속 accel_max / 감속 decel_max 까지. 켜면 위 corner_* 감속은 안 씀. false = corner_* 감속
+      speed_by_lateral: true
+      slow_lat: 0.17           # [m]
+      min_ratio: 0.4
+      min_speed: 0.12          # 팀원 실차: 0.08 에서 모터가 섰다 갔다 [m/s]
+      accel_max: 0.4           # [m/s^2]
+      decel_max: 1.0           # [m/s^2]
 
     failsafe:
       hold_sec: 1.0

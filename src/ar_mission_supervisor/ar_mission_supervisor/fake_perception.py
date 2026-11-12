@@ -67,6 +67,7 @@ class FakePerception(Node):
         self.declare_parameter('side_lateral', -1.15)        # side_signs: 신호등·주차 표지판 좌우 위치 (왼쪽 +) [m]
         self.declare_parameter('lane_valid', True)           # false 면 차선 valid=false (차선 유실 시험)
         self.declare_parameter('lane_confidence', 1.0)       # 차선 확신도 (코너 감속 시험)
+        self.declare_parameter('lane_single', False)        # single_lane_estimated (한 선 추정 시험, 11/11)
         self.declare_parameter('crosswalk_after_line', 0.06) # 정지선 -> 횡단보도 줄무늬 앞끝 (판단 yolo.crosswalk_to_stopline 과 같게)
         self.declare_parameter('light_color', 'red')
         self.declare_parameter('stopline_visible', 1.2)   # 횡단보도(정지 기준) 위치가 이 거리 안에서만 나옴
@@ -200,6 +201,7 @@ class FakePerception(Node):
         lane.lateral_offset_m = float(self._p('lateral_error'))
         lane.heading_error_rad = float(self._p('heading_error'))
         lane.confidence = float(self._p('lane_confidence'))
+        lane.single_lane_estimated = bool(self._p('lane_single'))
         self.pub_lane.publish(lane)
 
         self.objects = []

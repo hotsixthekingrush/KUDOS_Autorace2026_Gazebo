@@ -1,4 +1,12 @@
-"""차선 추종 주행 로직. lane_following 과 미션 State 들이 공유한다."""
+"""차선 추종 주행 로직. lane_following 과 미션 State 들이 공유한다.
+
+조향 방식 (lane.omega_pd):
+  true (11/12 기본) - 차선 팀원 제안, 예전 limo_control 식. 회전속도 = pd_kp * lateral + pd_kd * (lateral 변화율).
+    같은 곡률의 조향각으로 바꿔 쓰고, 조향각 변화는 초당 steer_rate_max 까지.
+    Pure Pursuit 는 lateral 이 정확한 m 단위일 때만 맞게 꺾는데, 실차 카메라 값이 아직 시뮬 값이라 실차 곡선을 못 돎.
+    이 방식은 실차에서 게인을 맞추면 그 오차까지 흡수 (팀원 실차 곡선 2곳 통과, Gazebo 첫 코너 4/4).
+  false - Pure Pursuit (11/04, 아래 lane_steer 설명).
+"""
 
 import math
 
@@ -18,6 +26,11 @@ class LaneDriver(object):
         self.lost_since = None
         self.last_cmd = (0.0, 0.0)
         self.last_steer = 0.0
+        self.pd_prev = None        # omega_pd: 직전 차선 값 (평활한 lateral, 찍은 시각, 원래 lateral)
+        self.pd_rate = 0.0         # omega_pd: 평활한 lateral 변화율 [m/s]
+
+    def _pd(self):
+        return bool(self.node.lane_gains.get('omega_pd', False))
 
     def step(self, target_speed, offset=0.0):
         """차선이 보이면 추종, 유실이면 페일세이프. 매 주기 1회 호출.
@@ -36,8 +49,37 @@ class LaneDriver(object):
             self._failsafe(now - self.lost_since)
 
     # ------------------------------------------------------------------
-    def lane_steer(self, lane, now, offset=0.0):
+    def lane_omega(self, lane, offset=0.0):
+        """omega_pd: 회전속도 = pd_kp * lateral + pd_kd * (lateral 변화율), +-pd_max_omega.
+        변화율은 새 차선 값(찍은 시각이 바뀜)이 왔을 때만 다시 계산 (제어 20 Hz, 차선은 그보다 느림).
+        이웃 값이 pd_d_jump 넘게 다르면 (한 선 <-> 두 선, 차로 바뀜) 그 변화율은 버림 (D 가 튀지 않게)."""
+        g = self.node.lane_gains
+        raw = lane[0] + offset
+        stamp = lane[4]
+        if self.pd_prev is None or stamp != self.pd_prev[1]:
+            if self.pd_prev is None or abs(raw - self.pd_prev[2]) > g['pd_d_jump']:
+                # 처음이거나 튐 (한 선 <-> 두 선, 차로 바뀜): 평활을 새 값에서 다시 시작, 변화율 버림
+                filt = raw
+                self.pd_rate = 0.0
+            else:
+                # (11/12) 옆오차도 평활 (Gazebo pd_lane_run1: 한 선 구간에서 0.1초마다 1 cm 씩 흔들려 핸들이 좌우로 뒤집힘).
+                #   시간 상수 pd_lat_tau: 차선 값이 드물게 오면(느린 카메라) 그만큼 덜 평활 -> 늦어지지 않게
+                dt = stamp - self.pd_prev[1]
+                tau = g['pd_lat_tau']
+                k = 1.0 if tau <= 0.0 or dt <= 0.0 else 1.0 - math.exp(-dt / tau)
+                filt = self.pd_prev[0] + k * (raw - self.pd_prev[0])
+                if 0.02 < dt < 1.0:
+                    a = g['pd_d_smooth']
+                    self.pd_rate = (1.0 - a) * self.pd_rate + a * (filt - self.pd_prev[0]) / dt
+            self.pd_prev = (filt, stamp, raw)
+        lateral = self.pd_prev[0]
+        return clamp(g['pd_kp'] * lateral + g['pd_kd'] * self.pd_rate, -g['pd_max_omega'], g['pd_max_omega'])
+
+    def lane_steer(self, lane, now, offset=0.0, speed=None):
         """차선 오차 -> 조향각(rad). 발행은 하지 않는다 (다른 제어와 섞을 때 사용).
+
+        omega_pd (11/12 기본): lane_omega 의 회전속도를 speed 에서 같은 곡률의 조향각으로 바꿈.
+          speed 를 안 주면 마지막으로 보낸 속도 (없으면 min_speed).
 
         lane = node.lane_error() 반환값 (lateral, heading, confidence, x_ref, stamp).
         x_ref > 0 (11/04 기본): 차 앞 x_ref 지점의 차선 중앙(+ offset)을 Pure Pursuit 로 따라간다.
@@ -46,6 +88,11 @@ class LaneDriver(object):
           (제어는 20 Hz, 차선은 3~5 Hz 라 매 주기 미분하면 새 값이 올 때만 튐)
         """
         node = self.node
+        if self._pd():
+            omega = self.lane_omega(lane, offset)
+            v = speed if speed is not None else getattr(node, 'last_v', 0.0)
+            v = max(abs(v), node.lane_gains['min_speed'], 1e-3)
+            return clamp(math.atan(node.wheel_base * omega / v), -node.max_steer, node.max_steer)
         # lateral = 로봇 기준 차선 중앙의 위치 (왼쪽 +).
         # 목표 지점은 차선 중앙에서 offset 만큼 옆이므로 로봇 기준 위치는 lateral + offset.
         lateral = lane[0] + offset
@@ -69,9 +116,24 @@ class LaneDriver(object):
         steer = g['kp_lateral'] * lateral + g['kd_lateral'] * self.d_term + g['kp_heading'] * heading
         return clamp(steer, -node.max_steer, node.max_steer)
 
+    def _limit_steer(self, steer, now):
+        """omega_pd: 조향각 변화를 초당 steer_rate_max 까지. 직전 값은 노드에 둬서 State 가 바뀌어도 이어짐."""
+        node = self.node
+        prev = getattr(node, 'lane_steer_out', None)
+        if prev is not None and 0.0 < now - prev[1] < 0.5:
+            d = node.lane_gains['steer_rate_max'] * (now - prev[1])
+            steer = clamp(steer, prev[0] - d, prev[0] + d)
+        elif prev is not None and now == prev[1]:
+            steer = prev[0]
+        node.lane_steer_out = (steer, now)
+        return steer
+
     def _drive(self, lane, now, target_speed, offset=0.0):
         node = self.node
-        steer = self.lane_steer(lane, now, offset)
+        steer = self.lane_steer(lane, now, offset, speed=target_speed)
+        if self._pd():
+            steer = self._limit_steer(steer, now)
+            node.dbg('lane/omega_pd', self.lane_omega(lane, offset))
         omega = steering_to_omega(target_speed, steer, node.wheel_base)
         lateral, heading = lane[0] + offset, lane[1]
         self.last_cmd = (target_speed, omega)

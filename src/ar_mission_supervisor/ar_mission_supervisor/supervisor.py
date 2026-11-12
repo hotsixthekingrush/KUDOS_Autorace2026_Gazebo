@@ -128,6 +128,9 @@ PARAM_DEFAULTS = {
         # 미션 기준 좌표(3차선·주차)를 잡을 때 카메라 차선을 믿는 조건 (아니면 차 위치·방향 그대로) (11/05)
         'frame_min_confidence': 0.3,
         'frame_max_heading_deg': 15.0,
+        # (11/11) 차선 노드가 한 선만 보고 추정한 값(single_lane_estimated)은 기준 좌표에 안 씀
+        #   (차선 팀원 새 방식: 한 선이면 '마지막 폭의 절반' 떨어진 경로 기준 -> 넓어진 곳에선 실제 중앙과 최대 15 cm 다름)
+        'frame_reject_single': True,
         'kp_lateral': 1.2,
         'kd_lateral': 0.15,
         'kp_heading': 0.8,
@@ -137,6 +140,32 @@ PARAM_DEFAULTS = {
         'corner_heading_deg': 15.0,
         'corner_min_confidence': 0.3,
         'corner_hold_sec': 1.0,
+        'corner_single_lane': True,   # (11/11) 한 선 추정(single_lane_estimated) 프레임이어도 감속
+        # (11/12) 차선 팀원 제안 (예전 limo_control 식, 사용자 선택). Gazebo 첫 코너 4/4·지그재그 2/2, 실차 곡선 2곳 통과.
+        #   Pure Pursuit 는 lateral 이 정확한 m 단위여야 맞게 꺾는데 실차 카메라 값이 아직 시뮬 값이라 실차 곡선을 못 돎.
+        # omega_pd: 조향 = 회전속도 pd_kp * lateral + pd_kd * (lateral 변화율), +-pd_max_omega (모든 차선 추종 State 공통).
+        #   변화율은 새 차선 값이 왔을 때만 계산해 pd_d_smooth 로 평활, pd_d_jump 넘게 튀면(한 선<->두 선, 차로 바뀜) 버림.
+        #   조향각 변화는 초당 steer_rate_max 까지 (명령이 툴툴 바뀌지 않게). false = Pure Pursuit (11/04)
+        'omega_pd': True,
+        'pd_kp': 4.0,              # [rad/s per m] 실차 시험값 (팀원 kp = kd = 4.0, base_speed 0.2)
+        # (11/12 Gazebo pd_lane_run1: 한 선 구간에서 옆오차가 0.1초마다 1 cm 씩 흔들려 kd 5.5 의 D 항이 P 보다 커지고
+        #   핸들이 0.5초마다 좌우로 뒤집힘 -> kd 1, 변화율·옆오차 평활. 같은 녹화 값을 넣어 다시 계산하면 좌우 바뀜
+        #   코너1 9->4, 지그재그 25->9, 코너2 10->2, 코너에서 한쪽으로 꺾는 크기는 그대로 0.27~0.28 rad)
+        'pd_kd': 1.0,              # [rad/s per m/s]
+        'pd_d_smooth': 0.15,       # 변화율 평활: 새 값 비중
+        'pd_lat_tau': 0.15,        # 옆오차 평활 시간 상수 [s] (0 = 안 함, 차선 10 Hz 면 새 값 비중 약 0.5). 튀면 새 값에서 다시 시작
+        'pd_d_jump': 0.12,         # 이웃 차선 값끼리 이만큼 넘게 다르면 변화율 계산 안 함 [m]
+        'pd_max_omega': 1.0,       # [rad/s]
+        'steer_rate_max': 2.0,     # 조향각 변화 한계 [rad/s] (0.41 rad 를 0.2초에)
+        # speed_by_lateral: LANE_FOLLOWING 속도 = base_speed * max(min_ratio, 1 - |lateral| / slow_lat),
+        #   한 선 추정 프레임은 min_ratio. 최저 min_speed. 가속 accel_max, 감속 decel_max 까지.
+        #   켜면 위 corner_* 감속은 안 씀 (겹치지 않게). false = corner_* 감속 (11/10)
+        'speed_by_lateral': True,
+        'slow_lat': 0.17,          # |lateral| 이 이 값이면 최저 비율 [m]
+        'min_ratio': 0.4,
+        'min_speed': 0.12,         # 이보다 느리면 모터가 섰다 갔다 함 (팀원 실차: 0.08 에서 끄릭끄릭) [m/s]
+        'accel_max': 0.4,          # [m/s^2]
+        'decel_max': 1.0,          # [m/s^2] 코너 앞에선 빨리 줄임
     },
     'failsafe': {
         'hold_sec': 1.0,
@@ -416,7 +445,9 @@ def _stamp_sec(header):
 
 # 차선 인지 한 개. lateral/heading 은 차 앞 x_ref 지점 값 (x_ref 는 찍은 뒤 간 거리만큼 줄인 값),
 # stamp 는 영상 찍은 시각 (없으면 받은 시각). 예전처럼 [0] [1] [2] 로도 읽힌다.
-LaneSample = collections.namedtuple('LaneSample', 'lateral heading confidence x_ref stamp')
+# single = 차선 노드가 한 선만 보고 추정한 값 (LaneError.single_lane_estimated, 11/11)
+LaneSample = collections.namedtuple('LaneSample', 'lateral heading confidence x_ref stamp single',
+                                    defaults=(False,))
 
 
 # ----------------------------------------------------------------------
@@ -538,7 +569,8 @@ class MissionSupervisor(Node):
                 stamp = now
             self.buf['lane'].set((float(msg.lateral_offset_m),
                                   float(msg.heading_error_rad),
-                                  float(msg.confidence), stamp), now)
+                                  float(msg.confidence), stamp,
+                                  bool(msg.single_lane_estimated)), now)
         else:
             self.buf['lane'].value = None        # 차선 유실 -> 페일세이프
 
@@ -694,7 +726,7 @@ class MissionSupervisor(Node):
     # 인지 조회 (State 들이 사용)
     # ------------------------------------------------------------------
     def lane_error(self, now=None):
-        """LaneSample(lateral, heading, confidence, x_ref, stamp) 또는 None.
+        """LaneSample(lateral, heading, confidence, x_ref, stamp, single) 또는 None.
 
         x_ref = 차선 노드 기준점(lane.reference_distance_m) - 영상 찍은 뒤 지금까지 간 거리 (0.1 m 아래로는 안 줄임).
         기준점이 0 이면 x_ref 도 0 (예전 방식).
@@ -704,13 +736,13 @@ class MissionSupervisor(Node):
         value = self.buf['lane'].get(now)
         if value is None:
             return None
-        lateral, heading, confidence, stamp = value
+        lateral, heading, confidence, stamp, single = value
         ref = float(self.lane_gains.get('reference_distance_m', 0.0))
         x_ref = 0.0
         if ref > 0.0:
             age = min(max(0.0, now - stamp), self.MAX_AGE)
             x_ref = max(0.1, ref - self.last_v * age)
-        return LaneSample(lateral, heading, confidence, x_ref, stamp)
+        return LaneSample(lateral, heading, confidence, x_ref, stamp, single)
 
     def lane_for_frame(self, now=None):
         """(차선값 또는 None, 이유). 미션 기준 좌표(LaneFrame)를 잡을 때 쓸 카메라 차선 - 믿을 만할 때만.
@@ -723,6 +755,8 @@ class MissionSupervisor(Node):
         g = self.lane_gains
         if lane[2] < g['frame_min_confidence']:
             return None, '카메라 차선 confidence %.2f < %.2f' % (lane[2], g['frame_min_confidence'])
+        if g['frame_reject_single'] and lane.single:
+            return None, '카메라 차선이 한 선만 보고 추정한 값 (single_lane_estimated)'
         if abs(lane[1]) > math.radians(g['frame_max_heading_deg']):
             return None, '카메라 차선 방향 %.1f도 > %.1f도' % (math.degrees(lane[1]), g['frame_max_heading_deg'])
         return lane, '카메라 차선 (방향 %.1f도, 옆 %+.2fm)' % (math.degrees(lane[1]), lane[0])

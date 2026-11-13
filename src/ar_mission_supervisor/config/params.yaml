@@ -5,9 +5,9 @@ mission_supervisor:
     control_rate: 20.0
     wheel_base: 0.2
     base_speed: 0.4            # LANE_FOLLOWING 기본 속도 (규정 권장 0.3~0.4)
-    max_steer: 0.33            # 등가(자전거) 조향각 한계 [rad]. 11/13 실측(ack_calib4): /limo/ack_cmd 0.42 ->
-                               #   실제 0.338 rad, 회전 반경 0.57 m (우리가 보낸 최대). 예전 0.409(AgileX 식 안쪽바퀴 28도, 반경 0.46 m)는
-                               #   0.42 까지만 보내면 안 나옴. 드라이버는 /1.215 뒤 0.42 에서 자르므로 메시지 0.51 까지 먹힘 -> 다음 실차에서 잼
+    max_steer: 0.33            # 등가(자전거) 조향각 한계 [rad]. 11/13 실측: /limo/ack_cmd 0.42 -> 실제 0.33~0.348, 반경 0.57 m.
+                               #   물리 한계는 양쪽 약 0.355~0.36 (ack_calib6: 0.46 에서 이미 끝, 0.51 도 0.359). 예전 0.409 는 안 나옴.
+                               #   0.33 유지 = 물리 한계까지 약 0.025 남김 (11/13 사용자 결정)
     front_wheel_x: 0.10        # base_link -> 앞바퀴 축 [m]. 정지선 판정 기준점 (규정: 앞바퀴)
     cmd_angular_is_steering: false   # 실차 limo_base 는 angular.z = 각속도. (Gazebo 만 true)
     # (11/13) 실차 리모(아커만 모드)는 WeGo 아커만 드라이버 하나만: ros2 launch limo_base limo_base_ackerman.launch.py
@@ -18,9 +18,11 @@ mission_supervisor:
     cmd_output: ackermann
     ackermann_topic: /limo/ack_cmd
     ackermann_steer_scale: 1.25    # steering_angle = atan(축간 x 회전속도 / 속도) x 이 값. 11/13 실측(ack_calib4, IMU 회전속도):
-                                   #   보낸 0.2/0.3/0.42/-0.2 -> 실제 0.154/0.237/0.338/-0.160 = 약 1.25배. 0.1 -> 0.052 (작은 각은 덜 먹음, 더 잴 것)
-    ackermann_max_steer: 0.42      # 보내는 steering_angle 한계. WeGo 문서는 -0.42~0.42 인데 드라이버 코드(limo_ackerman_driver.cpp)는
-                                   #   steering_angle/1.215 를 ±0.42 로 자름 = 메시지 ±0.51 까지 먹힘. 실측 전이라 0.42 유지 (11/13 사용자 결정)
+                                   #   보낸 0.2/0.3/0.42/-0.2 -> 실제 0.154/0.237/0.338/-0.160 = 약 1.25배.
+                                   #   작은 각(ack_calib5, 방향 바꾼 직후, 노이즈 +-0.01~0.02): 왼쪽 0.05/0.10/0.15 -> 0.02/0.055/0.10,
+                                   #   오른쪽 -> 0.02/0.084/0.135 (왼쪽이 덜 먹음). 차선 PD 가 오차로 보정하니 1.25 하나로 둠 (11/13 사용자 결정)
+    ackermann_max_steer: 0.42      # 보내는 steering_angle 한계. 드라이버(limo_ackerman_driver.cpp)는 steering_angle/1.215 를 ±0.42 로
+                                   #   자름 = 메시지 ±0.51 까지 받지만, 실제 바퀴는 0.46 근처에서 끝 (ack_calib6). max_steer 0.33 x 1.25 = 0.41 이라 0.42 로 충분
     odom_center_offset_x: 0.10     # WeGo 아커만 드라이버 odom 점 = 뒷바퀴 축 가운데 -> 판단 기준점(몸통 가운데)까지 앞으로 [m]
     # (11/13) 차 위치: odom 속도 + /imu 방향 (판단 켤 때 방향 0). WeGo 아커만 odom 방향은 실제보다 30% 넘게 큼
     #   (ack_calib4: 전체 회전 IMU 105도 vs odom 136도), IMU 방향은 자이로 적분과 0.3도 안. 'odom' = /odom 그대로

@@ -272,7 +272,7 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
   추적 기록과 이어지는 선 하나만 남겨 한 선 프레임으로 처리한다 (`width_note=width_reject`).
 - 한 선 프레임: 보이는 선에 맞춘 직선을 반폭만큼 옮긴 경로. `valid=true`, `single_lane_estimated=true`, `confidence=single_confidence`(0.5).
 - 고정 폭은 한 선 프레임의 두 경우에만 쓴다. (가) 실측이 없거나 `width_stale_sec`(3초) 넘게 지남: `lane_width_default_m`.
-  (나) 보이는 선이 휘어 있음(곡률 `corner_curv_min`~`corner_curv_full`): `max(기억 폭, lane_width_corner_m)` 쪽으로 `corner_blend_per_sec` 속도로 옮김.
+  (나) 보이는 선이 휘어 있음(곡률 `corner_curv_min`~`corner_curv_full`): `max(기억 폭, lane_width_corner_m)` 쪽으로 `corner_blend_per_sec` 속도로 옮김. 코드 기본값은 0.0(끔, 11/13 0.75에서 바꿈). safe3_*/step0_*도 0.0이다.
 - 한 선 -> 두 선 전환 때만 lateral 변화를 `pair_return_rate_mps`(0.3 m/s)로 제한한다.
 - 없앤 판정: 픽셀 비율 관문의 고정 폭 기준, `ambiguous_*`, `single_no_history/_jump/_head_jump`. `guard_need_pair`는
   "한 선 프레임은 최근 실측 폭이 있을 때만 valid"(`single_no_width`)로 바뀌었다.
@@ -301,3 +301,21 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 - `/perception/lane_status`:
   - 카메라 프레임마다 `src: camera`, `predicting`(이 프레임이 invalid이고 예측 값이 나가는 중), `predict_sec`.
   - 예측으로 낸 값마다 `src: predict`, `predict_sec`(마지막 valid 뒤 지난 시간), `pred_beyond`(저장 범위를 넘어 연장), `pred_ext_m`, `lat`, `conf`.
+
+## 경로 읽는 방식 single_path_mode (11/13, 기본 line)
+
+- `line`(기본, 예전 방식): 가운데 점들(한 선이면 보이는 선)에 직선 하나를 맞추고, `reference_distance_m`(0.5) 지점의 수직 거리를 쓴다(한 선이면 ± 반폭).
+- `polyline`(파라미터로만 켬. 가제보 기록에서 코너 효과가 없었고 지그재그에서 lateral이 흔들렸다): 식으로 맞추지 않는다.
+  - 한 선 프레임은 보이는 선의 점마다 앞뒤 `normal_window`(2)점으로 `cv2.fitLine(DIST_HUBER)` 접선을 구한다. 그 수직 방향 차선 안쪽으로 반폭만큼 옮긴다.
+    `corner_outer_offset_m`이 켜져 있으면 그 반폭을 쓴다.
+  - 두 선 프레임은 줄별 가운데 점을 그대로 쓴다.
+  - 앞쪽 거리 순서가 뒤집히거나 겹친 점은 버린다. 남은 점을 이은 꺾은선에서 0.5 m 지점을 보간해 y × cos(그 지점 방향)을 lateral로 쓴다. 직선이면 line과 같은 정의다.
+    heading은 그 지점 앞뒤 점의 fitLine 방향이다.
+  - 점이 0.5 m까지 안 닿으면 끝 2~3점 방향으로만 이어 읽는다. 이어 간 길이가 `poly_ext_max_m`(0.2)를 넘으면 confidence에 `poly_ext_conf_scale`(0.5)을 곱한다.
+  - 쓸 점이 3개 미만이거나, 이어 갈 방향이 옆으로 누우면 그 프레임은 line 방식으로 낸다.
+- 예측(`predict_path`)이 저장하는 경로 점도 polyline에서 옮긴 점이다.
+- 디버그 영상: 자홍 점과 자홍 선은 실제 계산에 쓰는 경로 점과 꺾은선, 흰 선은 보이는 선 점에서 옮긴 점까지, 빨간 점은 0.5 m 목표점이다.
+  셋째 줄 글자는 `single|pair line|polyline ang <선 각도> ext <이어 간 길이>`다.
+  예전 줄별 픽셀 가운데 표시(파란 점, /distance_y 용)는 `debug_row_centers: true`일 때만 그린다(lateral 계산에는 안 쓰임).
+- `/perception/lane_status`: `single_path_mode`, `path_used`(이 프레임에 실제로 쓴 방식), `line_angle_deg`, `poly_ext_m`.
+- 가제보 기록 결과: 코너 한 선에서 line과 거의 같다(Pure Pursuit 필요 대비 24% -> 25%). 코너에서 lateral이 작은 주원인은 바깥 선에서 옮기는 반폭이 실제 코너 폭보다 작은 것이다. 보고: `~/scalecar2026/tools/report_polyline.txt`

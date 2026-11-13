@@ -220,6 +220,9 @@ class CameraPerceptionNode(Node):
             if prm.name == 'color_space' and prm.value not in ('hls', 'lab'):
                 return SetParametersResult(successful=False,
                                            reason="color_space는 'hls' 또는 'lab'")
+            if prm.name == 'single_path_mode' and prm.value not in ('line', 'polyline'):
+                return SetParametersResult(successful=False,
+                                           reason="single_path_mode는 'line' 또는 'polyline'")
         for prm in params:
             if prm.name in DEFAULTS:
                 self.core.p[prm.name] = prm.value
@@ -280,6 +283,13 @@ class CameraPerceptionNode(Node):
                     and 0.0 <= age <= float(self.get_parameter('predict_max_sec').value))
             st.update(src='camera', predicting=bool(pred), predict_sec=round(age, 3) if pred else 0.0,
                       corner_b=float(r['corner_b']), outer_off=bool(r.get('outer_off')))
+            # 경로 읽는 방식: single_path_mode, 이번 프레임에 실제로 쓴 방식(polyline 이 못 읽으면 line), 선 각도(도),
+            # 꺾은선 끝에서 이어 간 길이 [m]
+            pi = r.get('poly') or {}
+            st.update(single_path_mode=self.core.p['single_path_mode'],
+                      path_used=None if not pi else ('line' if pi['fallback'] or pi['mode'] == 'line' else 'polyline'),
+                      line_angle_deg=None if not pi else round(pi['ang'], 1),
+                      poly_ext_m=None if not pi else round(float(pi['ext']), 3))
             self.status_pub.publish(String(data=json.dumps(st)))
         wl = float(self.get_parameter('width_log_sec').value)
         if wl > 0 and time.monotonic() - self._wlog_t >= wl:

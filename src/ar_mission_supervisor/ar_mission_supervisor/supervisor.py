@@ -12,7 +12,9 @@ CROSSWALK_STOP 으로 바로 넘어간다 (두 미션이 붙어 있음).
 
 import collections
 import math
+import signal
 import threading
+import time
 
 import rclpy
 import smach
@@ -562,6 +564,7 @@ class MissionSupervisor(Node):
         self._imu_yaw = None       # IMU 방향 (판단 켤 때 0) [rad]
         self._imu_yaw0 = None
         self._dr = None            # odom 속도 + IMU 방향 적분 [x, y, yaw, stamp]
+        self._odom_raw = None      # /odom 그대로 (x, y, yaw) - 확인용 debug/pose 에만 씀
         if self.odom_heading_source == 'imu':
             from sensor_msgs.msg import Imu
             sub(Imu, self.imu_topic, self._cb_imu, 10)
@@ -607,6 +610,7 @@ class MissionSupervisor(Node):
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         if self._imu_yaw0 is None:
             self._imu_yaw0 = yaw
+            self.get_logger().info('%s 들어옴 - 지금 방향을 0 으로 하고 위치 계산 시작' % self.imu_topic)
         d = yaw - self._imu_yaw0
         self._imu_yaw = math.atan2(math.sin(d), math.cos(d))
 
@@ -633,6 +637,7 @@ class MissionSupervisor(Node):
         return (self._dr[0], self._dr[1], yaw)
 
     def _cb_odom(self, msg):
+        self._odom_raw = _pose_from_odom(msg)
         if self.odom_heading_source == 'imu':
             pose = self._dead_reckon(msg)
             if pose is None:
@@ -846,6 +851,32 @@ class MissionSupervisor(Node):
         msg = String()
         msg.data = self.current_label
         self.state_pub.publish(msg)
+        self._publish_pose_dbg()
+
+    def _publish_pose_dbg(self):
+        """(11/13) 실차 확인용, 0.5 초마다. ros2 topic echo /supervisor/debug/pose
+        판단이 쓰는 차 위치(몸통 가운데, 판단 켤 때 방향 0)와 비교용 /odom 그대로(드라이버 켤 때 0)를 한 줄 글로.
+        숫자만은 pose/x, pose/y, pose/yaw_deg (rqt_plot 용)."""
+        if not self.debug['enabled']:
+            return
+        raw = self._odom_raw
+        if raw is None:
+            self.dbg('pose', '/odom 아직 안 들어옴 - 위치 없음')
+            return
+        if self.odom_heading_source == 'imu' and self._imu_yaw is None:
+            self.dbg('pose', '%s 아직 안 들어옴 - 위치 안 씀' % self.imu_topic)
+            return
+        pose = self._latest('odom')
+        if pose is None:
+            self.dbg('pose', '위치가 오래됨 (/odom 끊김?)')
+            return
+        x, y, yaw = pose
+        self.dbg('pose', 'x %+.2f  y %+.2f  방향 %+.1f도 (%s) | /odom 그대로: x %+.2f  y %+.2f  방향 %+.1f도'
+                 % (x, y, math.degrees(yaw), self.odom_heading_source,
+                    raw[0], raw[1], math.degrees(raw[2])))
+        self.dbg('pose/x', x)
+        self.dbg('pose/y', y)
+        self.dbg('pose/yaw_deg', math.degrees(yaw))
 
     # ------------------------------------------------------------------
     # 인지 조회 (State 들이 사용)
@@ -1117,8 +1148,40 @@ def build_state_machine(node):
     return sm
 
 
+def _init_rclpy(args):
+    """(11/13) Ctrl+C 때 멈춤 명령을 꼭 보내려고 rclpy 신호 처리를 끔.
+    Humble 기본은 Ctrl+C 를 받으면 rclpy 의 다른 스레드가 바로 ROS context 를 닫아서 (signal_handler.cpp
+    shutdown_contexts), finally 의 publish_stop 이 'publisher's context is invalid' 로 실패할 수 있음.
+    WeGo 아커만 드라이버는 시간 제한 없이 받은 명령을 MCU 로 그대로 보냄 -> 멈춤 명령이 꼭 나가야 함.
+    끄면 파이썬 기본대로 KeyboardInterrupt 만 나고 context 는 살아 있음."""
+    try:
+        from rclpy.signals import SignalHandlerOptions
+        rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    except (ImportError, TypeError, AttributeError):
+        rclpy.init(args=args)
+
+
+def _send_stop(node, times=5, gap=0.05):
+    """끝날 때 멈춤 명령 여러 번 (한 번은 지워지기 전에 못 나갈 수 있음). 그동안 Ctrl+C 는 무시
+    (ros2 launch 는 터미널 Ctrl+C 에 더해 SIGINT 를 한 번 더 보냄). 보낸 횟수를 돌려줌."""
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (ValueError, OSError):
+        pass                       # 메인 스레드가 아니면 못 바꿈
+    sent = 0
+    for _ in range(times):
+        try:
+            node.publish_stop()
+            sent += 1
+        except Exception as e:     # noqa: BLE001 - context 가 이미 닫힘 등
+            print('[mission_supervisor] 멈춤 명령 못 보냄: %s' % e)
+            break
+        time.sleep(gap)
+    return sent
+
+
 def main(args=None):
-    rclpy.init(args=args)
+    _init_rclpy(args)
     node = MissionSupervisor()
 
     # SMACH execute() 가 블로킹이므로 ROS 콜백은 별도 스레드에서 처리
@@ -1130,8 +1193,12 @@ def main(args=None):
         sm.execute()
     except KeyboardInterrupt:
         pass
+    except smach.InvalidUserCodeError as e:
+        # SMACH 는 State 안에서 난 Ctrl+C 도 이 에러로 바꿔서 올림 -> Ctrl+C 면 조용히 끝, 진짜 에러면 그대로
+        if 'KeyboardInterrupt' not in str(e):
+            raise
     finally:
-        node.publish_stop()
+        _send_stop(node)
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -68,6 +68,12 @@ class FakePerception(Node):
         self.declare_parameter('lane_valid', True)           # false 면 차선 valid=false (차선 유실 시험)
         self.declare_parameter('lane_confidence', 1.0)       # 차선 확신도 (코너 감속 시험)
         self.declare_parameter('lane_single', False)        # single_lane_estimated (한 선 추정 시험, 11/11)
+        # (11/13) 차선 값을 차 위치로 계산 (트랙 = 시나리오 시작 기준 +x 방향, 차선 가운데 y = k x lane_spacing).
+        #   lane_pick 'nearest' = 차가 지금 들어가 있는 차선 기준 (팀원 약속), 'fixed' = 처음 차선(y = 0) 기준
+        self.declare_parameter('lane_from_pose', False)
+        self.declare_parameter('lane_pick', 'fixed')
+        self.declare_parameter('lane_spacing', 0.52)
+        self.declare_parameter('lane_ref_x', 0.5)           # 차선 값을 재는 차 앞 거리 (판단 lane.reference_distance_m)
         self.declare_parameter('crosswalk_after_line', 0.06) # 정지선 -> 횡단보도 줄무늬 앞끝 (판단 yolo.crosswalk_to_stopline 과 같게)
         self.declare_parameter('light_color', 'red')
         self.declare_parameter('stopline_visible', 1.2)   # 횡단보도(정지 기준) 위치가 이 거리 안에서만 나옴
@@ -247,6 +253,16 @@ class FakePerception(Node):
         lane.heading_error_rad = float(self._p('heading_error'))
         lane.confidence = float(self._p('lane_confidence'))
         lane.single_lane_estimated = bool(self._p('lane_single'))
+        if bool(self._p('lane_from_pose')):
+            ox, oy, oyaw = self.origin
+            c, s = math.cos(oyaw), math.sin(oyaw)
+            ty = -s * (self.x - ox) + c * (self.y - oy)
+            tyaw = math.atan2(math.sin(self.yaw - oyaw), math.cos(self.yaw - oyaw))
+            w = float(self._p('lane_spacing'))
+            center = w * round(ty / w) if self._p('lane_pick') == 'nearest' else 0.0
+            fy = ty + float(self._p('lane_ref_x')) * math.sin(tyaw)
+            lane.lateral_offset_m = float((center - fy) / max(0.2, math.cos(tyaw)))
+            lane.heading_error_rad = float(-tyaw)
         self.pub_lane.publish(lane)
 
         self.objects = []

@@ -12,6 +12,14 @@ A/B 표지판을 인식하면 진입하고, 표지판까지 거리가 임계값 
   3차선 끝의 섬이 가운데 차선을 막고 있으므로 A = 왼쪽(a_lane), B = 오른쪽(b_lane) 차선으로
   필요한 만큼만 옮기고(이미 그 차선이면 그대로), odom_hold_distance 만큼 더 간 뒤 종료한다.
   목표 차선 앞에 아직 LIMO 가 있으면 지나갈 때까지 지금 차선을 유지한다.
+
+카메라 방식에서 차선 노드 기준 차선이 바뀔 때 (11/13):
+  차선 노드는 '차가 지금 들어가 있는 차선' 가운데를 준다 (팀원과 맞춘 약속). 그래서 옆으로 옮기다 점선을 넘으면
+  lateral 이 차선 폭만큼 튄다 (왼쪽 차선으로 바뀌면 +폭). 그대로 두면 offset(처음 차선 기준)이 한 번 더 더해져
+  한 차선 더 가려고 한다. lane_jump: 옮기는 동안(SHIFT, SETTLE) 연속 차선 값이 차선 폭의 반 넘게 튀면
+  그 차선 수(lane_shift)를 세서 offset 에서 lane_shift x 차선 폭을 뺀다. 차선 노드가 처음 차선을 계속 줘도 그대로 동작.
+  lane_shift 는 0(처음 차선) ~ 목표 차선 하나 사이만 (반대 방향으로 튀는 건 차선 노드 오류로 보고 무시).
+  odom 모드(3차선 이어받음)는 카메라 차선을 안 쓰니 상관없음.
 """
 
 from ar_mission_supervisor.base_state import SafeState
@@ -39,6 +47,8 @@ class LeftARightB(SafeState):
         self.odom_mode = False
         self.goal_lane = None
         self.reached_s = None
+        self.lane_shift = 0         # (11/13) 차선 노드 기준 차선이 옆으로 바뀐 수 (+1 = 왼쪽 차선 기준)
+        self._cam_prev = None       # 직전 차선 값 (lateral, stamp)
 
     def on_enter(self):
         node = self.node
@@ -50,6 +60,8 @@ class LeftARightB(SafeState):
         self.direction = 0.0
         self.goal_lane = None
         self.reached_s = None
+        self.lane_shift = 0
+        self._cam_prev = None
         self.odom_mode = False
         if node.left_a_right_b['use_lane_context'] and self.plan.fresh(self.entered_at):
             car = self.plan.update(self.entered_at)
@@ -124,11 +136,45 @@ class LeftARightB(SafeState):
         self.driver.step(cfg['approach_speed'])
         return False
 
+    def _track_lane_jump(self, cfg):
+        """(11/13) 연속 차선 값의 lateral 이 차선 폭의 반 넘게 튀면 차선 노드 기준 차선이 바뀐 것으로 센다."""
+        if not cfg['lane_jump']:
+            return
+        lane = self.node.lane_error()
+        if lane is None:
+            return
+        lat, stamp = float(lane[0]), lane[4]
+        prev = self._cam_prev
+        if prev is not None and stamp == prev[1]:
+            return                              # 같은 차선 값
+        self._cam_prev = (lat, stamp)
+        if prev is None or stamp - prev[1] > cfg['jump_max_gap']:
+            return
+        n = int(round((lat - prev[0]) / cfg['lane_width']))
+        if not n:
+            return
+        # 옮기는 차선은 하나뿐 -> 0 (처음 차선) 과 direction (목표 차선) 사이만 허용. 반대로 튀거나 두 차선 튀면 무시
+        lo, hi = min(0, int(self.direction)), max(0, int(self.direction))
+        new = self.lane_shift + n
+        log = self.node.get_logger()
+        if not lo <= new <= hi:
+            log.warn('[LEFT_A_RIGHT_B] 차선 값이 %+.2f -> %+.2fm 로 튐 - 옮기는 방향과 안 맞아 무시'
+                     % (prev[0], lat))
+            return
+        self.lane_shift = new
+        log.info('[LEFT_A_RIGHT_B] 차선 노드 기준이 %s 차선으로 바뀜 (lateral %+.2f -> %+.2fm) - 목표 이동량에서 %+.2fm 뺌'
+                 % ('왼쪽' if n > 0 else '오른쪽', prev[0], lat, self.lane_shift * cfg['lane_width']))
+
+    def _offset(self, cfg, progress):
+        """처음 차선 기준 이동량 - 차선 노드 기준이 바뀐 만큼."""
+        return self.direction * cfg['lane_width'] * progress - self.lane_shift * cfg['lane_width']
+
     def _shift(self, now, cfg):
         """오프셋을 점진적으로 키워 목표 차선으로 이동."""
         elapsed = now - self.shift_started
         progress = clamp(elapsed / cfg['shift_duration'], 0.0, 1.0)
-        offset = self.direction * cfg['lane_width'] * progress
+        self._track_lane_jump(cfg)
+        offset = self._offset(cfg, progress)
 
         self.driver.step(cfg['shift_speed'], offset)
 
@@ -139,7 +185,8 @@ class LeftARightB(SafeState):
 
     def _settle(self, now, cfg):
         """새 차선에서 잠시 유지한 뒤 종료."""
-        offset = self.direction * cfg['lane_width']
+        self._track_lane_jump(cfg)
+        offset = self._offset(cfg, 1.0)
         self.driver.step(cfg['shift_speed'], offset)
         return (now - self.settle_started) >= cfg['settle_sec']
 

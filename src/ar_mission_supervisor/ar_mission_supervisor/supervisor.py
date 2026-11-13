@@ -256,6 +256,9 @@ PARAM_DEFAULTS = {
         'a_lane': 0,               # odom 모드에서 A(좌) 경로로 이어지는 차선 (0 왼쪽, 1 가운데, 2 오른쪽)
         'b_lane': 2,
         'odom_hold_distance': 0.6, # 목표 차선 도착 후 이만큼 더 간 뒤 종료 [m]
+        # (11/13) 카메라 방식: 옮기는 중 차선 노드가 '지금 들어간 차선' 기준으로 바뀌면 lateral 이 차선 폭만큼 튐 -> 목표 이동량에서 뺌
+        'lane_jump': True,
+        'jump_max_gap': 1.0,       # 이 시간 안의 연속 차선 값끼리만 비교 [s]
     },
     'avoid_static': {
         'trigger_distance': 1.2,   # 라이다: 진행 경로 앞 이 거리 안 장애물이면 진입 [m]

@@ -8,6 +8,16 @@ mission_supervisor:
     max_steer: 0.409           # 등가 조향각 한계. LIMO 드라이버 안쪽바퀴 최대 28도(0.49 rad) -> R_min 약 0.46 m (실측 전)
     front_wheel_x: 0.10        # base_link -> 앞바퀴 축 [m]. 정지선 판정 기준점 (규정: 앞바퀴)
     cmd_angular_is_steering: false   # 실차 limo_base 는 angular.z = 각속도. (Gazebo 만 true)
+    # (11/13) 실차 리모(아커만 모드)는 WeGo 아커만 드라이버 하나만: ros2 launch limo_base limo_base_ackerman.launch.py
+    #   명령은 /limo/ack_cmd (AckermannDrive: speed m/s, steering_angle rad -0.42 ~ 0.42, WeGo 노션 문서).
+    #   차동용 limo_base.launch.py 는 아커만 모드에서 /cmd_vel 은 받지만 odom 을 안 냄 ('Invalid motion mode' 경고),
+    #   둘을 같이 켜면 같은 포트(/dev/ttyTHS1)를 같이 읽어 odom 이 안 나옴 (11/13 리모에서 확인).
+    #   차동 드라이버로 돌릴 땐 런치에서 cmd_output:=twist odom_offset:=0.0
+    cmd_output: ackermann
+    ackermann_topic: /limo/ack_cmd
+    ackermann_steer_scale: 1.0     # steering_angle = atan(축간 x 회전속도 / 속도) x 이 값. WeGo 드라이버 안 환산(/1.215)이 맞는지 실측 전
+    ackermann_max_steer: 0.42
+    odom_center_offset_x: 0.10     # WeGo 아커만 드라이버 odom 점 = 뒷바퀴 축 가운데 -> 판단 기준점(몸통 가운데)까지 앞으로 [m]
 
     lane:
       reference_distance_m: 0.5  # 차선 노드가 lateral 을 재는 차 앞 거리 (차선 노드 값과 같아야 함, 11/04 0.5)
@@ -148,6 +158,11 @@ mission_supervisor:
       trigger_half_width: 0.3  # 진행 경로 폭의 절반 (옆에 선 주차 구역 LIMO 는 무시) [m]
       yolo_range: 1.5          # YOLO LIMO 는 이 거리 안 + 경로 폭 안일 때만 [m]
       lidar_trigger: true
+      # (11/12 사용자 선택) 코너 도는 중엔 라이다 진입 미룸 (Gazebo pd_lane_run1/2: 코너 20도 남기고 진입 -> 차 방향
+      #   -160도를 기준으로 잡아 바깥 선 위까지 감). odom 회전 속도가 이 값 넘으면 기본 주행 계속, 잦아들면 진입.
+      #   단 장애물이 defer_min_distance 안이면 바로 진입. 0 이면 안 미룸
+      defer_turn_rate_deg: 10.0   # [도/s]
+      defer_min_distance: 0.5     # [m]
       min_obstacle_radius: 0.10  # 라바콘(작음)과 구분 [m]
       max_obstacle_radius: 0.40
       start_lane: 1            # 3차선은 항상 가운데에서 시작
@@ -160,7 +175,13 @@ mission_supervisor:
       plan_horizon_long: 3.0   # plan_depth 2 일 때 굴려 보는 거리 [m]
       switch_step: 0.3         # 이 거리마다 '여기서 옆 차선으로 옮기면' 을 굴려 봄 [m]
       switch_margin: 0.15      # 목표 차선은 이만큼 더 멀리 갈 수 있을 때만 바꿈 [m]
-      switch_hold: 0.5         # 목표 차선을 바꾼 뒤 이 시간은 유지 (지금 목표가 곧 막히면 예외) [s]
+      switch_hold: 1.0         # 목표 차선을 바꾼 뒤 이 시간은 유지 (지금 목표가 곧 막히면 예외) [s] (11/12: 0.5 -> 1.0)
+      # (11/12) 차선 바꾸기 확정: true 면 목표 차선에 들어가기 전엔 목표 고정 (목표가 commit_distance 안에서 막히고
+      #   switch_hold 지났을 때만 다시 고름). Gazebo pd_lane_run4 (두 칸 점프 + 0.15초 만에 목표 뒤집힘) 때문에 넣어 봤지만
+      #   0.55 배치는 계속 다시 골라야 빠져나가는 경우가 있어 run.py 4개가 막힘 -> 기본 false.
+      #   '바로 옆 차선만 목표' 는 0.55 배치(가운데 LIMO 사이를 대각선으로 가로질러야 함)에서 40번 중 2번 성공이라 코드에 안 넣음
+      lane_commit: false
+      lane_from_odom: true     # 바꾸는 중에도 차선 번호는 odom 위치 (pd_lane_run4: 가운데~오른쪽에 있는데 계속 '왼쪽') (11/12)
       edge_check: true         # 굴려 볼 때 3차선 바깥 선을 넘으면 막힌 것으로 봄 (바퀴 기준)
       edge_margin: 0.0         # 바깥 선(1.5 x lane_width)에 더하는 여유 [m]
       limo_length: 0.322       # 장애물 LIMO 박스 (진행방향 길이 x 폭) [m]
@@ -170,6 +191,13 @@ mission_supervisor:
       wheel_box_length: 0.0    # 바퀴 네 개를 감싼 사각형도 따로 검사 (0 이면 안 씀. 실차는 몸통이 바퀴를 다 덮어서 안 씀) [m]
       wheel_box_width: 0.0
       clearance: 0.03          # 장애물 박스에 더하는 여유 [m]
+      # (11/12 사용자 선택) 지금 자리에서 이미 여유 박스(LIMO + clearance)와 겹친 LIMO 는, 지금 안 겹칠 만큼 + 2 cm 만 여유를 줄여서
+      #   굴려 보기·후진에 씀 (진짜 크기보다 overlap_extra 까지). 그 LIMO 에 지금보다 2 cm 넘게 가까워지는 길은 그대로 막힘.
+      #   Gazebo static_run6: 진짜 틈 2.6 cm 인데 여유 1.5 cm + 지도 오차 2 cm 로 '이미 닿음' -> 모든 길 0 m, 후진도 못 해서
+      #   제한시간까지 22초 정지 (제한시간 뒤 차선 주행으로 그냥 빠져나감). false = 예전
+      overlap_relax: true
+      overlap_extra: 0.03      # 지도 오차 몫 [m]
+      overlap_slack: 0.02      # 안 겹칠 만큼에 더 줄이는 몫 = 지금보다 이만큼은 가까워져도 됨 (방향 틀 때 차 뒤쪽이 옆으로 돎) [m]
       commit_distance: 0.9     # 고른 차선으로 이 거리도 못 가면 감속 [m]
       slow_speed: 0.10         # 그때 감속 속도
       stop_distance: 0.25      # 그래도 이 거리 안에서 닿게 되면 정지 [m] (backup_after 지나면 후진)
@@ -189,6 +217,22 @@ mission_supervisor:
       max_distance: 7.0        # 진입 후 최대 주행거리 (3차선 직선 5.5 m) [m]
       max_duration: 40.0
       context_timeout: 5.0     # 끝난 뒤 이 시간 안에 A/B 가 오면 차선 번호를 넘겨줌 [s]
+      # (11/12 사용자 선택) 카메라를 못 믿어 차 방향을 기준으로 쓸 때 트랙 축(axis_ref_deg + 90도 단위)에서
+      #   axis_snap_max_deg 안이면 그 축으로 맞춤 (pd_lane_run3: 코너 16도 덜 돈 채 진입 -> 바깥 선 위).
+      #   가정: 트랙은 직각, odom yaw 0 = 출발 직선 방향 (출발선에 똑바로 놓고 odom 켜기)
+      axis_snap: true
+      axis_ref_deg: 0.0
+      axis_snap_max_deg: 30.0
+      # (11/12 사용자 선택) 차 방향 기준일 때 옆 위치(d = 0)도 차 위치라, 차가 차선 가운데에서 비켜 있으면 세 차선이 다 밀림
+      #   (pd_lane_run4: 11 cm). 차 앞 lat_snap_range 안에서 확실히 본 LIMO 가 lat_snap_min_items 대 이상이고,
+      #   '차선 가운데에서 비킨 값'이 lat_snap_spread 안에 절반 넘게 모이면 그 평균만큼 옆으로 한 번 옮김.
+      #   lat_snap_max 넘으면 어느 차선인지 애매해서 안 옮김. 카메라 차선으로 기준 잡았을 땐 안 씀.
+      #   가정: LIMO 는 차선 가운데에 서 있음 (연습 배치는 그럼, 대회 배치는 확정 아님)
+      lat_snap: true
+      lat_snap_min_items: 2
+      lat_snap_spread: 0.08    # [m]
+      lat_snap_max: 0.20       # [m]
+      lat_snap_range: 2.0      # [m] 멀리서 처음 본 LIMO 는 옆으로 17~27 cm 틀린 적 있음 (pd_lane_run4)
       gap_speed: 0.12          # odom 이 없을 때만 쓰는 비상 주행 (빈 공간 따라가기)
       gap_range: 1.5
       gap_gain: 1.0

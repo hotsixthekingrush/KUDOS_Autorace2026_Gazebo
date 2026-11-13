@@ -79,9 +79,16 @@ class FakePerception(Node):
         self.declare_parameter('spacing', 0.55)        # static_3lane: LIMO 진행방향 간격 (연습 Gazebo 0.55)
         self.declare_parameter('fake_limos', True)     # false: 가짜 LIMO 안 보냄 (진짜 라이다와 같이 쓸 때)
         self.declare_parameter('cmd_is_steering', False)  # publish_odom 일 때: angular.z 를 조향각으로 해석 (판단 sim 설정과 맞춤)
+        # (11/13) WeGo 아커만 드라이버 흉내: cmd_input='ackermann' 이면 /limo/ack_cmd (AckermannDrive) 를 받고,
+        #   steering_angle / ack_scale 을 자전거 모델 조향각으로 봄. odom_rear_offset > 0 이면 odom 을 뒷바퀴 축(몸통 가운데에서 뒤로)으로 냄
+        self.declare_parameter('cmd_input', 'twist')
+        self.declare_parameter('ack_topic', '/limo/ack_cmd')
+        self.declare_parameter('ack_scale', 1.0)
+        self.declare_parameter('odom_rear_offset', 0.0)
         self.declare_parameter('wheel_base', 0.24)
         self.declare_parameter('steer_rate_deg', 0.0)   # >0 이면 조향이 이 속도로만 바뀜 (Gazebo 느린 조향 흉내, 시험용)
         self.declare_parameter('start_yaw_deg', 0.0)    # publish_odom 일 때 처음 차 방향 (차선은 계속 오차 0 으로 보냄 = 기울어진 진입 시험, 11/10)
+        self.declare_parameter('start_y', 0.0)          # publish_odom 일 때 처음 차 옆 위치 (왼쪽 +, 차선은 계속 오차 0 = 비켜 선 진입 시험, 11/12) [m]
         self.declare_parameter('limo_depth_offset', 0.0)  # parking: 윗줄 LIMO 를 칸 가운데보다 이만큼 더 안쪽(+)에 세움 [m]
 
         pub = self.create_publisher
@@ -102,7 +109,11 @@ class FakePerception(Node):
         self.own_odom = bool(self._p('publish_odom'))
         if self.own_odom:
             self.pub_odom = pub(Odometry, '/odom', 10)
-            self.create_subscription(Twist, '/cmd_vel', self._cb_cmd, 10)
+            if self._p('cmd_input') == 'ackermann':
+                from ackermann_msgs.msg import AckermannDrive
+                self.create_subscription(AckermannDrive, self._p('ack_topic'), self._cb_ack, 10)
+            else:
+                self.create_subscription(Twist, '/cmd_vel', self._cb_cmd, 10)
             self.create_timer(self.sim_dt, self._sim_step)
         else:
             self.create_subscription(Odometry, '/odom', self._cb_odom, 10)
@@ -125,6 +136,13 @@ class FakePerception(Node):
             self.cmd_w = msg.angular.z
             v = msg.linear.x
             self.cmd_steer = math.atan(wb * msg.angular.z / v) if abs(v) > 1e-3 else 0.0
+
+    def _cb_ack(self, msg):
+        # WeGo 아커만 드라이버: 바퀴 조향각(자전거 모델) = steering_angle / ack_scale, 속도 = speed
+        wb = float(self._p('wheel_base'))
+        self.cmd_v = float(msg.speed)
+        self.cmd_steer = max(-0.5, min(0.5, float(msg.steering_angle) / float(self._p('ack_scale'))))
+        self.cmd_w = self.cmd_v * math.tan(self.cmd_steer) / wb
 
     def _cb_odom(self, msg):
         p = msg.pose.pose.position
@@ -149,8 +167,9 @@ class FakePerception(Node):
         odom.header.stamp = self.get_clock().now().to_msg()
         odom.header.frame_id = 'odom'
         odom.child_frame_id = 'base_link'
-        odom.pose.pose.position.x = self.x
-        odom.pose.pose.position.y = self.y
+        rear = float(self._p('odom_rear_offset'))
+        odom.pose.pose.position.x = self.x - rear * math.cos(self.yaw)
+        odom.pose.pose.position.y = self.y - rear * math.sin(self.yaw)
         odom.pose.pose.orientation.z = math.sin(self.yaw / 2.0)
         odom.pose.pose.orientation.w = math.cos(self.yaw / 2.0)
         odom.twist.twist.linear.x = self.cmd_v
@@ -187,7 +206,8 @@ class FakePerception(Node):
         if scenario != self.last_scenario:
             if self.own_odom:
                 # 트랙(시나리오 좌표)은 +x 방향 그대로, 차만 start_yaw_deg 만큼 틀어져서 시작
-                self.x = self.y = 0.0
+                self.x = 0.0
+                self.y = float(self._p('start_y'))
                 self.yaw = math.radians(float(self._p('start_yaw_deg')))
                 self.origin = (0.0, 0.0, 0.0)
             else:

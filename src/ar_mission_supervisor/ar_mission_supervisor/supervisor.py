@@ -120,6 +120,17 @@ PARAM_DEFAULTS = {
         'max_steer': 0.409,         # 등가 조향각 한계. LIMO 드라이버 안쪽바퀴 28도 -> R_min 약 0.46 m
         'front_wheel_x': 0.10,     # base_link -> 앞바퀴 축 [m]. 규정 판정 기준점
         'cmd_angular_is_steering': False,  # True: /cmd_vel angular.z 에 조향각[rad]을 넣음 (Gazebo 아커만 플러그인용)
+        # (11/13) 실차 리모가 아커만 모드면 WeGo 아커만 드라이버(limo_base_ackerman.launch.py) 하나만 켜고, 명령은
+        #   /limo/ack_cmd (ackermann_msgs/AckermannDrive: speed [m/s], steering_angle [rad] -0.42 ~ 0.42) 로 받는다.
+        #   차동용 limo_base 는 아커만 모드에서 /cmd_vel 은 받지만 odom 을 안 내고, 둘을 같이 켜면 같은 포트를 같이 읽어 꼬임.
+        #   'twist' = /cmd_vel (예전, Gazebo), 'ackermann' = ackermann_topic 으로 AckermannDrive.
+        'cmd_output': 'twist',
+        'ackermann_topic': '/limo/ack_cmd',
+        'ackermann_steer_scale': 1.0,   # steering_angle = 자전거 모델 조향각(atan(축간 x 회전속도 / 속도)) x 이 값 (실측 전)
+        'ackermann_max_steer': 0.42,    # WeGo 문서: steering_angle -0.42 ~ 0.42 rad
+        # (11/13) odom 기준점 -> 판단 기준점(차 몸통 가운데 = 앞뒤 바퀴 축 사이) 앞쪽 거리 [m].
+        #   WeGo 아커만 드라이버는 base_link(odom 점)가 뒷바퀴 축 가운데 -> 0.10 (축간 0.2 의 절반). Gazebo·차동 드라이버는 0.
+        'odom_center_offset_x': 0.0,
     },
     'lane': {
         # 차선 노드가 lateral 을 재는 지점 = 차 앞 몇 m (차선 노드 reference_distance_m 과 같아야 함, 11/04 0.5 로 정함)
@@ -244,6 +255,12 @@ PARAM_DEFAULTS = {
         'trigger_half_width': 0.3, # 진행 경로 폭의 절반 (주차 구역 LIMO 처럼 옆에 있는 건 무시) [m]
         'yolo_range': 1.5,         # YOLO LIMO 는 이 거리 안 + 경로 폭 안일 때만
         'lidar_trigger': True,     # 라이다 장애물로도 진입할지
+        # (11/12 사용자 선택) 코너 도는 중엔 라이다 진입을 미룸. Gazebo pd_lane_run1/2: 두 번째 코너를 20도 남기고
+        #   (초당 21도로 도는 중) 진입 -> 카메라는 한 선 추정이라 차 방향(-160도, 도로 -180도)을 기준으로 잡아 바깥 선 위까지 감.
+        #   odom 회전 속도가 defer_turn_rate_deg 넘으면 기본 주행을 계속하다 잦아들면 진입.
+        #   단 장애물이 defer_min_distance 안으로 오면 바로 진입. 0 이면 안 미룸
+        'defer_turn_rate_deg': 10.0,
+        'defer_min_distance': 0.5,
         'min_obstacle_radius': 0.10,  # 라바콘(작음)과 구분 [m]
         'max_obstacle_radius': 0.40,
         'start_lane': 1,           # 3차선 시작 차선 (항상 가운데)
@@ -256,9 +273,14 @@ PARAM_DEFAULTS = {
         'plan_horizon_long': 3.0,  # plan_depth 2 일 때 굴려 보는 거리 [m]
         'switch_step': 0.3,        # 이 거리마다 '여기서 옆 차선으로 옮기면' 을 굴려 봄 [m]
         'switch_margin': 0.15,     # 목표 차선은 이만큼 더 멀리 갈 수 있을 때만 바꿈 [m]
-        'switch_hold': 0.5,
+        'switch_hold': 1.0,        # 목표 차선을 바꾼 뒤 이 시간은 유지 (지금 목표가 곧 막히면 예외) [s] (11/12: 0.5 -> 1.0)
+        # (11/12) 차선 바꾸기 확정: 켜면 목표 차선에 들어가기 전엔 목표 고정 (목표가 commit_distance 안에서 막히고
+        #   switch_hold 지났을 때만 예외). pd_lane_run4 의 목표 뒤집힘 때문에 넣었지만 0.55 배치는 계속 다시 골라야
+        #   빠져나가는 경우가 있어 (run.py 4개 막힘) 기본 끔. '바로 옆 차선만' 은 0.55 배치에서 막혀서 코드에 안 넣음
+        'lane_commit': False,
+        'lane_from_odom': True,    # 바꾸는 중에도 차선 번호는 odom 위치 (11/12, pd_lane_run4: 가운데~오른쪽인데 계속 '왼쪽')
         'edge_check': True,        # 굴려 볼 때 3차선 바깥 선을 넘으면 막힌 것으로 봄 (11/05)
-        'edge_margin': 0.0,        # 바깥 선(1.5 x lane_width)에 더하는 여유 [m]        # 목표 차선을 바꾼 뒤 이 시간은 유지 (지금 목표가 곧 막히면 예외) [s]
+        'edge_margin': 0.0,        # 바깥 선(1.5 x lane_width)에 더하는 여유 [m]
         'limo_length': 0.322,      # 장애물 LIMO 박스 (진행방향 길이 x 폭) [m]
         'limo_width': 0.22,
         'car_length': 0.322,       # 우리 차
@@ -266,6 +288,11 @@ PARAM_DEFAULTS = {
         'wheel_box_length': 0.0,   # 바퀴 네 개를 감싼 사각형도 따로 검사 (0 이면 안 씀. Gazebo 만 씀) [m]
         'wheel_box_width': 0.0,
         'clearance': 0.03,         # 장애물 박스에 더하는 여유 [m]
+        # (11/12 사용자 선택) 지금 자리에서 이미 여유 박스와 겹친 LIMO 는 지금 안 겹칠 만큼만 여유를 줄여서 봄
+        #   (진짜 크기보다 overlap_extra 까지). static_run6: 진짜 틈 2.6 cm 인데 '이미 닿음' 으로 봐서 22초 정지
+        'overlap_relax': True,
+        'overlap_extra': 0.03,     # 지도 오차 몫 [m]
+        'overlap_slack': 0.02,     # 안 겹칠 만큼에 더 줄이는 몫 (방향 틀 때 차 뒤쪽이 옆으로 도는 몫) [m]
         'commit_distance': 0.9,    # 고른 차선으로 이 거리도 못 가면 감속 [m]
         'slow_speed': 0.10,        # 그때 감속 속도
         'stop_distance': 0.25,     # 그래도 이 거리 안에서 닿게 되면 정지 [m]
@@ -285,6 +312,21 @@ PARAM_DEFAULTS = {
         'max_distance': 7.0,       # 진입 후 최대 주행거리 (3차선 직선 5.5 m) [m]
         'max_duration': 40.0,
         'context_timeout': 5.0,    # 끝난 뒤 이 시간 안에 A/B 가 오면 차선 번호를 넘겨줌 [s]
+        # (11/12 사용자 선택) 카메라 차선을 못 믿어 차 방향을 기준으로 쓸 때, 트랙 축(axis_ref_deg + 90도 단위)에서
+        #   axis_snap_max_deg 안이면 그 축으로 맞춤. Gazebo pd_lane_run3: 코너 16도 덜 돈 채(-164도) 진입 -> 바깥 선 위.
+        #   가정: 트랙은 직각, odom yaw 0 = 출발 직선 방향 (출발선에 똑바로 놓고 odom 켜기)
+        'axis_snap': True,
+        'axis_ref_deg': 0.0,
+        'axis_snap_max_deg': 30.0,
+        # (11/12 사용자 선택) 차 방향 기준일 때 옆 위치(d = 0)도 차 위치라 차가 비켜 있으면 세 차선이 다 밀림
+        #   (pd_lane_run4: 11 cm). 차 앞 lat_snap_range 안에서 확실히 본 LIMO 가 lat_snap_min_items 대 이상,
+        #   차선 가운데에서 비킨 값이 lat_snap_spread 안에 절반 넘게 모이면 그 평균만큼 한 번 옮김.
+        #   lat_snap_max 넘으면 애매해서 안 옮김. 가정: LIMO 는 차선 가운데에 서 있음 (연습 배치는 그럼, 대회 확정 아님)
+        'lat_snap': True,
+        'lat_snap_min_items': 2,
+        'lat_snap_spread': 0.08,
+        'lat_snap_max': 0.20,
+        'lat_snap_range': 2.0,
         'gap_speed': 0.12,         # 비상용 빈 공간 따라가기
         'gap_range': 1.5,
         'gap_gain': 1.0,
@@ -467,7 +509,20 @@ class MissionSupervisor(Node):
         self._load_params()
 
         # --- 발행 ---
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.ack_msg_type = None
+        if self.cmd_output == 'ackermann':
+            from ackermann_msgs.msg import AckermannDrive
+            self.ack_msg_type = AckermannDrive
+            self.cmd_pub = self.create_publisher(AckermannDrive, self.ackermann_topic, 10)
+            self.get_logger().info('명령 출력: %s (AckermannDrive, 조향각 x %.3f, 한계 %.2f rad), odom 기준점 앞 %.2f m'
+                                   % (self.ackermann_topic, self.ackermann_steer_scale, self.ackermann_max_steer,
+                                      self.odom_center_offset_x))
+        else:
+            if self.cmd_output != 'twist':
+                self.get_logger().warn('cmd_output=%r 모름 - twist(/cmd_vel) 로 보냄' % self.cmd_output)
+                self.cmd_output = 'twist'
+            self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.last_ack_steer = 0.0
         latched = QoSProfile(depth=1)
         latched.durability = QoSDurabilityPolicy.TRANSIENT_LOCAL
         self.state_pub = self.create_publisher(String, '/supervisor/state', latched)
@@ -479,6 +534,8 @@ class MissionSupervisor(Node):
         # --- 인지 버퍼 ---
         stale = self.perception['stale_sec']
         self.buf = dict((k, Buffer(stale)) for k in self.BUFFER_KEYS)
+        self.yaw_hist = collections.deque(maxlen=80)   # (수신 시각, yaw) - 회전 속도 계산용 (11/12)
+        self._defer_log = None
         for k in self.YOLO_KEYS:
             self.buf[k].stale_sec = max(stale, self.yolo['hold_sec'])
         self._yolo_streak = {}
@@ -496,7 +553,7 @@ class MissionSupervisor(Node):
             sub(String, topic, store('event_' + src, lambda m: m.data), 10)
         sub(ObstacleArray, '/perception/obstacles',
             store('obstacles', lambda m: list(m.obstacles)), 10)
-        sub(Odometry, '/odom', store('odom', _pose_from_odom), 10)
+        sub(Odometry, '/odom', self._cb_odom, 10)
         sub(Bool, '/supervisor/reset', self._cb_reset, 10)
 
         # --- 전이 판정 ---
@@ -530,6 +587,24 @@ class MissionSupervisor(Node):
     # ------------------------------------------------------------------
     # 콜백
     # ------------------------------------------------------------------
+    def _cb_odom(self, msg):
+        pose = _pose_from_odom(msg)
+        off = self.odom_center_offset_x
+        if off:
+            # (11/13) odom 점(WeGo 아커만: 뒷바퀴 축) -> 판단 기준점(몸통 가운데)
+            pose = (pose[0] + off * math.cos(pose[2]), pose[1] + off * math.sin(pose[2]), pose[2])
+        now = self.clock_sec()
+        self.buf['odom'].set(pose, now)
+        self.yaw_hist.append((now, pose[2]))
+
+    def turn_rate(self, now, window=0.4):
+        """odom 으로 구한 최근 window 초 회전 속도 [rad/s] (왼쪽 +). 기록이 모자라면 None."""
+        hist = [h for h in list(self.yaw_hist) if now - window - 0.05 <= h[0] <= now + 0.05]
+        if len(hist) < 2 or hist[-1][0] - hist[0][0] < 0.15:
+            return None
+        dyaw = math.atan2(math.sin(hist[-1][1] - hist[0][1]), math.cos(hist[-1][1] - hist[0][1]))
+        return dyaw / (hist[-1][0] - hist[0][0])
+
     def _store(self, key, extract):
         def callback(msg):
             self.buf[key].set(extract(msg), self.clock_sec())
@@ -779,7 +854,7 @@ class MissionSupervisor(Node):
             for name in names:
                 if name != 'none' and name not in found:
                     found.append(name)
-        path = self._path_event(now)
+        path = self._path_event(now, quiet=allowed is not None)
         if path is not None and path not in found:
             found.append(path)
         if allowed is not None:
@@ -793,20 +868,34 @@ class MissionSupervisor(Node):
                 return name
         return found[0]
 
-    def _path_event(self, now):
-        """라이다 장애물이 진행 경로 앞에 있으면 'limo' (AVOID_STATIC 진입용)."""
+    def _path_event(self, now, quiet=False):
+        """라이다 장애물이 진행 경로 앞에 있으면 'limo' (AVOID_STATIC 진입용).
+        quiet: 미션 State 안에서 부를 때 '진입 미룸' 로그를 안 남김."""
         cfg = self.avoid_static
         if not cfg['lidar_trigger']:
             return None
         obstacles = self.buf['obstacles'].get(now)
         if not obstacles:
             return None
+        near = None
         for o in obstacles:
             if not (cfg['min_obstacle_radius'] <= o.radius <= cfg['max_obstacle_radius']):
                 continue
             if 0.1 < o.x <= cfg['trigger_distance'] and abs(o.y) <= cfg['trigger_half_width']:
-                return 'limo'
-        return None
+                near = o.x if near is None else min(near, o.x)
+        if near is None:
+            return None
+        # (11/12) 코너 도는 중이면 미룸 (장애물이 아주 가까우면 예외)
+        limit = math.radians(cfg['defer_turn_rate_deg'])
+        rate = self.turn_rate(now) if limit > 0.0 else None
+        if rate is not None and abs(rate) > limit and near > cfg['defer_min_distance']:
+            self.dbg('avoid/deferred', near)
+            if not quiet and (self._defer_log is None or now - self._defer_log > 1.0):
+                self._defer_log = now
+                self.get_logger().info('[AVOID_STATIC] 코너 도는 중 (초당 %.0f도) - 진입 미룸 (앞 장애물 %.2fm)'
+                                       % (math.degrees(abs(rate)), near))
+            return None
+        return 'limo'
 
     def _locked(self, event, now):
         outcome = EVENT_TO_OUTCOME.get(event)
@@ -907,6 +996,9 @@ class MissionSupervisor(Node):
             self.get_logger().warn('비정상 제어값 - 정지')
             self.publish_stop()
             return
+        if self.ack_msg_type is not None:
+            self._publish_ackermann(float(v), float(omega))
+            return
         msg = Twist()
         msg.linear.x = float(v)
         if self.cmd_angular_is_steering:
@@ -923,8 +1015,31 @@ class MissionSupervisor(Node):
         self.cmd_pub.publish(msg)
         self.last_v = float(v)
 
+    def ackermann_steer(self, v, omega):
+        """(11/13) 회전속도 -> AckermannDrive.steering_angle. 같은 곡률의 자전거 모델 조향각 x ackermann_steer_scale.
+        후진은 부호 있는 속도 그대로 (조향각이 같으면 후진 때 도는 방향이 반대 = 실차 바퀴와 같음).
+        거의 서 있으면 직전 조향각 유지 (출발할 때 바퀴가 엉뚱한 쪽으로 안 가게)."""
+        if abs(v) > 1e-3:
+            steer = math.atan(self.wheel_base * omega / v) * self.ackermann_steer_scale
+            lim = self.ackermann_max_steer
+            self.last_ack_steer = max(-lim, min(lim, steer))
+        return self.last_ack_steer
+
+    def _publish_ackermann(self, v, omega):
+        msg = self.ack_msg_type()
+        msg.speed = float(v)
+        msg.steering_angle = float(self.ackermann_steer(v, omega))
+        self.cmd_pub.publish(msg)
+        self.last_v = float(v)
+
     def publish_stop(self):
-        self.cmd_pub.publish(Twist())
+        if self.ack_msg_type is not None:
+            msg = self.ack_msg_type()
+            msg.speed = 0.0
+            msg.steering_angle = float(self.last_ack_steer)
+            self.cmd_pub.publish(msg)
+        else:
+            self.cmd_pub.publish(Twist())
         self.last_v = 0.0
 
 

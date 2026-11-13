@@ -62,6 +62,11 @@ DEFAULTS = {
     'corner_curv_min': 0.3,        # (나) 보이는 선의 곡률 [1/m] 이 이 값 이하면 직선으로 봄 (기억 폭 그대로)
     'corner_curv_full': 1.5,       # (나) 곡률이 이 값 이상이면 목표 비율 1
     'corner_blend_per_sec': 1.0,   # (나) 비율이 1초에 최대 이만큼만 움직임 (한 번에 바꾸지 않음)
+    # (다) 코너 바깥 선 거리 [m]. 0 = 끔. 한 선 프레임이고 보이는 선이 코너 바깥 선일 때(오른쪽으로 휘는 왼쪽 선,
+    #      왼쪽으로 휘는 오른쪽 선), 그 선에서 이 거리만큼 떨어진 경로를 쓴다. 휜 정도(위 (나)와 같은 비율
+    #      corner_b: corner_curv_min~full, corner_blend_per_sec)에 비례해 기존 반폭에서 이 값으로 서서히 옮긴다.
+    #      직선과 두 선 프레임은 그대로. 실행 중 ros2 param set 으로 바꿀 수 있다.
+    'corner_outer_offset_m': 0.0,
     'single_confidence': 0.5,      # 한 선 프레임의 confidence (고정)
     'pair_return_rate_mps': 0.3,   # 한 선 -> 두 선 전환 때만 lateral 변화 속도 제한 [m/s]. 0이면 끔
     'reference_distance_m': 0.5,
@@ -130,6 +135,7 @@ class LaneCore:
         self.w_mem, self.w_t = None, None    # 기억한 미터 폭, 마지막 실측 시각
         self.half = self.p['lane_width_default_m'] / 2.0   # 이번 프레임에 쓰는 반폭 (process가 정함)
         self.corner_b = 0.0                  # (나) 코너 폭 쪽으로 옮긴 비율 0~1
+        self.path_pts = None
         self.last_t = None
         self.last_kind = None                # 마지막 valid 프레임 종류 'pair' | 'single'
         self.out_lat = self.out_head = self.out_t = None
@@ -533,6 +539,7 @@ class LaneCore:
             G[side] = {y: q for y, q in G[side].items() if q is not None}
         C, W = [], []
         n_both = n_one = 0
+        self.path_pts = None     # 이번 프레임 가운데 경로 점 (바닥 좌표, 가까운 쪽부터). 노드 예측이 저장해 쓴다
         if bool(G['L']) != bool(G['R']):
             # 한 선 프레임(한쪽 선만 있음): 보이는 선에 직선을 맞춘 뒤 그 직선을 반폭만큼 옮긴다.
             # 줄마다 따로 옮기면 급한 코너(선의 곡률 반경이 반폭과 비슷)에서 옮긴 점들이 한 점으로 모여
@@ -550,6 +557,9 @@ class LaneCore:
             lateral = float((coef[0] + coef[1] * x_ref) / np.hypot(1.0, coef[1])) + (-half if side == 'L' else half)
             self.stats['single_rejected'] = 0
             conf = 0.5 * n_one / n_rows * np.exp(-(rms / 0.03) ** 2) * min(np.ptp(P[:, 0]) / 0.4, 1.0)
+            # 가운데 경로 점: 보이는 선 점들을 맞춘 직선의 수직 방향으로 반폭만큼 통째로 옮김 (선의 휜 모양은 그대로)
+            nl = np.array([-coef[1], 1.0]) / np.hypot(1.0, coef[1])
+            self.path_pts = P + (-nl if side == 'L' else nl) * half
             return lateral, heading, True, float(np.clip(conf, 0.0, 1.0)), 0, n_one
         for y in sorted(set(G['L']) | set(G['R']), reverse=True):
             if y in G['L'] and y in G['R']:
@@ -593,6 +603,7 @@ class LaneCore:
             bn = np.linalg.lstsq(A[near] * sw[near, None], C[near, 1] * sw[near],
                                  rcond=None)[0][1]
             conf *= np.exp(-(np.degrees(abs(np.arctan(bn) - np.arctan(coef[1]))) / 10.0) ** 2)
+        self.path_pts = C.copy()             # 줄 순서 (화면 아래 = 가까운 쪽부터)
         return lateral, heading, True, float(np.clip(conf, 0.0, 1.0)), n_both, n_one
 
     def _reject_singles(self, C, W):
@@ -646,6 +657,16 @@ class LaneCore:
         if dr is None or (dl is not None and dl <= dr):
             return 'L'
         return 'R'
+
+    def line_curv_signed(self, pts, w, h):
+        """한 선의 지면 곡률 [1/m], 왼쪽으로 휘면 +. 점이 3개 미만이거나 전방 0.15 m 미만으로 퍼져 있으면 0."""
+        G = [self.pix_to_base(u, y, w, h) for y, u in pts.items()]
+        G = np.array([q for q in G if q is not None])
+        if len(G) < 3 or np.ptp(G[:, 0]) < 0.15:
+            return 0.0
+        c2, c1, _ = np.polyfit(G[:, 0], G[:, 1], 2)
+        slope = c1 + 2.0 * c2 * G[:, 0].mean()
+        return float(2.0 * c2 / (1.0 + slope * slope) ** 1.5)
 
     def line_curvature(self, pts, w, h):
         """한 선의 지면 곡률 크기 [1/m]. 점이 3개 미만이거나 전방 0.15 m 미만으로 퍼져 있으면 0."""
@@ -762,10 +783,13 @@ class LaneCore:
         fixed = ''
         W = self.cur_width()
         b_tgt = 0.0
+        outer = False
         if single:
             if self.w_mem is None:
                 fixed += 'a'
-            k = self.line_curvature(newL or newR, w, h)
+            ks = self.line_curv_signed(newL or newR, w, h)
+            k = abs(ks)
+            outer = (bool(newL) and ks < 0) or (bool(newR) and ks > 0)     # 보이는 선이 코너 바깥 선
             k0, k1 = g('corner_curv_min'), g('corner_curv_full')
             b_tgt = float(np.clip((k - k0) / max(k1 - k0, 1e-6), 0.0, 1.0))
         step = g('corner_blend_per_sec') * dt
@@ -775,6 +799,10 @@ class LaneCore:
             if Wc > W:
                 W = W + self.corner_b * (Wc - W)
                 fixed += 'b'
+        off = float(g('corner_outer_offset_m'))
+        if single and outer and off > 0.0 and self.corner_b > 0.0:
+            W = W + self.corner_b * (2.0 * off - W)
+            fixed += 'o'
         if abs(W / 2.0 - self.half) > 1e-12 or note:
             self.half = W / 2.0
             lat, head, valid, conf, n_both, n_one = self.lane_error(newL, newR, w, h)
@@ -859,4 +887,5 @@ class LaneCore:
                     confidence=conf, single=n_one > 0, guard=why, width_err=werr,
                     n_one=n_one, n_good=n_good, n_both=n_both, debug=dbg, lat_raw=lat_raw, kind=kind,
                     width_meas=wf, width_mem=self.w_mem, width_used=2.0 * self.half, fixed=fixed if ok else '',
-                    width_note=note, slew=lat != lat_raw, corner_b=self.corner_b, **self.stats)
+                    width_note=note, slew=lat != lat_raw, corner_b=self.corner_b,
+                    outer_off=('o' in fixed), path=self.path_pts if ok else None, **self.stats)

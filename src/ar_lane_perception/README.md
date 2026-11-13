@@ -279,3 +279,25 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 - `/perception/lane_status`에 `kind`(pair/single), `width_meas`, `width_mem`, `width_used`, `fixed`(a=가, b=나), `width_note`, `slew`, `lat_raw`가 추가됐다.
   노드 로그에 `width_log_sec`(5초)마다 고정 폭 사용 프레임 수(가/나)가 나온다.
 - `lane_extra`는 쉼표로 여러 yaml을 줄 수 있다 (뒤가 우선). 예: `lane_extra:=config/step0_hls.yaml,config/sim_hls.yaml`
+
+## 코너 바깥 선 거리 corner_outer_offset_m (11/13, 기본 0 = 끔)
+
+- 한 선 프레임에서 보이는 선이 코너 바깥 선일 때만 쓴다(오른쪽으로 휘는 왼쪽 선, 왼쪽으로 휘는 오른쪽 선). 이때 그 선에서 `corner_outer_offset_m`만큼 떨어진 경로를 쓴다.
+  옮기는 정도는 (나)와 같은 비율 `corner_b`를 쓴다(보이는 선 곡률 `corner_curv_min` 0.3 ~ `corner_curv_full` 1.5 1/m, 1초에 최대 `corner_blend_per_sec`).
+  그 비율에 비례해 기존 반폭에서 이 값으로 서서히 옮긴다. 직선과 두 선 프레임은 그대로다.
+- 실행 중에 바꿀 수 있다: `ros2 param set /camera_perception_node corner_outer_offset_m 0.35`
+- `/perception/lane_status`: `outer_off`(이 프레임에 적용됨), `corner_b`. 쓴 폭은 `width_used`(= 2 × 바깥 선 거리), 고정 폭 표시 `fixed`에 `o`가 붙는다.
+- 실차 코너 폭은 최대 0.60 m다. 0.35로 두면 안쪽 선과 0.25 m 떨어진다.
+
+## 예측 (predict_enable, safe3 에서 켬)
+
+- `predict_max_sec` (1.0): 마지막 valid 카메라 프레임 뒤 이 시간까지 odom으로 옮긴 값을 낸다.
+- `predict_confidence` (0.25): 예측 중(마지막 카메라 프레임이 invalid) LaneError confidence.
+- `predict_path` (true): 예측 중에는 곡률 하나로 계속 휘게 하지 않는다. 마지막 valid 프레임의 가운데 경로 점들을 odom 좌표에 고정해 둔다.
+  그 점들을 차 기준으로 옮긴 뒤 `reference_distance_m` 지점의 y × cos(경로 방향)을 lateral로 다시 잰다(legacy와 같은 정의).
+  - 가운데 경로 점: 두 선 프레임은 줄별 가운데 점이다. 한 선 프레임은 보이는 선 점들을 맞춘 직선의 수직 방향으로 반폭만큼 통째로 옮긴 점이다(휜 모양은 그대로).
+  - 점 범위를 넘어가야 할 때만 끝 구간 방향으로 직선 연장한다. 연장이 `predict_ext_max_m`(0.2 m)를 넘으면 confidence에 `predict_ext_conf_scale`(0.5)을 더 곱하고 예측은 계속한다.
+  - false면 예전처럼 직선 하나를 옮긴다. 카메라 프레임 사이(마지막 프레임 valid)는 예전처럼 직선을 옮긴다.
+- `/perception/lane_status`:
+  - 카메라 프레임마다 `src: camera`, `predicting`(이 프레임이 invalid이고 예측 값이 나가는 중), `predict_sec`.
+  - 예측으로 낸 값마다 `src: predict`, `predict_sec`(마지막 valid 뒤 지난 시간), `pred_beyond`(저장 범위를 넘어 연장), `pred_ext_m`, `lat`, `conf`.

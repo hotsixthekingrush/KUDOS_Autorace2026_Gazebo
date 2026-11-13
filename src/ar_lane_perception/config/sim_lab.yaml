@@ -9,3 +9,9 @@ camera_perception_node:
     lab_a_max: 140
     lab_b_min: 175
     lab_b_max: 255
+    # 카메라: 시뮬 값 (safe3_* / step0_* 의 실차 카메라 값을 덮어씀. 11/13 실차 값 확정 뒤 추가)
+    focal_px: 381.0
+    cam_height_m: 0.21
+    cam_pitch_rad: 0.0
+    center_x: 320
+    cam_x_m: 0.10

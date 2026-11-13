@@ -31,10 +31,10 @@ camera_perception_node:
     single_confidence: 0.5
     pair_return_rate_mps: 0.3    # 한 선 -> 두 선 전환 때만
 
-    # --- 카메라 값: !! 실차 값 미확정 !! 추측으로 바꾸지 않고 기존 값(시뮬 기준) 그대로 둠.
-    # 실차에서 재서 바꿀 것. 틀리면 lateral 과 실측 차선 폭이 같이 틀어진다 (cam_height_m k배 -> 전부 k배).
-    focal_px: 381.0        # 실차 값 미확정
-    cam_height_m: 0.21     # 실차 값 미확정
-    cam_pitch_rad: 0.0     # 실차 값 미확정
-    cam_x_m: 0.10          # 실차 값 미확정
+    # --- 카메라 값: 실차 확정 (11/13, 직선 50 cm 차선이 0.51 m 로 재짐). Gazebo 는 sim_hls.yaml / sim_lab.yaml 이 시뮬 값으로 덮어씀
+    focal_px: 489.6
+    cam_height_m: 0.20
+    cam_pitch_rad: 0.15
+    center_x: 312          # 처음 시작할 때 좌/우 선을 가르는 기준 (영상 가운데)
+    cam_x_m: 0.10          # 실차 미측정 (시뮬 값 그대로)
     horizon_y: 260         # 실차 값 미확정 (지금 코드는 쓰지 않음)

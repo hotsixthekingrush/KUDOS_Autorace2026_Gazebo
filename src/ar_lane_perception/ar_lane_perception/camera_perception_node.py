@@ -39,6 +39,13 @@ class CameraPerceptionNode(Node):
         self.declare_parameter('odom_topic', '/odom')
         self.declare_parameter('predict_rate_hz', 20.0)
         self.declare_parameter('predict_max_sec', 1.0)        # 마지막 valid 프레임 뒤 이 시간까지만 옮긴 값 발행
+        self.declare_parameter('predict_confidence', 0.25)    # 예측 중(마지막 카메라 프레임이 invalid) 발행 confidence
+        # 예측 중 lateral 계산: True 면 마지막 valid 프레임의 가운데 경로 점들(odom 고정)을 차 기준으로 옮겨 reference_distance_m
+        # 지점에서 다시 잰다 (곡률 하나로 휘게 하지 않음). 점 범위를 넘으면 끝 구간 방향으로 직선 연장.
+        # False 면 예전처럼 직선 하나(lateral, heading)를 옮긴다
+        self.declare_parameter('predict_path', True)
+        self.declare_parameter('predict_ext_max_m', 0.2)      # 연장 길이가 이보다 길면 confidence 에 아래 값을 더 곱함
+        self.declare_parameter('predict_ext_conf_scale', 0.5)
         for k, v in DEFAULTS.items():
             self.declare_parameter(k, v)
         self.core = LaneCore({k: self.get_parameter(k).value for k in DEFAULTS})
@@ -58,6 +65,8 @@ class CameraPerceptionNode(Node):
         self.poses = collections.deque(maxlen=400)   # (t, x, y, yaw) odom
         self.line = None                             # 마지막 valid 중심선: (odom 점 A, 단위 방향 d, 촬영 시각, conf, single)
         self.pred_invalid_sent = True
+        self.frame_valid = True       # 마지막 카메라 프레임 valid 여부 (False 인 동안 옮긴 값 = 예측)
+        self.path_odom = None         # 마지막 valid 프레임 가운데 경로 점 (odom 좌표, 가까운 쪽부터)
         if self.predict:
             self.create_subscription(Odometry, self.get_parameter('odom_topic').value, self.odom_callback, 50)
             self.core.motion = self.motion
@@ -135,6 +144,33 @@ class CameraPerceptionNode(Node):
         A, d = self._to_odom(lat, head, a)
         return self._from_odom(A, d, b)
 
+    def _path_lateral(self, P, pose):
+        """odom 고정 경로 점 P -> 자세 pose 기준 (lateral, heading, 연장 길이 m). 못 구하면 None.
+        reference_distance_m 지점의 경로 y 와 방향. 그 지점이 점 범위 밖이면 가까운/먼 끝 구간 방향으로 직선 연장."""
+        xr = float(self.core.p['reference_distance_m'])
+        x, y, yaw = pose
+        cs, sn = math.cos(yaw), math.sin(yaw)
+        Q = [(cs * (px - x) + sn * (py - y), -sn * (px - x) + cs * (py - y)) for px, py in P]
+        if len(Q) < 2:
+            return None
+        for (x0, y0), (x1, y1) in zip(Q[:-1], Q[1:]):
+            if (x0 - xr) * (x1 - xr) <= 0.0 and abs(x1 - x0) > 1e-6:
+                k = (xr - x0) / (x1 - x0)
+                hd = math.atan2(y1 - y0, x1 - x0)
+                return float((y0 + k * (y1 - y0)) * math.cos(hd)), float(hd), 0.0
+        # 범위 밖: 먼 끝(xr 이 더 멀 때) 또는 가까운 끝 구간의 방향으로 연장
+        far = abs(Q[-1][0] - xr) < abs(Q[0][0] - xr)
+        (ax, ay), (bx, by) = (Q[-2], Q[-1]) if far else (Q[1], Q[0])
+        dx, dy = bx - ax, by - ay
+        if abs(dx) < 1e-6:
+            return None
+        hd = math.atan2(dy, dx) if far else math.atan2(-dy, -dx)
+        if abs(hd) > math.radians(80):
+            return None
+        k = (xr - bx) / dx
+        yr = by + k * dy
+        return float(yr * math.cos(hd)), float(hd), float(abs(k) * math.hypot(dx, dy))
+
     def predict_tick(self):
         if not self.poses:
             return
@@ -145,8 +181,15 @@ class CameraPerceptionNode(Node):
         out.header.stamp.nanosec = int((t_now - int(t_now)) * 1e9)
         out.header.frame_id = 'base_link'
         r = None
+        ext = 0.0
+        predicting = not self.frame_valid
         if L is not None and 0.0 <= t_now - L[2] <= float(self.get_parameter('predict_max_sec').value):
-            r = self._from_odom(L[0], L[1], (x, y, yaw))
+            if predicting and self.get_parameter('predict_path').value and self.path_odom is not None:
+                pr = self._path_lateral(self.path_odom, (x, y, yaw))
+                if pr is not None:
+                    r, ext = pr[:2], pr[2]
+            else:
+                r = self._from_odom(L[0], L[1], (x, y, yaw))
         if r is None:
             if self.pred_invalid_sent:
                 return                # invalid는 한 번만 (카메라 프레임 쪽에서도 invalid가 나감)
@@ -156,8 +199,20 @@ class CameraPerceptionNode(Node):
             self.pred_invalid_sent = False
             out.valid = True
             out.lateral_offset_m, out.heading_error_rad = float(r[0]), float(r[1])
-            out.confidence = float(L[3])
+            conf = float(L[3])
+            if predicting:
+                conf = float(self.get_parameter('predict_confidence').value)
+                if ext > float(self.get_parameter('predict_ext_max_m').value):
+                    conf *= float(self.get_parameter('predict_ext_conf_scale').value)
+            out.confidence = conf
             out.single_lane_estimated = bool(L[4])
+            if predicting and self.get_parameter('publish_status').value:
+                # 예측으로 낸 값도 lane_status 에 남긴다 (src=predict). predict_sec = 마지막 valid 카메라 프레임 뒤 지난 시간,
+                # pred_beyond = 저장한 경로 점 범위를 넘어 연장했는지, pred_ext_m = 연장 길이
+                self.status_pub.publish(String(data=json.dumps(dict(
+                    src='predict', t=t_now, valid=True, predicting=True, predict_sec=round(t_now - L[2], 3),
+                    pred_beyond=bool(ext > 0.0), pred_ext_m=round(float(ext), 3),
+                    lat=float(out.lateral_offset_m), head=float(out.heading_error_rad), conf=float(out.confidence)))))
         self.lane_pub.publish(out)
 
     def _on_params(self, params):
@@ -193,9 +248,17 @@ class CameraPerceptionNode(Node):
         if pose is None:
             self.lane_pub.publish(out)               # 예전 동작 (예측 끔, 또는 odom 없음)
         else:
+            self.frame_valid = bool(out.valid)
             if out.valid:
                 A, d = self._to_odom(out.lateral_offset_m, out.heading_error_rad, pose)
                 self.line = (A, d, t, out.confidence, out.single_lane_estimated)
+                P = r.get('path')
+                if P is not None and len(P) >= 2:
+                    px, py, pyaw = pose
+                    c, s_ = math.cos(pyaw), math.sin(pyaw)
+                    self.path_odom = [(float(px + c * a - s_ * b), float(py + s_ * a + c * b)) for a, b in P]
+                else:
+                    self.path_odom = None
             # 발행은 predict_tick이 한다 (valid면 곧바로 새 값으로, invalid면 predict_max_sec까지 옮긴 값, 그 뒤 invalid)
             self.predict_tick()
         if self.get_parameter('publish_status').value:
@@ -210,6 +273,13 @@ class CameraPerceptionNode(Node):
             st.update(kind=r['kind'], lat_raw=float(r['lat_raw']), width_meas=r['width_meas'],
                       width_mem=r['width_mem'], width_used=float(r['width_used']), fixed=r['fixed'],
                       width_note=r['width_note'], slew=bool(r['slew']), single=bool(r['single']))
+            # 예측: 이 카메라 프레임이 invalid 이고 마지막 valid 뒤 predict_max_sec 안이면 옮긴 값이 나가는 중
+            L = self.line
+            age = None if L is None else t - L[2]
+            pred = (self.predict and not out.valid and age is not None
+                    and 0.0 <= age <= float(self.get_parameter('predict_max_sec').value))
+            st.update(src='camera', predicting=bool(pred), predict_sec=round(age, 3) if pred else 0.0,
+                      corner_b=float(r['corner_b']), outer_off=bool(r.get('outer_off')))
             self.status_pub.publish(String(data=json.dumps(st)))
         wl = float(self.get_parameter('width_log_sec').value)
         if wl > 0 and time.monotonic() - self._wlog_t >= wl:

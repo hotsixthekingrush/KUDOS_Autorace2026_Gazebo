@@ -20,6 +20,8 @@ A/B 표지판을 인식하면 진입하고, 표지판까지 거리가 임계값 
   그 차선 수(lane_shift)를 세서 offset 에서 lane_shift x 차선 폭을 뺀다. 차선 노드가 처음 차선을 계속 줘도 그대로 동작.
   lane_shift 는 0(처음 차선) ~ 목표 차선 하나 사이만 (반대 방향으로 튀는 건 차선 노드 오류로 보고 무시).
   odom 모드(3차선 이어받음)는 카메라 차선을 안 쓰니 상관없음.
+  (11/14) settle_sec 이 지나도 차선 노드 기준이 새 차선으로 안 바뀌었으면 최대 jump_wait_sec 더 옮기며 기다린다
+  (점선을 못 넘은 채 끝나면 LANE_FOLLOWING 이 처음 차선으로 돌아가서).
 """
 
 from ar_mission_supervisor.base_state import SafeState
@@ -49,6 +51,7 @@ class LeftARightB(SafeState):
         self.reached_s = None
         self.lane_shift = 0         # (11/13) 차선 노드 기준 차선이 옆으로 바뀐 수 (+1 = 왼쪽 차선 기준)
         self._cam_prev = None       # 직전 차선 값 (lateral, stamp)
+        self.waiting_jump = False   # (11/14) settle 뒤 차선 노드 기준 바뀌기 기다리는 중
 
     def on_enter(self):
         node = self.node
@@ -62,6 +65,7 @@ class LeftARightB(SafeState):
         self.reached_s = None
         self.lane_shift = 0
         self._cam_prev = None
+        self.waiting_jump = False
         self.odom_mode = False
         if node.left_a_right_b['use_lane_context'] and self.plan.fresh(self.entered_at):
             car = self.plan.update(self.entered_at)
@@ -184,11 +188,28 @@ class LeftARightB(SafeState):
             self.node.get_logger().info('[LEFT_A_RIGHT_B] 이동 완료 - 안정화')
 
     def _settle(self, now, cfg):
-        """새 차선에서 잠시 유지한 뒤 종료."""
+        """새 차선에서 잠시 유지한 뒤 종료.
+        (11/14) lane_jump 를 켜면 settle_sec 이 지나도 차선 노드 기준이 새 차선으로 바뀔 때까지 (최대 jump_wait_sec 더)
+        기다린다. 점선을 못 넘은 채 끝나면 LANE_FOLLOWING 이 처음 차선으로 돌아가서 (기본값으로 끝날 때 옆 0.28 m,
+        점선 0.26 m 를 겨우 넘음)."""
         self._track_lane_jump(cfg)
         offset = self._offset(cfg, 1.0)
         self.driver.step(cfg['shift_speed'], offset)
-        return (now - self.settle_started) >= cfg['settle_sec']
+        held = now - self.settle_started
+        if held < cfg['settle_sec']:
+            return False
+        if not cfg['lane_jump'] or self.lane_shift == int(self.direction):
+            return True
+        log = self.node.get_logger()
+        if held < cfg['settle_sec'] + cfg['jump_wait_sec']:
+            if not self.waiting_jump:
+                self.waiting_jump = True
+                log.info('[LEFT_A_RIGHT_B] 차선 노드가 아직 처음 차선 기준 - 새 차선으로 바뀔 때까지 최대 %.1f초 더 옮김'
+                         % cfg['jump_wait_sec'])
+            return False
+        log.warn('[LEFT_A_RIGHT_B] %.1f초 더 기다려도 차선 노드 기준이 안 바뀜 - 그냥 끝냄 (처음 차선 기준을 계속 주는 노드일 수 있음)'
+                 % cfg['jump_wait_sec'])
+        return True
 
     # ------------------------------------------------------------------
     # 3차선 이어받기 (odom 모드)

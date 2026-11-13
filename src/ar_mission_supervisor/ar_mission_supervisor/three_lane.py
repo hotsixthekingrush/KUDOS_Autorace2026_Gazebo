@@ -5,9 +5,22 @@
   A(좌) 경로는 0번, B(우) 경로는 2번 차선으로 이어진다.
 좌표는 AVOID_STATIC 진입 순간의 차선 방향 기준(LaneFrame). 가운데 차선 중앙이 d = 0,
 왼쪽 차선 중앙이 d = +lane_width, 오른쪽이 d = -lane_width.
+(11/12) 카메라 차선을 못 믿어서 차 방향을 기준으로 쓸 때는, 차 방향이 트랙 축(odom 기준 axis_ref_deg + 90도 단위)에서
+  axis_snap_max_deg 안이면 그 축으로 맞춘다 (axis_snap). Gazebo pd_lane_run1~3: 두 번째 코너를 16~20도 덜 돈 채
+  (카메라는 3차선 입구에서 옆 0, 방향 +20도로 틀림) 진입 -> 차 방향을 기준으로 잡아 바깥 노란 선 위까지 감.
+  트랙이 직각으로만 되어 있고, odom yaw 0 이 출발 직선 방향이라는 가정 (출발선에 똑바로 놓고 odom 을 켤 것).
+
+(11/12) 차 방향을 기준으로 쓸 때는 옆 위치(d = 0)도 차 위치라서, 차가 차선 가운데에서 비켜 있으면 세 차선이 다 같이
+  밀린다 (pd_lane_run4: 11 cm). 가까이(lat_snap_range) 확실히 본 LIMO 가 lat_snap_min_items 대 이상 모이면,
+  LIMO 가 차선 가운데(d = 0, +-lane_width)에 서 있다고 보고 옆 위치를 한 번 맞춘다 (lat_snap).
 
 차선 번호는 변수로 들고 다니되(시작 = 가운데), 차선 변경을 '끝냈을 때만' 바꾼다.
 odom 으로 계산한 실제 위치(d)와 계속 어긋나면 odom 쪽을 따른다.
+(11/12, lane_from_odom) 차선 바꾸는 중에도 차선 번호는 odom 위치로 고친다 (pd_lane_run4: 가운데~오른쪽인데 계속 '왼쪽').
+(11/12, lane_commit, 기본 끔) 켜면 목표 차선에 들어가기 전에는 목표를 안 바꾼다 (그 목표가 곧 막히고 switch_hold 가
+  지났을 때만 예외). pd_lane_run4 에서 목표가 0.15초 만에 뒤집혀서 넣어 봤지만, 0.55 배치는 계속 다시 골라야 빠져나가는
+  경우가 있어 run.py 4개가 막힘 -> 끔. '바로 옆 차선만 목표' 도 시험했지만 0.55 배치는 오른쪽 -> 왼쪽을 가운데 LIMO 사이로
+  대각선으로 가로질러야 해서 static_noise 40번 중 2번만 성공 -> 코드에 안 넣음.
 
 step(now, goal) 한 번 = 한 제어 주기:
   - 라이다 장애물 지도 갱신 (LIMO 는 차선 방향으로 놓인 0.322 x 0.22 m 박스 + 여유 clearance 로 본다)
@@ -22,8 +35,14 @@ step(now, goal) 한 번 = 한 제어 주기:
   - 지금 목표 차선이 끝까지 안 닿으면 유지한다 (goal 차선이 끝까지 비면 goal 로).
     아니면 reach 가 switch_margin 이상 긴 차선으로 바꾸되, 바꾼 뒤 switch_hold 초는 유지한다
     (지금 목표가 commit_distance 안에서 막히면 바로 바꿈). goal 은 +0.3 m 가산.
+    (11/12, lane_commit 켰을 때만) 목표 차선으로 가는 중(아직 목표 차선 밖)에는 목표를 고정, 목표가 commit_distance
+    안에서 막히고 switch_hold 가 지났을 때만 다시 고른다.
   - 차선 사이(선 위)로 가는 경로는 쓰지 않는다. 고른 차선도 commit_distance 보다 짧게 닿으면
     감속하고, stop_distance 안에서 닿게 되면 선다.
+  - (11/12) 지금 자리에서 이미 여유 박스(LIMO + clearance)와 겹치는 LIMO 는, 지금 안 겹칠 만큼만 여유를 줄여서 본다
+    (overlap_relax, 진짜 크기보다 overlap_extra 까지). 그보다 더 가까워지는 길은 그대로 막힘.
+    static_run6: 진짜 틈 2.6 cm 인데 여유 1.5 cm + 지도 오차 2 cm 로 '이미 닿음' -> 어느 길도 0 m, 후진도 못 해서
+    제한시간까지 22초 정지 (제한시간 뒤 차선 주행으로 그냥 빠져나감).
   - (11/04 사용자 요청) 선 채로 backup_after 초가 지나면, 뒤가 비어 있을 때 backup_speed 로 backup_distance 만큼
     후진하고(차 방향을 차선 방향으로 펴면서) 다시 계산한다. 한 미션에 backup_max 번까지. LIMO 는 안 움직여서
     서서 기다리기만 하면 계속 막혀 있고, 규정상 진행 불가는 미션 처음부터 재출발이라서.
@@ -63,6 +82,9 @@ class ThreeLanePlanner(object):
         self.backing = None         # 후진 중이면 시작 (x, y)
         self.backups = 0
         self.target_since = -1e9
+        self.lat_snap_pending = False   # 옆 위치를 LIMO 로 맞춰야 하는지 (차 위치 기준일 때, 11/12)
+        self.relax_logged = False       # 겹친 LIMO 여유 줄임 로그 (11/12)
+        self.lat_offset = 0.0
 
     @property
     def cfg(self):
@@ -78,8 +100,16 @@ class ThreeLanePlanner(object):
             return False
         lane_ref, why = self.node.lane_for_frame()
         self.frame.begin(pose, lane_ref)
-        self.node.get_logger().info('[3차선] 기준 좌표: %s' % (why if lane_ref is not None else '차 방향 그대로 (' + why + ')'))
         cfg = self.cfg
+        self.lat_offset = 0.0
+        self.relax_logged = False
+        if lane_ref is not None:
+            self.lat_snap_pending = False
+            self.node.get_logger().info('[3차선] 기준 좌표: %s' % why)
+        else:
+            self.lat_snap_pending = bool(cfg['lat_snap'])
+            self.node.get_logger().info('[3차선] 기준 좌표: 차 방향 (%s)%s%s' % (
+                why, self._snap_axis(pose), ' - 옆 위치는 LIMO 보이면 맞춤' if self.lat_snap_pending else ''))
         ghost = None
         if cfg['ghost_min_hits'] > 0:
             ghost = (cfg['limo_length'] + cfg['ghost_margin'], cfg['limo_width'] + cfg['ghost_margin'],
@@ -96,6 +126,58 @@ class ThreeLanePlanner(object):
         self.target_since = -1e9
         self.active = True
         self.released_at = None
+        return True
+
+    def _snap_axis(self, pose):
+        """(11/12) 차 방향 기준일 때 가까운 트랙 축으로 맞춤. 로그에 붙일 설명을 돌려준다."""
+        cfg = self.cfg
+        if not cfg['axis_snap']:
+            return ''
+        x, y, yaw = pose
+        ref = math.radians(cfg['axis_ref_deg'])
+        rel = math.atan2(math.sin(yaw - ref), math.cos(yaw - ref))
+        axis = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
+        err = math.atan2(math.sin(yaw - axis), math.cos(yaw - axis))
+        if abs(err) > math.radians(cfg['axis_snap_max_deg']):
+            return ' - 트랙 축에서 %.0f도 벗어나 그대로 씀' % math.degrees(abs(err))
+        ox, oy, _ = self.frame.origin
+        self.frame.origin = (ox, oy, math.atan2(math.sin(axis), math.cos(axis)))
+        return ' -> 트랙 축 %.0f도로 맞춤 (차 방향 %.0f도, %+.0f도 차이)' % (
+            math.degrees(math.atan2(math.sin(axis), math.cos(axis))), math.degrees(yaw), math.degrees(err))
+
+    def _snap_lateral(self, s_car, who):
+        """(11/12) 차 위치 기준일 때, 가까이 확실히 본 LIMO 가 차선 가운데(d = 0, +-lane_width)에 오도록 옆으로 한 번 옮긴다.
+        LIMO 마다 '가까운 차선 가운데에서 얼마나 비켜 있나'를 구해, lat_snap_spread 안에 가장 많이 모인 값들
+        (lat_snap_min_items 대 이상이고 절반 넘게)의 평균만큼 옮김. 유령·잘못 찍힌 LIMO 는 묶음에서 빠짐.
+        lat_snap_max 보다 크면 어느 차선인지 애매해서 안 옮김. 맞췄거나 안 맞추기로 했으면 True."""
+        cfg = self.cfg
+        w = self.width()
+        items = [it for it in self.map.confirmed(cfg['confirm_hits'])
+                 if s_car - 0.3 <= it['s'] <= s_car + cfg['lat_snap_range'] and abs(it['d']) <= 1.5 * w]
+        need = max(1, int(cfg['lat_snap_min_items']))
+        if len(items) < need:
+            return False
+        res = sorted(it['d'] - w * round(it['d'] / w) for it in items)
+        group = []
+        for i in range(len(res)):
+            g = [r for r in res[i:] if r - res[i] <= cfg['lat_snap_spread']]
+            if len(g) > len(group):
+                group = g
+        if len(group) < need or 2 * len(group) <= len(res):
+            return False                    # 아직 모자라거나 제각각 - 더 보고 판단
+        off = sum(group) / len(group)
+        log = self.node.get_logger()
+        if abs(off) > cfg['lat_snap_max']:
+            log.warn('[%s] LIMO %d대가 차선 가운데에서 %+.2fm 비켜 있음 - %.2fm 넘어 어느 차선인지 애매해서 옆 위치 그대로'
+                     % (who, len(group), off, cfg['lat_snap_max']))
+            return True
+        nx, ny = self.frame.frame_to_odom(0.0, off)
+        self.frame.origin = (nx, ny, self.frame.origin[2])
+        for it in self.map.items:
+            it['d'] -= off
+        self.lat_offset = off
+        log.info('[%s] 기준 좌표 옆 위치를 LIMO %d대(전체 %d대)로 맞춤: %+.2fm (LIMO 가 차선 가운데에 있다는 가정)'
+                 % (who, len(group), len(res), off))
         return True
 
     def release(self, now):
@@ -318,6 +400,40 @@ class ThreeLanePlanner(object):
         hw = 0.5 * cfg['limo_width'] + cfg['clearance']
         return [(it['s'], it['d'], hl, hw) for it in self.map.confirmed(cfg['confirm_hits'])]
 
+    def _relax(self, boxes, s_, d, psi, who=None):
+        """(11/12) 지금 자리에서 이미 겹친 박스는 지금 안 겹칠 만큼(2 mm 씩) + overlap_slack 만큼 줄인다
+        (clearance + overlap_extra 까지). overlap_slack 은 방향 틀 때 차 뒤쪽이 옆으로 도는 몫 (없으면 멀어지는 길도 4 cm 에서 막힘).
+        그만큼 줄여도 겹치면(진짜로 닿았다고 봄) 그대로 둔다. 그 LIMO 에 지금보다 overlap_slack 넘게 가까워지는 길은 막힘."""
+        cfg = self.cfg
+        if not cfg['overlap_relax']:
+            return boxes
+        shapes = self._shapes()
+        limit = cfg['clearance'] + cfg['overlap_extra']
+        out, relaxed = [], []
+        for b in boxes:
+            if not self._car_hits(s_, d, psi, [b], shapes):
+                out.append(b)
+                continue
+            bs, bd, hl, hw = b
+            nb, k = b, 0.0
+            while k < limit - 1e-9:
+                k = min(k + 0.002, limit)
+                if not self._car_hits(s_, d, psi, [(bs, bd, hl - k, hw - k)], shapes):
+                    k = min(k + cfg['overlap_slack'], limit)
+                    nb = (bs, bd, hl - k, hw - k)
+                    break
+            out.append(nb)
+            if nb is not b:
+                relaxed.append((bs, bd, k))
+        if who is not None:
+            self.node.dbg('static/relaxed', float(len(relaxed)))
+            if relaxed and not self.relax_logged:
+                self.node.get_logger().warn(
+                    '[%s] 지금 자리에서 LIMO 여유 박스와 겹침 - 그 LIMO 는 여유를 줄여서 봄 (지금보다 크게 가까워지는 길은 막힘) (%s)'
+                    % (who, ', '.join('s=%.2f d=%+.2f %.1fcm' % (a, b_, 100.0 * k_) for a, b_, k_ in relaxed)))
+            self.relax_logged = bool(relaxed)
+        return out
+
     def back_steer(self, psi):
         """후진하면서 차 방향을 차선 방향(psi = 0)으로 펴는 조향각. 후진(v < 0)이면 psi 가 줄어든다."""
         return clamp(self.cfg['backup_k_heading'] * psi, -self.node.max_steer, self.node.max_steer)
@@ -345,7 +461,8 @@ class ThreeLanePlanner(object):
         node = self.node
         x0, y0 = self.backing
         done = math.hypot(pose[0] - x0, pose[1] - y0)
-        if done >= cfg['backup_distance'] or self.rollout_back(s_, d, psi, self._all_boxes(), 0.04) < 0.04:
+        if (done >= cfg['backup_distance']
+                or self.rollout_back(s_, d, psi, self._relax(self._all_boxes(), s_, d, psi), 0.04) < 0.04):
             node.get_logger().info('[%s] 후진 %.2fm 끝 - 다시 계산' % (who, done))
             self.backing = None
             self.blocked_since = None
@@ -368,6 +485,10 @@ class ThreeLanePlanner(object):
         if car is None:
             return None
         pose, s_, d, psi = car
+        if self.lat_snap_pending and self._snap_lateral(s_, who):
+            self.lat_snap_pending = False
+            s_, d, psi = self.frame.car(pose)
+        node.dbg('static/lat_offset', self.lat_offset)
 
         if self.changing and self.settled(d, psi):
             self.lane = self.target
@@ -375,11 +496,13 @@ class ThreeLanePlanner(object):
             log.info('[%s] 차선 변경 완료 - %s 차선 (d=%.2fm)' % (who, self.name(self.lane), d))
         if not self.changing:
             self.check_lane(d, now, who)
+        elif cfg['lane_from_odom']:
+            self.lane = self.lane_of(d)     # 바꾸는 중에도 지금 있는 차선 (11/12)
 
         if self.backing is not None and self._back_step(pose, s_, d, psi, now, who):
             return StepResult(pose, s_, d, psi, blocked=True)
 
-        boxes = self._boxes(s_)
+        boxes = self._relax(self._boxes(s_), s_, d, psi, who)
         # 차선마다 굴려 봄: 보통(lookahead) / 급하게(lookahead_short, 11/04) x 한 번 더 옆 차선으로 옮기기(11/05)
         info, horizon = self.plan(s_, d, psi, boxes)
         reach = dict((ln, info[ln]['reach']) for ln in self.LANES)
@@ -395,7 +518,15 @@ class ThreeLanePlanner(object):
             return sc
 
         old = self.target
-        if goal is not None and goal in full:
+        held = now - self.target_since
+        if cfg['lane_commit'] and self.changing and self.lane != old:
+            # (11/12) 목표 차선으로 가는 중: 고정. 목표가 곧 막히고 switch_hold 가 지났을 때만 다시 고름
+            new = old
+            if free[old] < cfg['commit_distance'] and held >= cfg['switch_hold']:
+                best = max(self.LANES, key=score)
+                if best != old and score(best) > score(old) + cfg['switch_margin']:
+                    new = best
+        elif goal is not None and goal in full:
             new = goal
         elif old in full:
             new = old
@@ -405,7 +536,7 @@ class ThreeLanePlanner(object):
             best = max(self.LANES, key=score)
             new = old
             if best != old and score(best) > score(old) + cfg['switch_margin']:
-                if now - self.target_since >= cfg['switch_hold'] or free[old] < cfg['commit_distance']:
+                if held >= cfg['switch_hold'] or free[old] < cfg['commit_distance']:
                     new = best
 
         if new != old:
@@ -429,7 +560,8 @@ class ThreeLanePlanner(object):
                 if self.blocked_since is None:
                     self.blocked_since = now
                 elif (now - self.blocked_since >= cfg['backup_after'] and self.backups < cfg['backup_max']):
-                    room = self.rollout_back(s_, d, psi, self._all_boxes(), cfg['backup_distance'])
+                    room = self.rollout_back(s_, d, psi, self._relax(self._all_boxes(), s_, d, psi),
+                                             cfg['backup_distance'])
                     if room >= 0.05:
                         self.backups += 1
                         self.backing = (pose[0], pose[1])

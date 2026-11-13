@@ -8,8 +8,15 @@ mission_supervisor:
     max_steer: 0.5236         # Gazebo ackermann 플러그인 조향 한계 30도
     front_wheel_x: 0.12       # Gazebo 모델 앞바퀴 x
     cmd_angular_is_steering: true   # Gazebo 아커만 플러그인은 angular.z 를 조향각으로 씀 (11/02 녹화·플러그인 코드로 확인)
+    cmd_output: twist         # Gazebo 는 /cmd_vel (11/13 실차 기본은 ackermann)
+    odom_center_offset_x: 0.0 # Gazebo odom 점 = 몸통 가운데
+    odom_heading_source: odom # Gazebo odom 방향은 정확 (11/13 실차는 imu)
+    lane:
+      # (11/12) kp 는 팀원 Gazebo 시험값 5.5 (base_speed 0.4, 첫 코너 4/4, 지그재그 2/2).
+      #   kd 는 팀원 값 5.5 로 pd_lane_run1 에서 한 선 구간 핸들이 좌우로 뒤집혀 params.yaml 의 1.0 을 그대로 씀
+      pd_kp: 5.5
 
-    # 주차 turn_radius(0.50)는 시뮬 최소회전반경(0.24 / tan(30도) = 0.416)보다 커서 그대로 씀
+    # 주차 turn_radius: 시뮬 최소회전반경(0.24 / tan(30도) = 0.416)에 맞춘 0.50 그대로 (11/13 실차는 실측으로 0.65)
 
     # (11/03) Gazebo 조향 수정(팀원 dc84411) 뒤 녹화로 재보니 조향이 초당 약 55도 (예전 3.4도).
     # 그래서 11/02 임시 라바콘 설정(speed 0.10, max_duration 90, steer_rate_deg 3.4)은 지움 -> 실차 값 그대로.
@@ -36,3 +43,6 @@ mission_supervisor:
       wheel_box_width: 0.258
       # 여유 0.03 이면 Gazebo 월드 배치(0.55 m 간격)에서 3대 지나고 막힘 -> 0.015 (계산: 7/7, Gazebo 모양 틈 2.4 cm)
       clearance: 0.015
+
+    parking:
+      turn_radius: 0.50        # (11/13) Gazebo 는 예전 값 그대로 (실차 params.yaml 은 실측으로 0.65)

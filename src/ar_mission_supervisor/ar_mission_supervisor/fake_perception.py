@@ -85,6 +85,11 @@ class FakePerception(Node):
         self.declare_parameter('ack_topic', '/limo/ack_cmd')
         self.declare_parameter('ack_scale', 1.0)
         self.declare_parameter('odom_rear_offset', 0.0)
+        # (11/13) WeGo 실차 흉내: publish_imu 면 /imu 에 실제 방향(+ imu_yaw_offset_deg), odom_yaw_scale != 1 이면
+        #   /odom 방향·위치를 회전속도 x odom_yaw_scale 로 적분해서 냄 (ack_calib4: 실제 105도 돌 때 odom 136도 = 1.3)
+        self.declare_parameter('publish_imu', False)
+        self.declare_parameter('imu_yaw_offset_deg', 0.0)
+        self.declare_parameter('odom_yaw_scale', 1.0)
         self.declare_parameter('wheel_base', 0.24)
         self.declare_parameter('steer_rate_deg', 0.0)   # >0 이면 조향이 이 속도로만 바뀜 (Gazebo 느린 조향 흉내, 시험용)
         self.declare_parameter('start_yaw_deg', 0.0)    # publish_odom 일 때 처음 차 방향 (차선은 계속 오차 0 으로 보냄 = 기울어진 진입 시험, 11/10)
@@ -109,6 +114,9 @@ class FakePerception(Node):
         self.own_odom = bool(self._p('publish_odom'))
         if self.own_odom:
             self.pub_odom = pub(Odometry, '/odom', 10)
+            if self._p('publish_imu'):
+                from sensor_msgs.msg import Imu
+                self.pub_imu = pub(Imu, '/imu', 10)
             if self._p('cmd_input') == 'ackermann':
                 from ackermann_msgs.msg import AckermannDrive
                 self.create_subscription(AckermannDrive, self._p('ack_topic'), self._cb_ack, 10)
@@ -159,6 +167,12 @@ class FakePerception(Node):
             d = getattr(self, 'cmd_steer', 0.0) - self.steer
             self.steer += max(-rate * dt, min(rate * dt, d))
             self.cmd_w = self.cmd_v * math.tan(self.steer) / float(self._p('wheel_base'))
+        if not hasattr(self, 'wego'):
+            self.wego = [self.x, self.y, self.yaw]
+        ys = float(self._p('odom_yaw_scale'))
+        self.wego[0] += self.cmd_v * math.cos(self.wego[2]) * dt
+        self.wego[1] += self.cmd_v * math.sin(self.wego[2]) * dt
+        self.wego[2] += self.cmd_w * ys * dt
         self.x += self.cmd_v * math.cos(self.yaw) * dt
         self.y += self.cmd_v * math.sin(self.yaw) * dt
         self.yaw += self.cmd_w * dt
@@ -168,13 +182,23 @@ class FakePerception(Node):
         odom.header.frame_id = 'odom'
         odom.child_frame_id = 'base_link'
         rear = float(self._p('odom_rear_offset'))
-        odom.pose.pose.position.x = self.x - rear * math.cos(self.yaw)
-        odom.pose.pose.position.y = self.y - rear * math.sin(self.yaw)
-        odom.pose.pose.orientation.z = math.sin(self.yaw / 2.0)
-        odom.pose.pose.orientation.w = math.cos(self.yaw / 2.0)
+        ox, oy, oyaw = (self.x, self.y, self.yaw) if ys == 1.0 else tuple(self.wego)
+        odom.pose.pose.position.x = ox - rear * math.cos(oyaw)
+        odom.pose.pose.position.y = oy - rear * math.sin(oyaw)
+        odom.pose.pose.orientation.z = math.sin(oyaw / 2.0)
+        odom.pose.pose.orientation.w = math.cos(oyaw / 2.0)
         odom.twist.twist.linear.x = self.cmd_v
         odom.twist.twist.angular.z = self.cmd_w
         self.pub_odom.publish(odom)
+        if self._p('publish_imu'):
+            from sensor_msgs.msg import Imu
+            imu = Imu()
+            imu.header.stamp = odom.header.stamp
+            iy = self.yaw + math.radians(float(self._p('imu_yaw_offset_deg')))
+            imu.orientation.z = math.sin(iy / 2.0)
+            imu.orientation.w = math.cos(iy / 2.0)
+            imu.angular_velocity.z = self.cmd_w
+            self.pub_imu.publish(imu)
 
     def _to_base(self, wx, wy):
         """시나리오 좌표(시작 위치 원점, 시작 방향 +x) -> 현재 base_link 좌표."""
@@ -209,6 +233,7 @@ class FakePerception(Node):
                 self.x = 0.0
                 self.y = float(self._p('start_y'))
                 self.yaw = math.radians(float(self._p('start_yaw_deg')))
+                self.wego = [self.x, self.y, self.yaw]
                 self.origin = (0.0, 0.0, 0.0)
             else:
                 self.origin = (self.x, self.y, self.yaw)

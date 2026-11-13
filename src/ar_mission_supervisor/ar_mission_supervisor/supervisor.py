@@ -131,6 +131,11 @@ PARAM_DEFAULTS = {
         # (11/13) odom 기준점 -> 판단 기준점(차 몸통 가운데 = 앞뒤 바퀴 축 사이) 앞쪽 거리 [m].
         #   WeGo 아커만 드라이버는 base_link(odom 점)가 뒷바퀴 축 가운데 -> 0.10 (축간 0.2 의 절반). Gazebo·차동 드라이버는 0.
         'odom_center_offset_x': 0.0,
+        # (11/13) 판단이 쓰는 차 위치·방향. 'odom' = /odom 그대로. 'imu' = 방향은 imu_topic 의 방향(판단 켤 때 0),
+        #   위치는 /odom 속도(twist.linear.x)를 그 방향으로 적분. 실차 보정 주행(ack_calib4): WeGo 아커만 odom 방향이
+        #   실제보다 30% 넘게 큼 (전체 회전 IMU 105도 vs odom 136도), IMU 방향은 자이로 적분과 0.3도 안으로 맞음.
+        'odom_heading_source': 'odom',
+        'imu_topic': '/imu',
     },
     'lane': {
         # 차선 노드가 lateral 을 재는 지점 = 차 앞 몇 m (차선 노드 reference_distance_m 과 같아야 함, 11/04 0.5 로 정함)
@@ -554,6 +559,16 @@ class MissionSupervisor(Node):
         sub(ObstacleArray, '/perception/obstacles',
             store('obstacles', lambda m: list(m.obstacles)), 10)
         sub(Odometry, '/odom', self._cb_odom, 10)
+        self._imu_yaw = None       # IMU 방향 (판단 켤 때 0) [rad]
+        self._imu_yaw0 = None
+        self._dr = None            # odom 속도 + IMU 방향 적분 [x, y, yaw, stamp]
+        if self.odom_heading_source == 'imu':
+            from sensor_msgs.msg import Imu
+            sub(Imu, self.imu_topic, self._cb_imu, 10)
+            self.get_logger().info('차 위치: /odom 속도 + %s 방향 (판단 켤 때 방향 0)' % self.imu_topic)
+        elif self.odom_heading_source != 'odom':
+            self.get_logger().warn('odom_heading_source=%r 모름 - /odom 그대로 씀' % self.odom_heading_source)
+            self.odom_heading_source = 'odom'
         sub(Bool, '/supervisor/reset', self._cb_reset, 10)
 
         # --- 전이 판정 ---
@@ -587,8 +602,43 @@ class MissionSupervisor(Node):
     # ------------------------------------------------------------------
     # 콜백
     # ------------------------------------------------------------------
+    def _cb_imu(self, msg):
+        q = msg.orientation
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        if self._imu_yaw0 is None:
+            self._imu_yaw0 = yaw
+        d = yaw - self._imu_yaw0
+        self._imu_yaw = math.atan2(math.sin(d), math.cos(d))
+
+    def _dead_reckon(self, msg):
+        """(11/13) odom 속도 + IMU 방향으로 위치 적분. IMU 가 아직 없으면 None."""
+        yaw = self._imu_yaw
+        if yaw is None:
+            return None
+        t = _stamp_sec(msg.header)
+        if t <= 0.0:
+            t = self.clock_sec()
+        v = float(msg.twist.twist.linear.x)
+        if self._dr is None:
+            self._dr = [0.0, 0.0, yaw, t]
+        else:
+            x, y, yaw_prev, t_prev = self._dr
+            dt = t - t_prev
+            if 0.0 < dt < 0.5:
+                dyaw = math.atan2(math.sin(yaw - yaw_prev), math.cos(yaw - yaw_prev))
+                mid = yaw_prev + 0.5 * dyaw
+                x += v * math.cos(mid) * dt
+                y += v * math.sin(mid) * dt
+            self._dr = [x, y, yaw, t]
+        return (self._dr[0], self._dr[1], yaw)
+
     def _cb_odom(self, msg):
-        pose = _pose_from_odom(msg)
+        if self.odom_heading_source == 'imu':
+            pose = self._dead_reckon(msg)
+            if pose is None:
+                return
+        else:
+            pose = _pose_from_odom(msg)
         off = self.odom_center_offset_x
         if off:
             # (11/13) odom 점(WeGo 아커만: 뒷바퀴 축) -> 판단 기준점(몸통 가운데)

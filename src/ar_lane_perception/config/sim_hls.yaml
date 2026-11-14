@@ -1,0 +1,19 @@
+# Gazebo 검증용: 기존 시뮬 노란색 기준값(HLS)만. step0_hls.yaml / safe3_hls.yaml 뒤에 덧씌운다.
+#   lane_extra:=<step0_hls.yaml>,<sim_hls.yaml>
+camera_perception_node:
+  ros__parameters:
+    color_space: hls
+    lane_h_l: 0
+    lane_h_h: 60
+    lane_l_l: 90
+    lane_l_h: 220
+    lane_s_l: 100
+    lane_s_h: 255
+    # 카메라: 시뮬 값 (safe3_* / step0_* 의 실차 카메라 값을 덮어씀. 11/13 실차 값 확정 뒤 추가)
+    focal_px: 381.0
+    cam_height_m: 0.21
+    cam_pitch_rad: 0.0
+    center_x: 320
+    cam_x_m: 0.10
+    y_top: 320             # 시뮬 탐색 줄 범위 (safe3_* / step0_* 의 실차 값 260 / 405 를 덮어씀)
+    y_bot: 470

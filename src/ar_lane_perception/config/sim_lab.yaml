@@ -1,0 +1,19 @@
+# Gazebo 검증용: 기존 시뮬 노란색 기준값(LAB)만. step0_lab.yaml / safe3_lab.yaml 뒤에 덧씌운다.
+#   lane_extra:=<step0_lab.yaml>,<sim_lab.yaml>
+camera_perception_node:
+  ros__parameters:
+    color_space: lab
+    lab_l_min: 100
+    lab_l_max: 255
+    lab_a_min: 90
+    lab_a_max: 140
+    lab_b_min: 175
+    lab_b_max: 255
+    # 카메라: 시뮬 값 (safe3_* / step0_* 의 실차 카메라 값을 덮어씀. 11/13 실차 값 확정 뒤 추가)
+    focal_px: 381.0
+    cam_height_m: 0.21
+    cam_pitch_rad: 0.0
+    center_x: 320
+    cam_x_m: 0.10
+    y_top: 320             # 시뮬 탐색 줄 범위 (safe3_* / step0_* 의 실차 값 260 / 405 를 덮어씀)
+    y_bot: 470

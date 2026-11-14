@@ -508,14 +508,17 @@ class LaneCore:
             return None
         return w / 2.0 + f * (-y) / zc, h / 2.0 + f * yc / zc
 
-    def _path_info(self, kind, P, C, side):
-        """디버그 그림·lane_status 용: 이번 프레임 가운데 경로 점 C (한 선이면 보이는 선 점 P 도), 선 각도(도)."""
+    def _path_info(self, kind, P, C, side, c0, c1):
+        """디버그 그림·lane_status 용: 이번 프레임 가운데 경로 점 C (한 선이면 보이는 선 점 P 도), 선 각도(도),
+        lateral 을 읽는 목표점 = 가운데 직선 y = c0 + c1 x 의 reference_distance_m 지점. 계산에는 쓰지 않는다."""
         B = P if P is not None else C          # 선 각도: 보이는 선(한 선) / 가운데 점(두 선) 직선 맞춤
         ang = float(np.degrees(np.arctan(abs(np.polyfit(B[:, 0], B[:, 1], 1)[0]))))
-        self.path_info = dict(kind=kind, side=side, P=P, C=C, ang=ang)
+        x_ref = float(self.p['reference_distance_m'])
+        self.path_info = dict(kind=kind, side=side, P=P, C=C, ang=ang, target=(x_ref, float(c0 + c1 * x_ref)))
 
     def draw_path(self, dbg, w, h):
-        """실제 계산에 쓰는 가운데 경로 점(자홍)과 그 점을 이은 선, 한 선이면 보이는 선 -> 옮긴 점(흰 선)."""
+        """실제 계산에 쓰는 가운데 경로 점(자홍)과 그 점을 이은 선, 한 선이면 보이는 선 -> 옮긴 점(흰 선),
+        lateral 을 읽는 reference_distance_m 목표점(빨강)."""
         S = self.path_info
         if not S:
             return
@@ -535,6 +538,9 @@ class LaneCore:
             cv2.line(dbg, a, b, (255, 0, 255), 2)
         for q in pts:
             cv2.circle(dbg, q, 5, (255, 0, 255), -1)
+        q = pix(S['target'])
+        if q:
+            cv2.circle(dbg, (q[0], min(q[1], h - 4)), 7, (0, 0, 255), -1)
         cv2.putText(dbg, '%s line ang %.0f' % (S['kind'], S['ang']), (10, 80),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
 
@@ -570,7 +576,9 @@ class LaneCore:
             # 가운데 경로 점: 보이는 선 점들을 맞춘 직선의 수직 방향으로 반폭만큼 통째로 옮김 (선의 휜 모양은 그대로)
             nl = np.array([-coef[1], 1.0]) / np.hypot(1.0, coef[1])
             self.path_pts = P + (-nl if side == 'L' else nl) * half
-            self._path_info('single', P, self.path_pts, side)
+            # 가운데 직선 = 보이는 선 직선을 수직으로 반폭 옮긴 것: 절편만 반폭 * hypot(1, 기울기) 만큼 바뀐다
+            self._path_info('single', P, self.path_pts, side,
+                            coef[0] + (-half if side == 'L' else half) * np.hypot(1.0, coef[1]), coef[1])
             return lateral, heading, True, float(np.clip(conf, 0.0, 1.0)), 0, n_one
         for y in sorted(set(G['L']) | set(G['R']), reverse=True):
             if y in G['L'] and y in G['R']:
@@ -615,7 +623,7 @@ class LaneCore:
                                  rcond=None)[0][1]
             conf *= np.exp(-(np.degrees(abs(np.arctan(bn) - np.arctan(coef[1]))) / 10.0) ** 2)
         self.path_pts = C.copy()             # 줄 순서 (화면 아래 = 가까운 쪽부터)
-        self._path_info('pair', None, C, '')
+        self._path_info('pair', None, C, '', coef[0], coef[1])
         return lateral, heading, True, float(np.clip(conf, 0.0, 1.0)), n_both, n_one
 
     def _reject_singles(self, C, W):

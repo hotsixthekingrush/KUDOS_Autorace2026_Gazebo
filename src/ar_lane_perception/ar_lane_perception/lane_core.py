@@ -895,8 +895,10 @@ class LaneCore:
             if self.invalid_run > self.p['lost_hold']:
                 self.prevL, self.prevR = {}, {}
                 self.invalid_run = 0
+        # 판단에 보내는 single 표시: 유효한 스캔 줄(n_both + n_one) 중 과반이 선 하나만 잡힌 줄일 때만 true.
+        # (옛 정의는 n_one > 0 = 한 줄만 그래도 true). 경로 계산(위 single 지역 변수, lane_error 의 줄별 추정)은 그대로.
         return dict(lateral=lat, heading=head, valid=ok, raw_valid=valid,
-                    confidence=conf, single=n_one > 0, guard=why, width_err=werr,
+                    confidence=conf, single=n_one > n_both, guard=why, width_err=werr,
                     n_one=n_one, n_good=n_good, n_both=n_both, debug=dbg, lat_raw=lat_raw, kind=kind,
                     width_meas=wf, width_mem=self.w_mem, width_used=2.0 * self.half, fixed=fixed if ok else '',
                     width_note=note, slew=lat != lat_raw, corner_b=self.corner_b,

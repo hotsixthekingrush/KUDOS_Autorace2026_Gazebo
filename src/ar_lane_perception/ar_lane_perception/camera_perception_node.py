@@ -46,6 +46,11 @@ class CameraPerceptionNode(Node):
         self.declare_parameter('predict_rate_hz', 20.0)
         self.declare_parameter('predict_max_sec', 1.0)        # 마지막 valid 프레임 뒤 이 시간까지만 옮긴 값 발행
         self.declare_parameter('predict_confidence', 0.25)    # 예측 중(마지막 카메라 프레임이 invalid) 발행 confidence
+        # (11/14, 판단팀) 영상 시각이 최신 odom 시각보다 이만큼까지 늦지 않으면(=영상이 더 새로워도) 그 프레임 값을 냄.
+        #   실차 lane_run1: odom 이 50 Hz 라 영상 처리 때 최신 odom 이 영상보다 몇 ms(중간값 8 ms) 옛날인 경우가 많아,
+        #   '0 <= odom - 영상' 조건에 걸려 잘 보이는 직선에서도 lane_error 의 30% 가 valid=false 로 나감 (977/1008 이 이 경우).
+        #   그 프레임은 pose_at 이 마지막 odom 자세로 고정했으니 같은 자세로 되돌리면 카메라 값과 똑같음
+        self.declare_parameter('predict_stamp_tol_sec', 0.1)
         # 예측 중 lateral 계산: True 면 마지막 valid 프레임의 가운데 경로 점들(odom 고정)을 차 기준으로 옮겨 reference_distance_m
         # 지점에서 다시 잰다 (곡률 하나로 휘게 하지 않음). 점 범위를 넘으면 끝 구간 방향으로 직선 연장.
         # False 면 예전처럼 직선 하나(lateral, heading)를 옮긴다
@@ -217,7 +222,8 @@ class CameraPerceptionNode(Node):
         r = None
         ext = 0.0
         predicting = not self.frame_valid
-        if L is not None and 0.0 <= t_now - L[2] <= float(self.get_parameter('predict_max_sec').value):
+        tol = float(self.get_parameter('predict_stamp_tol_sec').value)
+        if L is not None and -tol <= t_now - L[2] <= float(self.get_parameter('predict_max_sec').value):
             if predicting and self.get_parameter('predict_path').value and self.path_odom is not None:
                 pr = self._path_lateral(self.path_odom, (x, y, yaw))
                 if pr is not None:
@@ -311,7 +317,8 @@ class CameraPerceptionNode(Node):
             L = self.line
             age = None if L is None else t - L[2]
             pred = (self.predict and not out.valid and age is not None
-                    and 0.0 <= age <= float(self.get_parameter('predict_max_sec').value))
+                    and -float(self.get_parameter('predict_stamp_tol_sec').value) <= age
+                    <= float(self.get_parameter('predict_max_sec').value))
             st.update(src='camera', predicting=bool(pred), predict_sec=round(age, 3) if pred else 0.0,
                       corner_b=float(r['corner_b']), outer_off=bool(r.get('outer_off')))
             # 선 각도(도): 한 선이면 보이는 선, 두 선이면 가운데 점에 맞춘 직선

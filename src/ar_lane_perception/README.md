@@ -254,6 +254,7 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 | `cam_height_m`, `cam_x_m`, `cam_pitch_rad`, `focal_px` | 0.21, 0.10, 0.0, 381.0 | 지면 투영. 시뮬 값 |
 | `predict_enable`, `odom_topic`, `predict_rate_hz`, `predict_max_sec` | false (시뮬 true), /odom, 20, 1.0 | odom 예측 발행 |
 | `odom_yaw_source`, `imu_topic` | imu (시뮬 yaml 은 odom), /imu | 예측에 쓰는 차 방향. imu = /odom 속도 + IMU 방향으로 적분 (실차 WeGo 아커만 /odom 방향이 돌 때 약 30% 커서, 11/14 판단팀) |
+| `predict_stamp_tol_sec` | 0.1 | 영상 시각이 최신 odom 보다 이만큼까지 새로워도 그 프레임 값을 냄 (실차에서 odom 이 몇 ms 늦어 30% 가 valid=false 로 나가던 것 고침, 11/14 판단팀) |
 | `single_updates_ref` | true (시뮬 false) | 한쪽 선 프레임의 가드 기준 갱신 |
 | `publish_status` | true | `/perception/lane_status` |
 

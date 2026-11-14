@@ -329,6 +329,11 @@ mission_supervisor:
       confirm_hits: 2
       gap_confirm: 3
       gap_match: 0.15
+      # (11/14) 칸 찾기: 모든 두 LIMO 쌍에서 2 x bay_pitch 간격인 쌍 (실차 park_real1: 새 배치 윗줄 LIMO-빈칸-LIMO + 아랫줄 3대에서
+      #   라이다가 빈칸 너머 아랫줄 LIMO 를 깊이 -0.91 로 보고, 깊이 0.5 m 박스를 둘로 봐서 바로 옆끼리 짝짓기가 실패).
+      #   칸이 빈 건 쌍 깊이에서 slot_block_d 안에 칸 안쪽 물체가 없을 때. false = 예전 바로 옆끼리만
+      any_pair: true
+      slot_block_d: 0.15       # any_pair: 쌍 깊이에서 이 안에 칸 안쪽 물체가 있으면 찬 칸 (빈칸 너머 아랫줄 LIMO 는 0.3 m 넘게 깊음) [m]
       slow_distance: 0.15      # 회전 시작점 이 거리 앞부터 final_speed [m]
       overshoot_tolerance: 0.04
       heading_tolerance: 0.05  # -90도에서 이 안이면 회전 끝 [rad]

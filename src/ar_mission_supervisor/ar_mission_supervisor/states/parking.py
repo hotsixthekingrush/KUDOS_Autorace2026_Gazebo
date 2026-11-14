@@ -6,6 +6,7 @@
 단계
   SEARCH : 카메라 차선 추종으로 천천히 가면서 라이다 장애물을 기준 좌표(odom)에 쌓는다.
            오른쪽에서 칸 하나 건너(간격 2 x bay_pitch) 나란히 선 LIMO 2대를 찾으면
+           (11/14 any_pair: 모든 두 LIMO 쌍에서 찾음. 새 배치 = 윗줄 LIMO-빈칸-LIMO + 아랫줄 3대, 규정 '주차 구역 양옆 최소 2대')
            그 가운데가 목표 칸. 뒷축이 (칸 중심 - turn_radius) 에 오면 TURN.
            (지나쳤으면 그 지점까지 천천히 후진한 뒤 TURN)
            LIMO 는 안 움직이므로 지금까지 본 위치의 평균으로 쌓는다 (11/10).
@@ -155,9 +156,11 @@ class Parking(SafeState):
         self.driver.step(speed)
 
     def _find_gap(self, s_car, cfg):
-        """오른쪽 LIMO 들 중 칸 하나를 사이에 두고(2 x bay_pitch) 나란히 선 쌍의 가운데 s."""
+        """오른쪽 LIMO 들 중 칸 하나를 사이에 두고(2 x bay_pitch) 나란히 선 쌍의 가운데 (s, d)."""
         items = sorted(self.map.confirmed(cfg['confirm_hits']), key=lambda it: it['s'])
         want = 2.0 * cfg['bay_pitch']
+        if cfg['any_pair']:
+            return self._find_gap_any(items, s_car, cfg, want)
         for a, b in zip(items, items[1:]):
             if abs((b['s'] - a['s']) - want) > cfg['pitch_tolerance']:
                 continue
@@ -168,6 +171,36 @@ class Parking(SafeState):
                 continue                        # 이미 한참 지나간 칸
             return mid, 0.5 * (a['d'] + b['d'])
         return None
+
+    def _find_gap_any(self, items, s_car, cfg, want):
+        """(11/14) 바로 옆끼리만이 아니라 모든 두 LIMO 쌍에서 찾는다 (실차 park_real1).
+        새 배치(윗줄 LIMO-빈칸-LIMO, 아랫줄 LIMO 3대)에서 라이다가 빈칸 너머 아랫줄 LIMO 를 깊이 -0.91 m 로 보고,
+        깊이 0.5 m 짜리 박스 하나를 둘로 봐서, 두 LIMO 사이에 물체가 끼어 바로 옆끼리 짝짓기가 실패했다.
+        칸이 빈 건 '쌍 깊이에서 slot_block_d 안, 칸 앞뒤 반(bay_pitch/2) 안쪽에 물체가 없음'으로 본다
+        -> 빈칸 너머 아랫줄 LIMO(쌍보다 0.3 m 넘게 깊음)와 같은 LIMO 의 다른 조각은 막지 않는다.
+        규정상 목표 칸(윗줄 가운데)은 늘 비어 있어서, 이 검사는 다른 쌍을 잘못 고르지 않게 하는 안전장치.
+        여럿이면 가장 앞(가까운) 칸, 가운데가 gap_match 안으로 같은 쌍끼리는 덜 본 쪽(n)이 더 많은 쌍."""
+        found = []
+        for i, a in enumerate(items):
+            for b in items[i + 1:]:
+                if abs((b['s'] - a['s']) - want) > cfg['pitch_tolerance']:
+                    continue
+                if abs(b['d'] - a['d']) > cfg['pair_d_tolerance']:
+                    continue
+                mid = 0.5 * (a['s'] + b['s'])
+                if mid < s_car - cfg['turn_radius'] - 0.5:
+                    continue                    # 이미 한참 지나간 칸
+                gd = 0.5 * (a['d'] + b['d'])
+                blocked = any(it is not a and it is not b
+                              and abs(it['s'] - mid) < 0.5 * cfg['bay_pitch']
+                              and abs(it['d'] - gd) <= cfg['slot_block_d'] for it in items)
+                if not blocked:
+                    found.append((mid, min(a['n'], b['n']), gd))
+        if not found:
+            return None
+        first = min(f[0] for f in found)
+        mid, _, gd = max((f for f in found if f[0] - first <= cfg['gap_match']), key=lambda f: f[1])
+        return mid, gd
 
     def _depth_target(self, cfg):
         """ALIGN 깊이 목표 d 와 로그용 설명. LIMO 가운데 깊이를 쓰되 차선 기준과 너무 다르면 중간."""

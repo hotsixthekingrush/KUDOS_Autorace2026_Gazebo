@@ -19,6 +19,9 @@
                   (-p spacing:=LIMO 진행방향 간격, 기본 0.55 = 연습 Gazebo 배치)
   parking         2026 주차: 오른쪽 칸, 목표 칸 양옆 LIMO 2대 + 아랫줄 LIMO 1대 + 주차 표지판
                   (-p gap:=목표 칸 중심까지 거리)
+                  (11/14 새 배치) -p park_bottom:=full 이면 아랫줄 3대 (윗줄 LIMO-빈칸-LIMO + 아랫줄 LIMO 3대),
+                  -p park_ghost_d:=-0.91 이면 라이다가 빈칸 너머 아랫줄 LIMO 를 그 깊이로 보는 것도 보냄,
+                  -p park_split:=0.20 이면 윗줄 LIMO 를 그만큼 더 깊은 데에도 하나 더 보냄 (깊은 박스를 둘로 봄)
   * static_3lane / parking 에서 -p fake_limos:=false 면 가짜 LIMO 를 안 보내고
     (차선·표지판만 보냄) Gazebo 의 진짜 LIMO 를 라이다 노드가 보게 한다.
 """
@@ -101,6 +104,10 @@ class FakePerception(Node):
         self.declare_parameter('start_yaw_deg', 0.0)    # publish_odom 일 때 처음 차 방향 (차선은 계속 오차 0 으로 보냄 = 기울어진 진입 시험, 11/10)
         self.declare_parameter('start_y', 0.0)          # publish_odom 일 때 처음 차 옆 위치 (왼쪽 +, 차선은 계속 오차 0 = 비켜 선 진입 시험, 11/12) [m]
         self.declare_parameter('limo_depth_offset', 0.0)  # parking: 윗줄 LIMO 를 칸 가운데보다 이만큼 더 안쪽(+)에 세움 [m]
+        # (11/14) 새 주차 배치 / 실차 라이다 흉내 (park_real1)
+        self.declare_parameter('park_bottom', 'one')     # parking: 'one' = 아랫줄 목표 칸 뒤 1대, 'full' = 아랫줄 3대
+        self.declare_parameter('park_ghost_d', 0.0)      # parking: 0 이 아니면 빈칸 앞뒤 가운데, 이 깊이(오른쪽 -)에 라이다 장애물 하나 더 [m]
+        self.declare_parameter('park_split', 0.0)        # parking: >0 이면 윗줄 LIMO 마다 이만큼 더 깊은 데에도 라이다 장애물 [m]
 
         pub = self.create_publisher
         self.pub_lane = pub(LaneError, '/perception/lane_error', 10)
@@ -389,21 +396,38 @@ class FakePerception(Node):
         bay_mid = -(BAY_ENTRY + 0.5 * BAY_DEPTH)
         top = bay_mid - float(self._p('limo_depth_offset'))
         bottom = bay_mid - BAY_DEPTH - 0.02
-        return [(gap - BAY_PITCH, top), (gap + BAY_PITCH, top), (gap, bottom)]
+        out = [(gap - BAY_PITCH, top), (gap + BAY_PITCH, top), (gap, bottom)]
+        if str(self._p('park_bottom')).lower() == 'full':
+            out += [(gap - BAY_PITCH, bottom), (gap + BAY_PITCH, bottom)]
+        return out
 
-    def _publish_limos(self, limos):
-        """라이다 시야(앞 0.1~3 m, 좌우 1.2 m) 안의 LIMO 를 장애물로, 카메라 시야 안은 YOLO 로."""
+    def parking_lidar_extra(self):
+        """(11/14) 실차 라이다 흉내: 빈칸 너머 아랫줄 LIMO 를 얕게 본 점, 깊은 박스를 둘로 본 점 [(x, y)]."""
+        gap = float(self._p('gap'))
+        out = []
+        ghost = float(self._p('park_ghost_d'))
+        if ghost != 0.0:
+            out.append((gap, ghost))
+        split = float(self._p('park_split'))
+        if split > 0.0:
+            top = -(BAY_ENTRY + 0.5 * BAY_DEPTH) - float(self._p('limo_depth_offset'))
+            out += [(gap - BAY_PITCH, top - split), (gap + BAY_PITCH, top - split)]
+        return out
+
+    def _publish_limos(self, limos, lidar_only=()):
+        """라이다 시야(앞 0.1~3 m, 좌우 1.2 m) 안의 LIMO 를 장애물로, 카메라 시야 안은 YOLO 로.
+        lidar_only: 라이다 장애물로만 보내는 점 (YOLO 안 보냄)."""
         if not self._p('fake_limos'):
             return
         arr = ObstacleArray()
         arr.header = self._header()
-        for wx, wy in limos:
+        for k, (wx, wy) in enumerate(list(limos) + list(lidar_only)):
             x, y = self._to_base(wx, wy)
             if 0.1 <= x <= 3.0 and abs(y) <= 1.2:
                 o = Obstacle()
                 o.x, o.y, o.radius, o.point_count = x, y, LIMO_R, 20
                 arr.obstacles.append(o)
-            if 0.3 <= x <= 2.5 and abs(math.atan2(y, x)) < math.radians(35):
+            if k < len(limos) and 0.3 <= x <= 2.5 and abs(math.atan2(y, x)) < math.radians(35):
                 self._object(MissionObject.LIMO, x, y)
         self.pub_obstacles.publish(arr)
 
@@ -421,7 +445,7 @@ class FakePerception(Node):
     def _s_parking(self):
         """2026 주차: 주차 표지판 + 목표 칸 양옆 LIMO (벽 없음)."""
         self._object(MissionObject.PARKING_SIGN, self._ahead(0.6), -0.45)
-        self._publish_limos(self.parking_limos())
+        self._publish_limos(self.parking_limos(), self.parking_lidar_extra())
 
 
 def main(args=None):

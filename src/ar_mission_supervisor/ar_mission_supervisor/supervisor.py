@@ -415,6 +415,9 @@ PARAM_DEFAULTS = {
         'confirm_hits': 2,
         'gap_confirm': 3,
         'gap_match': 0.15,
+        # (11/14) 모든 두 LIMO 쌍에서 칸 찾기 (빈칸 너머 아랫줄 LIMO·같은 LIMO 의 다른 조각이 끼어도 됨). false = 예전 바로 옆끼리만
+        'any_pair': True,
+        'slot_block_d': 0.15,      # (11/14) any_pair: 쌍 깊이에서 이 안에 칸 안쪽 물체가 있으면 그 칸은 찬 것 [m]
         'slow_distance': 0.15,     # 회전 시작점 이 거리 앞부터 final_speed 로 [m]
         'overshoot_tolerance': 0.04,
         'heading_tolerance': 0.05, # -90도 에서 이 안이면 회전 끝 [rad]

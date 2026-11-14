@@ -35,20 +35,13 @@ DEFAULTS = {
     'row_max_runs': 3,           # (b) 한 행에서 같은 색 구간이 차선 폭 하나(실측 기억 + guard_width_tol_m)
                                  #     안에 이 개수 이상 들어 있으면 그 행 제외. 옆 도로 선(0.2 m 바깥)은 세지 않음
     # 선 추적 (영상 px)
-    'side': 'both',           # both | left | right
     'center_x': 320,          # 처음 시작할 때만 좌/우 선을 가르는 기준
     'y_top': 320,
     'y_bot': 470,
     'n_rows': 8,
-    'horizon_y': 260,         # (미사용, 호환용) 예상 픽셀 폭은 실측 폭을 지면 투영으로 환산한다
-    'lane_w_bottom': 560,     # (미사용, 호환용)
-    'smooth': 0.7,            # distance_y 필터: 클수록 빠르게 반응
-    'max_step': 100.0,        # 프레임당 distance_y 최대 변화
     'track_tol': 90,          # 위/아래 줄에서 같은 선으로 인정하는 거리(px)
-    'track_predict': False,   # True: 아래 두 줄의 기울기로 다음 줄 위치 예측
     'lost_hold': 5,
     # lane_error (지면 좌표)
-    'lane_width_m': 0.55,     # (미사용, 호환용) 차선 폭은 실시간 실측값을 쓴다. 아래 '차선 폭 실측' 참고
     # 차선 폭 실측: 두 선이 같은 줄에서 함께 보이는 프레임에서만 재서 기억한다.
     'width_min_m': 0.40,          # 프레임 폭(두 선 줄 폭의 중앙값)이 이 범위를 벗어나면 기억을 갱신하지 않고
     'width_max_m': 0.95,          #   그 프레임은 추적 기록과 이어지는 선 하나만 남겨 한 선 프레임으로 처리
@@ -69,21 +62,6 @@ DEFAULTS = {
     #      corner_b: corner_curv_min~full, corner_blend_per_sec)에 비례해 기존 반폭에서 이 값으로 서서히 옮긴다.
     #      직선과 두 선 프레임은 그대로. 실행 중 ros2 param set 으로 바꿀 수 있다.
     'corner_outer_offset_m': 0.0,
-    # 가운데 경로에서 lateral 을 읽는 방법 (한 선 / 두 선 프레임 모두).
-    #   'line' (기본, 예전 방식): 가운데 점들(한 선이면 보이는 선)에 직선 하나를 맞추고 reference_distance_m 지점 수직 거리.
-    #       코너에서 휜 선이 직선으로 펴져 lateral 이 작게 나온다 (가제보 기록 정답의 19~24%).
-    #   'polyline' (파라미터로만, 11/13 시험: 코너 효과 없음, 가제보 지그재그 흔들림): 식으로 맞추지 않는다. 한 선 프레임은 보이는 선의 점마다 앞뒤 normal_window 점으로
-    #       cv2.fitLine(DIST_HUBER) 접선을 구해, 그 수직 방향 차선 안쪽으로 반폭(corner_outer_offset_m 이 켜져 있으면
-    #       그 반폭)만큼 옮긴다. 두 선 프레임은 줄별 가운데 점을 그대로 쓴다. 겹치거나 앞뒤 순서가 뒤집힌 점은 버리고,
-    #       앞쪽 거리 순으로 이은 꺾은선에서 reference_distance_m 지점을 보간해 y × cos(그 지점 방향) 을 lateral 로
-    #       (직선이면 line 과 같은 정의). heading 은 그 지점 앞뒤 점의 fitLine 방향.
-    #       점이 그 지점까지 안 닿으면 끝 2~3점 방향으로만 이어 읽고, 이어 간 길이가 poly_ext_max_m 를 넘으면
-    #       confidence 에 poly_ext_conf_scale 을 곱한다. 쓸 점이 3개 미만이거나 이어 갈 방향이 옆으로 누우면 line 방식.
-    'single_path_mode': 'line',
-    'normal_window': 2,
-    'poly_ext_max_m': 0.2,
-    'poly_ext_conf_scale': 0.5,
-    'debug_row_centers': False,    # 디버그 영상에 예전 줄별 픽셀 가운데(파란 점, /distance_y 용) 표시
     'single_confidence': 0.5,      # 한 선 프레임의 confidence (고정)
     'pair_return_rate_mps': 0.3,   # 한 선 -> 두 선 전환 때만 lateral 변화 속도 제한 [m/s]. 0이면 끔
     'reference_distance_m': 0.5,
@@ -96,7 +74,6 @@ DEFAULTS = {
     'guard_width_tol_m': 0.10,   # 이력 없이 선 쌍을 고를 때: 간격이 기억한 실측 폭에서 이 안이어야 함
     'guard_jump_m': 0.10,        # 직전 정상값 대비 lateral이 한 번에 이만큼 넘게 바뀌면 의심
     'guard_memory_sec': 1.0,     # 직전 정상값을 이 시간까지만 비교 기준으로 씀
-    'guard_head_jump_rad': 0.35,  # 애매한 프레임은 헤딩도 직전 정상값과 이 안(약 20도)으로 이어져야 valid
     # 한 선 프레임은 최근(width_stale_sec 안) 실측 폭이 있을 때만 valid (없으면 single_no_width)
     'guard_need_pair': True,
     # 판단팀은 confidence를 보지 않고 valid만 본다. 그래서 confidence가 이보다 낮으면 valid=false로 내린다
@@ -131,7 +108,6 @@ class LaneCore:
         if params:
             self.p.update(params)
         self.wrow, self.prevL, self.prevR = {}, {}, {}
-        self.gap_f = 0.0
         self.lost = 0
         # 가드 상태: 마지막으로 내보낸 정상(valid) lateral과 그 시각
         self.ref_lat = None
@@ -153,7 +129,7 @@ class LaneCore:
         self.half = self.p['lane_width_default_m'] / 2.0   # 이번 프레임에 쓰는 반폭 (process가 정함)
         self.corner_b = 0.0                  # (나) 코너 폭 쪽으로 옮긴 비율 0~1
         self.path_pts = None
-        self.poly_info = None
+        self.path_info = None
         self.last_t = None
         self.last_kind = None                # 마지막 valid 프레임 종류 'pair' | 'single'
         self.out_lat = self.out_head = self.out_t = None
@@ -198,7 +174,7 @@ class LaneCore:
                 best, bd = m, dd
         return best
 
-    def find_row(self, means, cx0, side, exp, tol, pl, pr):
+    def find_row(self, means, cx0, exp, tol, pl, pr):
         """한 줄에서 왼쪽선 L, 오른쪽선 R 찾기. 화면 가운데를 넘어가도 같은 선을 유지."""
         L = R = None
         if pl is None and pr is None:
@@ -219,10 +195,6 @@ class LaneCore:
                 R = min(c) if c else None
             if L is not None and R is not None and L >= R:
                 R = None
-        if side == 'right':
-            L = None
-        elif side == 'left':
-            R = None
         return L, R
 
     def lane_mask(self, img):
@@ -379,7 +351,7 @@ class LaneCore:
         return best
 
     def track(self, img, want_debug=False):
-        """반환: gap(px, 필터 후), newL, newR, pairs, debug 영상(또는 None).
+        """반환: newL, newR, pairs, debug 영상(또는 None).
 
         pairs: 한 줄에서 L, R이 둘 다 잡힌 경우의 (y, L, R). 픽셀 폭 검사로 한쪽을 버리기 전 값.
         """
@@ -400,7 +372,6 @@ class LaneCore:
                 wmask, k = self.clean_mask(wmask, y0, y1)
                 self.stats['blobs_removed'] += k
         cx0 = int(g('center_x'))
-        side = g('side')
         tol = g('track_tol')
         rt = g('pair_ratio_tol')
         ys = np.linspace(g('y_bot'), g('y_top'), int(g('n_rows'))).astype(int)
@@ -413,15 +384,13 @@ class LaneCore:
                 dbg[wmask > 0] = (255, 0, 255)
             cv2.line(dbg, (cx0, 0), (cx0, h), (0, 255, 0), 2)
 
-        centers, weights, modes = [], [], ''
+        modes = ''               # 줄별 판정 글자 (D 두 선, L / R 한 선): 디버그 영상 글자용
         newL, newR, pairs = {}, {}, []
         lastL = lastR = None
         # 한 선을 바로 아래 줄에서 못 찾았으면(점선 끊김, (b)로 뺀 줄) 멀리 떨어진 아래 줄 위치를 그대로 쓰지 않고
         # 이번 프레임에서 찾은 점들을 이은 직선(차선은 영상에서도 직선)으로 연장해 찾는다. _predict 참고.
         ptsL, ptsR = [], []
         vh = h / 2.0 - g('focal_px') * np.tan(g('cam_pitch_rad'))   # 지평선 줄
-        l2 = r2 = None
-        predict = bool(g('track_predict'))
         for idx, y in enumerate(ys):
             y = int(y)
             means = self.row_groups(mask, y, w, h)
@@ -451,87 +420,67 @@ class LaneCore:
                 pl = self._predict(ptsL, ptsR, y, cx0, vh)
             if ptsR and idx - ptsR[-1][0] >= 2:
                 pr = self._predict(ptsR, ptsL, y, cx0, vh)
-            if predict:
-                if lastL is not None and l2 is not None:
-                    pl = 2 * lastL - l2
-                if lastR is not None and r2 is not None:
-                    pr = 2 * lastR - r2
             pair = None
-            if pl is None and pr is None and side == 'both':
+            if pl is None and pr is None:
                 pair = self._pick_pair(means, y, w, h)
             if pair is not None:
                 L, R = pair
             else:
-                L, R = self.find_row(means, cx0, side, exp, tol, pl, pr)
+                L, R = self.find_row(means, cx0, exp, tol, pl, pr)
 
-            c = None
             if L is not None and R is not None:
                 pairs.append((y, L, R))
                 wd = R - L
                 # 기억한 실측 폭이 있으면 그 폭과 비교, 없으면 줄 단위로는 거르지 않는다 (process의 범위 검사가 판정)
                 if not known or (1.0 - rt) * exp <= wd <= (1.0 + rt) * exp:
-                    c = (L + R) / 2.0
                     modes += 'D'
                     self._wrow_new[y] = (0.8 * exp + 0.2 * wd) if known else wd
                 else:
+                    # 폭이 안 맞는 줄: 추적 기록과 더 잘 이어지는 선 하나만 남김
                     dl = abs(L - pl) if pl is not None else 1e9
                     dr = abs(R - pr) if pr is not None else 1e9
                     if dl <= dr:
-                        c = L + exp / 2.0
                         R = None
                         modes += 'L'
                     else:
-                        c = R - exp / 2.0
                         L = None
                         modes += 'R'
             elif L is not None:
-                c = L + exp / 2.0
                 modes += 'L'
             elif R is not None:
-                c = R - exp / 2.0
                 modes += 'R'
-            if c is None:
+            else:
                 continue
 
             if (L is not None and L in wset) or (R is not None and R in wset):
                 self.stats['white_rows'] += 1
             if L is not None:
                 newL[y] = L
-                l2, lastL = lastL, L
+                lastL = L
                 ptsL.append((idx, y, L))
             if R is not None:
                 newR[y] = R
-                r2, lastR = lastR, R
+                lastR = R
                 ptsR.append((idx, y, R))
-            centers.append(c)
-            weights.append(1.0 + (g('y_bot') - y) / max(g('y_bot') - g('y_top'), 1))
             if dbg is not None:
                 cv2.line(dbg, (0, y), (w, y), (90, 90, 90), 1)
                 if L is not None:
                     cv2.circle(dbg, (int(L), y), 4, (255, 255, 0), -1)
                 if R is not None:
                     cv2.circle(dbg, (int(R), y), 4, (0, 165, 255), -1)
-                if g('debug_row_centers'):
-                    cv2.circle(dbg, (int(c), y), 4, (255, 0, 0), -1)
 
-        if centers:
+        if newL or newR:
             self.prevL, self.prevR = newL, newR
-            tgt = float(np.average(centers, weights=weights))
-            gap = cx0 - tgt
-            step = g('smooth') * (gap - self.gap_f)
-            ms = g('max_step')
-            self.gap_f += float(np.clip(step, -ms, ms))
             self.lost = 0
-            text, color = '%s  gap %+d' % (modes, round(self.gap_f)), (0, 255, 0)
+            text, color = modes, (0, 255, 0)
         else:
             self.lost += 1
             if self.lost > g('lost_hold'):
-                self.gap_f = 0.0
                 self.prevL, self.prevR = {}, {}
             text, color = 'NO LANE (lost %d)' % self.lost, (0, 0, 255)
         if dbg is not None:
             cv2.putText(dbg, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-        return int(round(self.gap_f)), newL, newR, pairs, dbg
+        return newL, newR, pairs, dbg
 
     # ------------------------------------------------------------------
     # 지면 좌표 lane_error
@@ -559,84 +508,15 @@ class LaneCore:
             return None
         return w / 2.0 + f * (-y) / zc, h / 2.0 + f * yc / zc
 
-    @staticmethod
-    def _dir(Q):
-        """점들의 방향 (cv2.fitLine DIST_HUBER), 앞(+x) 쪽 단위 벡터."""
-        v = cv2.fitLine(np.asarray(Q, np.float32).reshape(-1, 1, 2), cv2.DIST_HUBER, 0, 0.01, 0.01).ravel()[:2]
-        v = v / max(np.hypot(*v), 1e-9)
-        return -v if v[0] < 0 else v
-
-    def _shift_normal(self, P, side, half):
-        """보이는 선 점 P(가까운 쪽부터) 를 점마다 앞뒤 normal_window 점 fitLine 접선의 수직, 차선 안쪽으로 half 만큼."""
-        k = max(int(self.p['normal_window']), 1)
-        C = []
-        for i in range(len(P)):
-            t = self._dir(P[max(i - k, 0):i + k + 1])
-            left = np.array([-t[1], t[0]])
-            C.append(P[i] + (-left if side == 'L' else left) * half)
-        return np.array(C)
-
-    @staticmethod
-    def _keep_order(C):
-        """앞쪽 거리(x) 순서가 뒤집히거나 겹치는 점은 버린다 (가까운 쪽부터 차례로)."""
-        keep = []
-        for c in C:
-            if keep and (c[0] <= keep[-1][0] + 1e-3 or np.hypot(*(c - keep[-1])) < 1e-3):
-                continue
-            keep.append(c)
-        return np.array(keep)
-
-    def _poly_read(self, Q):
-        """꺾은선 Q(x 증가) 의 reference_distance_m 지점: (lateral, heading, 이어 간 길이 m, 목표점). 못 읽으면 None."""
-        xr = float(self.p['reference_distance_m'])
-        k = max(int(self.p['normal_window']), 1)
-        n = len(Q)
-        if xr < Q[0][0] or xr > Q[-1][0]:
-            far = xr > Q[-1][0]
-            S = Q[-3:] if far else Q[:3]
-            t = self._dir(S)
-            if t[0] < 0.2:                       # 옆으로 누운 방향: 짧게 이어 읽을 수 없음
-                return None
-            b = S[-1] if far else S[0]
-            s = (xr - b[0]) / t[0]
-            pt = b + s * t
-            hd = float(np.arctan2(t[1], t[0]))
-            return float(pt[1] * np.cos(hd)), hd, float(abs(s)), pt
-        i = int(np.searchsorted(Q[:, 0], xr, side='right')) - 1
-        i = min(max(i, 0), n - 2)
-        a, b = Q[i], Q[i + 1]
-        u = (xr - a[0]) / max(b[0] - a[0], 1e-9)
-        pt = a + u * (b - a)
-        t = self._dir(Q[max(i - k + 1, 0):i + k + 1])
-        hd = float(np.arctan2(t[1], t[0]))
-        return float(pt[1] * np.cos(hd)), hd, 0.0, pt
-
-    def _poly_apply(self, kind, P, C, side, lat, head, conf):
-        """polyline 모드: 옮긴 점 C 로 lateral/heading 을 다시 읽는다. 못 쓰면 line 값 그대로 (fallback)."""
+    def _path_info(self, kind, P, C, side):
+        """디버그 그림·lane_status 용: 이번 프레임 가운데 경로 점 C (한 선이면 보이는 선 점 P 도), 선 각도(도)."""
         B = P if P is not None else C          # 선 각도: 보이는 선(한 선) / 가운데 점(두 선) 직선 맞춤
         ang = float(np.degrees(np.arctan(abs(np.polyfit(B[:, 0], B[:, 1], 1)[0]))))
-        info = dict(kind=kind, side=side, P=P, C=C, Q=None, target=None, ext=0.0, fallback=True, ang=ang)
-        self.poly_info = info
-        if self.p['single_path_mode'] != 'polyline':
-            info['fallback'] = False
-            info['mode'] = 'line'
-            return lat, head, conf
-        info['mode'] = 'polyline'
-        Q = self._keep_order(C)
-        if len(Q) < 3:
-            return lat, head, conf
-        r = self._poly_read(Q)
-        if r is None:
-            return lat, head, conf
-        info.update(Q=Q, target=r[3], ext=r[2], fallback=False)
-        self.path_pts = Q
-        if r[2] > self.p['poly_ext_max_m']:
-            conf *= float(self.p['poly_ext_conf_scale'])
-        return r[0], r[1], conf
+        self.path_info = dict(kind=kind, side=side, P=P, C=C, ang=ang)
 
-    def draw_poly(self, dbg, w, h):
-        """실제 계산에 쓰는 옮긴 점(자홍), 보이는 선 -> 옮긴 점(흰 선), 꺾은선, reference_distance_m 목표점(빨강)."""
-        S = self.poly_info
+    def draw_path(self, dbg, w, h):
+        """실제 계산에 쓰는 가운데 경로 점(자홍)과 그 점을 이은 선, 한 선이면 보이는 선 -> 옮긴 점(흰 선)."""
+        S = self.path_info
         if not S:
             return
 
@@ -649,20 +529,14 @@ class LaneCore:
                 pa, pb = pix(a), pix(b)
                 if pa and pb:
                     cv2.line(dbg, pa, pb, (255, 255, 255), 1)
-        Q = S['Q'] if S['Q'] is not None else S['C']
-        pts = [pix(q) for q in Q]
+        pts = [pix(q) for q in S['C']]
         pts = [q for q in pts if q]
         for a, b in zip(pts[:-1], pts[1:]):
             cv2.line(dbg, a, b, (255, 0, 255), 2)
         for q in pts:
             cv2.circle(dbg, q, 5, (255, 0, 255), -1)
-        if S['target'] is not None:
-            q = pix(S['target'])
-            if q:
-                cv2.circle(dbg, (q[0], min(q[1], h - 4)), 7, (0, 0, 255), -1)
-        txt = '%s %s%s ang %.0f ext %.2f' % (S['kind'], S['mode'], ' (line fallback)' if S['fallback'] else '',
-                                             S['ang'], S['ext'])
-        cv2.putText(dbg, txt, (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+        cv2.putText(dbg, '%s line ang %.0f' % (S['kind'], S['ang']), (10, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
 
     def lane_error(self, newL, newR, w, h):
         """반환: lateral, heading, valid, confidence, n_both(두 선 줄 수), n_one(한쪽 선으로 추정한 줄 수)."""
@@ -675,7 +549,7 @@ class LaneCore:
         C, W = [], []
         n_both = n_one = 0
         self.path_pts = None     # 이번 프레임 가운데 경로 점 (바닥 좌표, 가까운 쪽부터). 노드 예측이 저장해 쓴다
-        self.poly_info = None    # 경로 점, 꺾은선, 목표점, 방식 (디버그 그림·lane_status)
+        self.path_info = None    # 경로 점, 선 각도 (디버그 그림·lane_status)
         if bool(G['L']) != bool(G['R']):
             # 한 선 프레임(한쪽 선만 있음): 보이는 선에 직선을 맞춘 뒤 그 직선을 반폭만큼 옮긴다.
             # 줄마다 따로 옮기면 급한 코너(선의 곡률 반경이 반폭과 비슷)에서 옮긴 점들이 한 점으로 모여
@@ -696,8 +570,7 @@ class LaneCore:
             # 가운데 경로 점: 보이는 선 점들을 맞춘 직선의 수직 방향으로 반폭만큼 통째로 옮김 (선의 휜 모양은 그대로)
             nl = np.array([-coef[1], 1.0]) / np.hypot(1.0, coef[1])
             self.path_pts = P + (-nl if side == 'L' else nl) * half
-            Cn = self._shift_normal(P, side, half) if self.p['single_path_mode'] == 'polyline' else self.path_pts
-            lateral, heading, conf = self._poly_apply('single', P, Cn, side, lateral, heading, conf)
+            self._path_info('single', P, self.path_pts, side)
             return lateral, heading, True, float(np.clip(conf, 0.0, 1.0)), 0, n_one
         for y in sorted(set(G['L']) | set(G['R']), reverse=True):
             if y in G['L'] and y in G['R']:
@@ -742,7 +615,7 @@ class LaneCore:
                                  rcond=None)[0][1]
             conf *= np.exp(-(np.degrees(abs(np.arctan(bn) - np.arctan(coef[1]))) / 10.0) ** 2)
         self.path_pts = C.copy()             # 줄 순서 (화면 아래 = 가까운 쪽부터)
-        lateral, heading, conf = self._poly_apply('pair', None, C, '', lateral, heading, conf)
+        self._path_info('pair', None, C, '')
         return lateral, heading, True, float(np.clip(conf, 0.0, 1.0)), n_both, n_one
 
     def _reject_singles(self, C, W):
@@ -806,16 +679,6 @@ class LaneCore:
         c2, c1, _ = np.polyfit(G[:, 0], G[:, 1], 2)
         slope = c1 + 2.0 * c2 * G[:, 0].mean()
         return float(2.0 * c2 / (1.0 + slope * slope) ** 1.5)
-
-    def line_curvature(self, pts, w, h):
-        """한 선의 지면 곡률 크기 [1/m]. 점이 3개 미만이거나 전방 0.15 m 미만으로 퍼져 있으면 0."""
-        G = [self.pix_to_base(u, y, w, h) for y, u in pts.items()]
-        G = np.array([q for q in G if q is not None])
-        if len(G) < 3 or np.ptp(G[:, 0]) < 0.15:
-            return 0.0
-        c2, c1, _ = np.polyfit(G[:, 0], G[:, 1], 2)
-        slope = c1 + 2.0 * c2 * G[:, 0].mean()
-        return float(abs(2.0 * c2) / (1.0 + slope * slope) ** 1.5)
 
     def fork_rows(self, lat, head, w, h):
         """차선 띠(중심선 lat/head 기준, 양쪽에서 fork_margin_m 안쪽) 안에 노란 구간이 있는 추적 줄 수."""
@@ -890,7 +753,7 @@ class LaneCore:
         if self.w_mem is not None and not self.width_fresh(t):
             self.w_mem, self.w_t, self.wrow = None, None, {}     # 오래된 실측은 버림 -> 경우 (가)
         oldL, oldR = dict(self.prevL), dict(self.prevR)
-        gap, newL, newR, pairs, dbg = self.track(img, want_debug)
+        newL, newR, pairs, dbg = self.track(img, want_debug)
         tracked = bool(newL or newR)
         self.half = self.cur_width() / 2.0
         lat, head, valid, conf, n_both, n_one = self.lane_error(newL, newR, w, h)
@@ -998,8 +861,8 @@ class LaneCore:
         else:
             self.slew_on = False
         self.counts['frames'] += 1
-        if dbg is not None and valid and self.poly_info:
-            self.draw_poly(dbg, w, h)
+        if dbg is not None and valid and self.path_info:
+            self.draw_path(dbg, w, h)
         if dbg is not None:
             cv2.putText(dbg, '%s W=%.2f mem=%s fixed=%s' % (kind or 'invalid', 2 * self.half,
                         'none' if self.w_mem is None else '%.2f' % self.w_mem, fixed or '-'),
@@ -1024,10 +887,10 @@ class LaneCore:
             if self.invalid_run > self.p['lost_hold']:
                 self.prevL, self.prevR = {}, {}
                 self.invalid_run = 0
-        return dict(gap=gap, lateral=lat, heading=head, valid=ok, raw_valid=valid,
+        return dict(lateral=lat, heading=head, valid=ok, raw_valid=valid,
                     confidence=conf, single=n_one > 0, guard=why, width_err=werr,
                     n_one=n_one, n_good=n_good, n_both=n_both, debug=dbg, lat_raw=lat_raw, kind=kind,
                     width_meas=wf, width_mem=self.w_mem, width_used=2.0 * self.half, fixed=fixed if ok else '',
                     width_note=note, slew=lat != lat_raw, corner_b=self.corner_b,
                     outer_off=('o' in fixed), path=self.path_pts if ok else None,
-                    poly=self.poly_info if valid else None, **self.stats)
+                    path_info=self.path_info if valid else None, **self.stats)

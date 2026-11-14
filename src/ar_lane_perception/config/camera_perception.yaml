@@ -2,7 +2,6 @@ camera_perception_node:
   ros__parameters:
     # 입력/부가 출력
     image_topic: /camera/color/image_raw   # 실차. 시뮬은 launch에서 /rgb/image_raw로 덮어씀
-    publish_distance_y: false              # true면 기존 limo_control용 /distance_y(Int32, px)도 발행
     publish_debug_image: false
     debug_image_num: 2                     # 0: 색 마스크, 그 외: 검출 표시 영상
 
@@ -50,25 +49,18 @@ camera_perception_node:
     blob_angle_max_deg: 30.0    # (a) 지면 덩어리 장축이 현재 헤딩과 이 각도 넘게 다르면 제거 (정지선, 시작 테이프)
     blob_min_len_m: 0.08        # (a) 장축이 이보다 짧은 덩어리는 방향 검사 안 함
     blob_max_width_m: 0.08      # (a) 덩어리 평균 폭(지면 면적/장축 길이)이 이보다 넓으면 제거
-    row_width_ratio: 0.6        # (b) 한 행의 한 구간 폭 >= lane_width_m * 0.6 이면 그 행 제외
-    row_max_runs: 3             # (b) 한 행에 같은 색 구간이 차선 폭 하나(lane_width_m+guard_width_tol_m) 안에 3개 이상이면 제외 (방지턱 줄무늬)
+    row_width_ratio: 0.6        # (b) 한 행의 한 구간 폭 >= 차선 폭(실측 기억) * 0.6 이면 그 행 제외
+    row_max_runs: 3             # (b) 한 행에 같은 색 구간이 차선 폭 하나(실측 기억+guard_width_tol_m) 안에 3개 이상이면 제외 (방지턱 줄무늬)
 
     # 선 추적 (영상 px)
-    side: both
     center_x: 320
     y_top: 320
     y_bot: 470
     n_rows: 8
-    horizon_y: 260
-    lane_w_bottom: 560
     track_tol: 90
-    track_predict: false
     lost_hold: 5
-    smooth: 0.7       # /distance_y 필터에만 사용
-    max_step: 100.0   # /distance_y 필터에만 사용
 
     # lane_error (base_link 지면 좌표)
-    lane_width_m: 0.55          # 선 중심 간 차선 폭. 실차 기본 0.55(규정집 값, 실물 미측정). 시뮬은 _sim.yaml에서 0.52
     # lateral_offset_m, heading_error_rad의 기준점: base_link 원점(차 중심)에서 전방 거리 [m]
     # !! 판단팀 ar_mission_supervisor의 lane.reference_distance_m과 같은 값이어야 한다 !!
     reference_distance_m: 0.5
@@ -79,11 +71,10 @@ camera_perception_node:
 
     # 옆 도로 선 가드 (README 참고)
     guard_enable: true
-    guard_width_tol_m: 0.10     # 한 줄의 두 선 폭이 lane_width_m에서 이만큼 넘게 다르면 옆 도로 선이 섞인 것으로 봄
+    guard_width_tol_m: 0.10     # 이력 없이 선 쌍을 고를 때: 간격이 기억한 실측 폭에서 이 안이어야 함
     guard_jump_m: 0.10          # 그런 프레임은 직전 정상 lateral과 이 안으로 이어질 때만 valid
     guard_memory_sec: 1.0       # 직전 정상값을 비교 기준으로 쓰는 최대 시간
-    guard_head_jump_rad: 0.35   # 애매한 프레임은 헤딩도 직전 정상값과 이 안(약 20도)으로 이어져야 valid
-    guard_need_pair: true       # 폭이 lane_width_m에 맞는 선 쌍이 한 줄도 없는 프레임(한쪽 선 추정만)도 직전 정상값과 이어질 때만 valid
+    guard_need_pair: true       # 한 선 프레임은 최근(width_stale_sec 안) 실측 폭이 있을 때만 valid
     min_confidence: 0.05        # confidence가 이보다 낮으면 valid=false (판단팀은 valid만 봄). 0이면 끔
     # 흰 선을 쓴 프레임(3차선 구간)에서, 맞는 선 쌍의 중심선과 single_tol_m 넘게 어긋나는 한쪽 선 추정 줄이 섞이면
     # single_conflict=invalid: 그 프레임 valid=false / reject: 그 줄만 버림. (넓어지는 구간 비스듬한 노란 선 차단)

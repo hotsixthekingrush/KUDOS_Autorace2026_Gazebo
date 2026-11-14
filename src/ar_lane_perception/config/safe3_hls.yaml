@@ -42,4 +42,3 @@ camera_perception_node:
     cam_x_m: 0.10          # 실차 미측정 (시뮬 값 그대로)
     y_top: 260             # 실차 탐색 줄 범위 (영상 줄 번호). Gazebo 는 sim_hls / sim_lab 이 320 / 470 으로 덮어씀
     y_bot: 405
-    horizon_y: 260         # 실차 값 미확정 (지금 코드는 쓰지 않음)

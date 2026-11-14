@@ -14,7 +14,7 @@
 ```bash
 colcon build --symlink-install --base-paths src --packages-select ar_msgs ar_lane_perception
 ros2 launch ar_lane_perception camera_perception.launch.py            # 실차: /camera/color/image_raw
-ros2 launch ar_lane_perception camera_perception.launch.py sim:=true  # 시뮬: /rgb/image_raw, lane_width_m 0.52
+ros2 launch ar_lane_perception camera_perception.launch.py sim:=true  # 시뮬: /rgb/image_raw
 ros2 launch ar_lane_perception camera_perception.launch.py image_topic:=/my/image
 ```
 
@@ -24,7 +24,6 @@ ros2 launch ar_lane_perception camera_perception.launch.py image_topic:=/my/imag
 |---|---|---|---|
 | 구독 | `image_topic` 파라미터 | `sensor_msgs/Image` | sensor data QoS |
 | 발행 | `/perception/lane_error` | `ar_msgs/LaneError` | reliable, depth 10, 영상 프레임마다 |
-| 발행 | `distance_y` | `std_msgs/Int32` | `publish_distance_y: true`일 때만 (기본 꺼짐). 기존 `limo_control`용 px 값 |
 | 발행 | `debug_image` | `sensor_msgs/Image` | `publish_debug_image: true`일 때만 (기본 꺼짐) |
 | 발행 | `/perception/lane_status` | `std_msgs/String` (JSON) | 영상 프레임마다 판정 사유(`reason`), raw_valid, n_one/n_good, 처리 시간. `publish_status` (기본 켬). 분석용 |
 | 구독 | `odom_topic` (`/odom`) | `nav_msgs/Odometry` | `predict_enable: true`일 때만 (시뮬 yaml 기본 켬) |
@@ -40,7 +39,7 @@ ros2 launch ar_lane_perception camera_perception.launch.py image_topic:=/my/imag
 | `heading_error_rad` | 차선 중심선 방향 − 차 진행방향. 차선이 **왼쪽으로 꺾이면 +** [rad] |
 | `curvature` | 항상 0.0 (아직 추정하지 않음) |
 | `confidence` | 0~1 품질 지표. 확률로 보정된 값이 아니다 |
-| `single_lane_estimated` | 한 줄이라도 한쪽 선 + `lane_width_m`/2 로 중심을 추정했으면 true |
+| `single_lane_estimated` | 한 줄이라도 한쪽 선 + 기억한 차선 폭/2 로 중심을 추정했으면 true |
 
 **기준점:** `lateral_offset_m`과 `heading_error_rad`는 차 중심(`base_link` 원점)에서 **앞쪽 `reference_distance_m` = 0.5 m** 지점 기준이다.
 **이 값은 판단팀 `ar_mission_supervisor`의 `lane.reference_distance_m`과 같아야 한다.** 한쪽만 바꾸면 제어가 틀어진다.
@@ -134,8 +133,8 @@ ros2 launch ar_lane_perception camera_perception.launch.py image_topic:=/my/imag
 처리 (노랑, 흰 마스크 각각):
 - **(a) 덩어리:** 연결 덩어리를 지면 좌표로 바꿔 장축 방향이 현재 헤딩(마지막 valid 값)과 `blob_angle_max_deg`(30°) 넘게 다르거나,
   평균 폭(지면 면적/장축 길이)이 `blob_max_width_m`(0.08 m)보다 넓으면 제거. 정지선, 시작 지점 흰 테이프가 여기서 빠진다.
-- **(b) 행:** 추적 줄에서 한 구간의 지면 폭이 `lane_width_m × row_width_ratio`(0.6) 이상이거나, 같은 색 구간이
-  차선 폭 하나(`lane_width_m + guard_width_tol_m`) 안에 `row_max_runs`(3)개 이상이면 그 줄을 뺀다.
+- **(b) 행:** 추적 줄에서 한 구간의 지면 폭이 차선 폭(실측 기억) × `row_width_ratio`(0.6) 이상이거나, 같은 색 구간이
+  차선 폭 하나(실측 기억 + `guard_width_tol_m`) 안에 `row_max_runs`(3)개 이상이면 그 줄을 뺀다.
   방지턱 줄무늬는 진행 방향과 나란해서 (a)로는 안 빠지고 (b)로 빠진다.
   "한 줄에 3구간 이상"을 그대로 쓰면 옆 도로 선(약 0.2 m 바깥)이 보이는 정상 줄도 빠져서, 차선 폭 하나 안에 든 구간만 센다.
 - **줄을 뺀 뒤의 추적:** 원래 -19°의 직접 원인은 빠진 줄 다음 줄에서 멀리 떨어진 아래 줄 위치로 선을 찾다가 옆 도로 선을 잡은 것이다.
@@ -150,14 +149,14 @@ ros2 launch ar_lane_perception camera_perception.launch.py image_topic:=/my/imag
 - **점선 치수 (규정집에 없음, 가제보 월드 `track_paint`(track.png → 메시)에서 읽음, 임시값):**
   길이 0.18~0.19 m, 간격 0.166 m, 폭 약 0.008 m, x 4.30~8.34 (점선 2줄 각 12개, y 0.68 / 1.21). 차선 중심 y 0.43 / 0.95 / 1.47.
   실차 치수는 미확인이다.
-- 차선 선택: 이력이 없을 때 지면 간격이 `lane_width_m ± guard_width_tol_m`인 이웃 선 쌍 중 차 중심에 가장 가까운 쌍을 잡는다.
+- 차선 선택: 이력이 없을 때 지면 간격이 기억한 실측 폭 ± `guard_width_tol_m`인(기억이 없으면 `width_min_m`~`width_max_m` 안인) 이웃 선 쌍 중 차 중심에 가장 가까운 쌍을 잡는다.
   폭이 맞는 쌍이 한 줄도 없는 프레임은 `guard_need_pair`로 직전 정상값과 이어질 때만 valid.
 - valid=false가 `lost_hold`(5) 프레임 넘게 이어지면 선 추적 이력을 지우고 다시 잡는다 (잘못 잡은 선에 갇히는 것 방지).
 
 ### 가드 추가 (C)
 
 - 폭이 맞는 선 쌍이 없는 프레임(한쪽 선 추정만): 인접 차선 선일 수 있으므로 직전 정상값과 lateral 0.10 m, heading
-  `guard_head_jump_rad`(0.35 rad ≈ 20°) 안으로 이어질 때만 valid. 사유 `single_no_history` / `single_jump` / `single_head_jump`.
+  0.35 rad(≈ 20°) 안으로 이어질 때만 valid. 사유 `single_no_history` / `single_jump` / `single_head_jump`.
 - 기존 애매한 프레임(폭 안 맞는 쌍 + 한쪽 추정)도 heading 연속성 검사 추가 (`ambiguous_head_jump`).
 - `confidence < min_confidence`(0.05)이면 valid=false (`low_confidence`). 11개 로그에서 confidence 0.05 미만 valid 프레임의
   대부분이 heading 10° 넘게 틀린 프레임이었다. 메시지 정의는 바꾸지 않았다.
@@ -167,7 +166,7 @@ ros2 launch ar_lane_perception camera_perception.launch.py image_topic:=/my/imag
 가운데 차선은 섬 끝(x 4.267)에서 끝난다. x ≤ 5.04부터 카메라에 섬의 갈라지는 노란 선이 보여 heading 최대 26° 오차,
 `lane_width_m` 0.55에서는 섬을 지나며 옆 차선을 잡아 lateral 54 cm 오차(valid)가 나왔다.
 - 흰 선을 차선 선으로 쓴 줄이 `fork_min_white_rows`(2) 이상인 프레임에서, 직전 정상 차선 띠
-  (중심 ± `lane_width_m`/2 − `fork_margin_m`(0.08 m)) 안쪽에 노란 구간(제거 전 마스크, (b)로 뺀 줄 제외)이 있는 줄이
+  (중심 ± 실측 폭/2 − `fork_margin_m`(0.08 m)) 안쪽에 노란 구간(제거 전 마스크, (b)로 뺀 줄 제외)이 있는 줄이
   `fork_min_rows`(2) 이상이면 valid=false (`lane_fork`).
 - 그 뒤 갈라짐 직전 차선과 lateral 0.10 m 안으로 다시 이어지거나 `fork_timeout_sec`(3 s)가 지날 때까지 valid=false (`fork_hold`).
 - 흰 선 조건이 없으면 코너에서 굽은 노란 선이 직선 띠 안으로 들어와 오탐이 났다 (11개 로그에서 283프레임 손실). 흰 선 2줄 조건으로 0.
@@ -238,9 +237,7 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 | 이름 | 기본값 | 설명 |
 |---|---|---|
 | `image_topic` | `/camera/color/image_raw` | launch의 `image_topic` / `sim` 인자로 바뀜 |
-| `lane_width_m` | 0.55 | 선 중심 간 차선 폭. **0.55는 미확인**(규정집 0.55, 도면 0.50, 실물 미측정). 시뮬은 `camera_perception_sim.yaml`에서 0.52 |
 | `reference_distance_m` | 0.5 | 기준점의 `base_link` 전방 거리. 판단팀 `lane.reference_distance_m`과 같아야 함 |
-| `publish_distance_y` | false | 기존 `/distance_y` 발행 |
 | `guard_enable` | true | 옆 도로 선 가드 |
 | `color_space` | hls | 노란 선 색 필터 `hls` / `lab`. 런타임 변경 가능 |
 | `lab_l_min/max`, `lab_a_min/max`, `lab_b_min/max` | 100/255, 90/140, 175/255 | `lab`일 때만 사용. **시뮬 기준 임시값** |
@@ -248,7 +245,7 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 | `clean_enable` | true | 가로선/줄무늬 제거 |
 | `blob_angle_max_deg`, `blob_min_len_m`, `blob_max_width_m` | 30, 0.08, 0.08 | (a) 덩어리 제거 |
 | `row_width_ratio`, `row_max_runs` | 0.6, 3 | (b) 행 제외 |
-| `guard_need_pair`, `guard_head_jump_rad` | true, 0.35 | 선 쌍 없는 프레임 / heading 연속성 |
+| `guard_need_pair` | true | 한 선 프레임은 최근 실측 폭이 있을 때만 valid |
 | `min_confidence` | 0.05 | 이보다 낮으면 valid=false. 0이면 끔 |
 | `single_tol_m`, `single_conflict` | 0.05, invalid | 흰 선 프레임의 쌍/한쪽 선 충돌 → valid=false |
 | `confirm_head_rad`, `confirm_lat_m` | 0.035, 0.03 | invalid 뒤 첫 프레임 확인. 0이면 끔 |
@@ -265,7 +262,7 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 
 ## 차선 폭 실시간 측정 (lane-rt-width)
 
-고정 폭 `lane_width_m`, `lane_w_bottom`, `horizon_y`는 더 이상 쓰지 않는다 (파라미터는 호환용으로만 남김).
+고정 폭 `lane_width_m`, `lane_w_bottom`, `horizon_y`는 쓰지 않으며 파라미터도 지웠다 (11/14 정리).
 
 - 두 선이 같은 줄에서 함께 보이는 프레임에서만 폭(줄별 픽셀 폭 + 미터 폭)을 재서 기억한다 (`width_alpha`로 완만하게 갱신).
 - 프레임 폭이 `width_min_m`~`width_max_m`(0.40~0.95) 밖이거나 기억값에서 `width_max_step_m`(0.03) 넘게 바뀌면 기억을 갱신하지 않고,
@@ -302,20 +299,13 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
   - 카메라 프레임마다 `src: camera`, `predicting`(이 프레임이 invalid이고 예측 값이 나가는 중), `predict_sec`.
   - 예측으로 낸 값마다 `src: predict`, `predict_sec`(마지막 valid 뒤 지난 시간), `pred_beyond`(저장 범위를 넘어 연장), `pred_ext_m`, `lat`, `conf`.
 
-## 경로 읽는 방식 single_path_mode (11/13, 기본 line)
+## 가운데 경로와 디버그 표시
 
-- `line`(기본, 예전 방식): 가운데 점들(한 선이면 보이는 선)에 직선 하나를 맞추고, `reference_distance_m`(0.5) 지점의 수직 거리를 쓴다(한 선이면 ± 반폭).
-- `polyline`(파라미터로만 켬. 가제보 기록에서 코너 효과가 없었고 지그재그에서 lateral이 흔들렸다): 식으로 맞추지 않는다.
-  - 한 선 프레임은 보이는 선의 점마다 앞뒤 `normal_window`(2)점으로 `cv2.fitLine(DIST_HUBER)` 접선을 구한다. 그 수직 방향 차선 안쪽으로 반폭만큼 옮긴다.
-    `corner_outer_offset_m`이 켜져 있으면 그 반폭을 쓴다.
-  - 두 선 프레임은 줄별 가운데 점을 그대로 쓴다.
-  - 앞쪽 거리 순서가 뒤집히거나 겹친 점은 버린다. 남은 점을 이은 꺾은선에서 0.5 m 지점을 보간해 y × cos(그 지점 방향)을 lateral로 쓴다. 직선이면 line과 같은 정의다.
-    heading은 그 지점 앞뒤 점의 fitLine 방향이다.
-  - 점이 0.5 m까지 안 닿으면 끝 2~3점 방향으로만 이어 읽는다. 이어 간 길이가 `poly_ext_max_m`(0.2)를 넘으면 confidence에 `poly_ext_conf_scale`(0.5)을 곱한다.
-  - 쓸 점이 3개 미만이거나, 이어 갈 방향이 옆으로 누우면 그 프레임은 line 방식으로 낸다.
-- 예측(`predict_path`)이 저장하는 경로 점도 polyline에서 옮긴 점이다.
-- 디버그 영상: 자홍 점과 자홍 선은 실제 계산에 쓰는 경로 점과 꺾은선, 흰 선은 보이는 선 점에서 옮긴 점까지, 빨간 점은 0.5 m 목표점이다.
-  셋째 줄 글자는 `single|pair line|polyline ang <선 각도> ext <이어 간 길이>`다.
-  예전 줄별 픽셀 가운데 표시(파란 점, /distance_y 용)는 `debug_row_centers: true`일 때만 그린다(lateral 계산에는 안 쓰임).
-- `/perception/lane_status`: `single_path_mode`, `path_used`(이 프레임에 실제로 쓴 방식), `line_angle_deg`, `poly_ext_m`.
+- 가운데 점들(한 선 프레임이면 보이는 선)에 직선 하나를 맞추고, `reference_distance_m`(0.5) 지점의 수직 거리를 lateral로 쓴다(한 선이면 ± 반폭).
+  한 선 프레임의 이동은 맞춘 직선에 수직인 방향이다(화면 가로 이동이 아님).
+- 디버그 영상: 자홍 점과 자홍 선은 실제 계산에 쓰는 가운데 경로 점, 흰 선은 보이는 선 점에서 옮긴 점까지다.
+  셋째 줄 글자는 `single|pair line ang <선 각도>`다.
+- `/perception/lane_status`: `line_angle_deg`(한 선이면 보이는 선, 두 선이면 가운데 점에 맞춘 직선의 각도).
+- 11/13에 시험한 꺾은선 읽기(`single_path_mode: polyline`)는 가제보 기록에서 코너 효과가 없었고 지그재그에서 lateral이 흔들려 지웠다(11/14).
+  줄별 픽셀 가운데(파란 점)와 `/distance_y` 발행도 lateral 계산에 쓰이지 않아 지웠다.
 - 가제보 기록 결과: 코너 한 선에서 line과 거의 같다(Pure Pursuit 필요 대비 24% -> 25%). 코너에서 lateral이 작은 주원인은 바깥 선에서 옮기는 반폭이 실제 코너 폭보다 작은 것이다. 보고: `~/scalecar2026/tools/report_polyline.txt`

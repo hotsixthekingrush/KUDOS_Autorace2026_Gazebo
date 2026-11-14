@@ -2,7 +2,7 @@
 
 실차:  ros2 launch ar_lane_perception camera_perception.launch.py
 시뮬:  ros2 launch ar_lane_perception camera_perception.launch.py sim:=true
-       (image_topic 기본값이 /rgb/image_raw, lane_width_m 0.52, use_sim_time true)
+       (image_topic 기본값이 /rgb/image_raw, use_sim_time true)
 다른 토픽: image_topic:=/my/image
 색 필터:   color_space:=lab (비우면 yaml 값)
 """

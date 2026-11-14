@@ -20,7 +20,7 @@ from rcl_interfaces.msg import SetParametersResult
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
-from std_msgs.msg import Int32, String
+from std_msgs.msg import String
 from ar_msgs.msg import LaneError
 
 from ar_lane_perception.lane_core import DEFAULTS, LaneCore
@@ -30,7 +30,6 @@ class CameraPerceptionNode(Node):
     def __init__(self):
         super().__init__('camera_perception_node')
         self.declare_parameter('image_topic', '/camera/color/image_raw')
-        self.declare_parameter('publish_distance_y', False)   # 기존 limo_control용 /distance_y
         self.declare_parameter('publish_debug_image', False)
         self.declare_parameter('debug_image_num', 2)          # 0: 마스크, 그 외: 검출 표시 영상
         # 프레임마다 판정 사유를 /perception/lane_status (std_msgs/String, JSON)로 발행 (분석용)
@@ -53,9 +52,6 @@ class CameraPerceptionNode(Node):
 
         self.br = CvBridge()
         self.lane_pub = self.create_publisher(LaneError, '/perception/lane_error', 10)
-        self.dis_pub = None
-        if self.get_parameter('publish_distance_y').value:
-            self.dis_pub = self.create_publisher(Int32, 'distance_y', qos_profile_sensor_data)
         self.debug_pub = self.create_publisher(Image, 'debug_image', 10)
         self.status_pub = self.create_publisher(String, '/perception/lane_status', 10)
         topic = self.get_parameter('image_topic').value
@@ -220,9 +216,6 @@ class CameraPerceptionNode(Node):
             if prm.name == 'color_space' and prm.value not in ('hls', 'lab'):
                 return SetParametersResult(successful=False,
                                            reason="color_space는 'hls' 또는 'lab'")
-            if prm.name == 'single_path_mode' and prm.value not in ('line', 'polyline'):
-                return SetParametersResult(successful=False,
-                                           reason="single_path_mode는 'line' 또는 'polyline'")
         for prm in params:
             if prm.name in DEFAULTS:
                 self.core.p[prm.name] = prm.value
@@ -283,13 +276,9 @@ class CameraPerceptionNode(Node):
                     and 0.0 <= age <= float(self.get_parameter('predict_max_sec').value))
             st.update(src='camera', predicting=bool(pred), predict_sec=round(age, 3) if pred else 0.0,
                       corner_b=float(r['corner_b']), outer_off=bool(r.get('outer_off')))
-            # 경로 읽는 방식: single_path_mode, 이번 프레임에 실제로 쓴 방식(polyline 이 못 읽으면 line), 선 각도(도),
-            # 꺾은선 끝에서 이어 간 길이 [m]
-            pi = r.get('poly') or {}
-            st.update(single_path_mode=self.core.p['single_path_mode'],
-                      path_used=None if not pi else ('line' if pi['fallback'] or pi['mode'] == 'line' else 'polyline'),
-                      line_angle_deg=None if not pi else round(pi['ang'], 1),
-                      poly_ext_m=None if not pi else round(float(pi['ext']), 3))
+            # 선 각도(도): 한 선이면 보이는 선, 두 선이면 가운데 점에 맞춘 직선
+            pi = r.get('path_info') or {}
+            st.update(line_angle_deg=None if not pi else round(pi['ang'], 1))
             self.status_pub.publish(String(data=json.dumps(st)))
         wl = float(self.get_parameter('width_log_sec').value)
         if wl > 0 and time.monotonic() - self._wlog_t >= wl:
@@ -306,8 +295,6 @@ class CameraPerceptionNode(Node):
                                       else '%.2f' % r['width_err']),
                                    throttle_duration_sec=1.0)
 
-        if self.dis_pub is not None:
-            self.dis_pub.publish(Int32(data=r['gap']))
         if self.get_parameter('publish_debug_image').value:
             if self.get_parameter('debug_image_num').value == 0:
                 mask = self.core.lane_mask(img)   # color_space에 따라 HLS / LAB

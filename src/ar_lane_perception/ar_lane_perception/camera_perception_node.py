@@ -6,6 +6,9 @@ predict_enable (odom 예측): 마지막 valid 차선 중심선을 odom 좌표에
 현재 차 자세 기준 lateral/heading 으로 옮겨 발행한다 (stamp = 그 odom 시각). 카메라가 느리거나(가제보 3~4 Hz,
 간격 최대 1.7 s) 프레임이 invalid여도 predict_max_sec 동안은 옮긴 값이 나간다. 그 뒤로는 valid=false.
 가드/시작 확인의 직전 값 비교도 odom으로 옮겨서 한다 (LaneCore.motion).
+
+odom_yaw_source (11/14, 판단팀): 'imu' 면 /odom 의 pose 대신 /odom 속도 + imu_topic 방향으로 차 위치를 적분해서
+예측에 쓴다 (odom_imu.py). 실차 WeGo 아커만 /odom 방향은 돌 때 약 30% 커서. 'odom' 이면 예전처럼 /odom pose 그대로.
 """
 import bisect
 import collections
@@ -18,12 +21,13 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rcl_interfaces.msg import SetParametersResult
 from cv_bridge import CvBridge
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, Imu
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 from ar_msgs.msg import LaneError
 
 from ar_lane_perception.lane_core import DEFAULTS, LaneCore
+from ar_lane_perception.odom_imu import OdomImuPose
 
 
 class CameraPerceptionNode(Node):
@@ -36,6 +40,9 @@ class CameraPerceptionNode(Node):
         self.declare_parameter('publish_status', True)
         self.declare_parameter('predict_enable', False)       # odom 예측 발행 (시뮬 yaml에서 true)
         self.declare_parameter('odom_topic', '/odom')
+        # (11/14) 예측에 쓰는 차 방향: 'odom' = /odom pose 그대로, 'imu' = /odom 속도 + imu_topic 방향으로 적분
+        self.declare_parameter('odom_yaw_source', 'odom')
+        self.declare_parameter('imu_topic', '/imu')
         self.declare_parameter('predict_rate_hz', 20.0)
         self.declare_parameter('predict_max_sec', 1.0)        # 마지막 valid 프레임 뒤 이 시간까지만 옮긴 값 발행
         self.declare_parameter('predict_confidence', 0.25)    # 예측 중(마지막 카메라 프레임이 invalid) 발행 confidence
@@ -63,7 +70,19 @@ class CameraPerceptionNode(Node):
         self.pred_invalid_sent = True
         self.frame_valid = True       # 마지막 카메라 프레임 valid 여부 (False 인 동안 옮긴 값 = 예측)
         self.path_odom = None         # 마지막 valid 프레임 가운데 경로 점 (odom 좌표, 가까운 쪽부터)
+        self.dr = None                # (11/14) odom_yaw_source=imu 일 때 OdomImuPose
+        self._imu_wait_t0 = None
+        self._imu_warned = False
         if self.predict:
+            src = str(self.get_parameter('odom_yaw_source').value).lower()
+            if src == 'imu':
+                self.dr = OdomImuPose()
+                self.create_subscription(Imu, self.get_parameter('imu_topic').value, self.imu_callback, 50)
+            elif src != 'odom':
+                self.get_logger().warn('odom_yaw_source=%s 는 모름 - odom 으로 씀 (odom | imu)' % src)
+            self.get_logger().info('예측 차 방향: %s' % (
+                '/odom 속도 + %s 방향' % self.get_parameter('imu_topic').value if self.dr is not None
+                else '/odom pose 그대로'))
             self.create_subscription(Odometry, self.get_parameter('odom_topic').value, self.odom_callback, 50)
             self.core.motion = self.motion
             self.create_timer(1.0 / float(self.get_parameter('predict_rate_hz').value), self.predict_tick)
@@ -79,18 +98,37 @@ class CameraPerceptionNode(Node):
     # ------------------------------------------------------------------
     # odom 예측
     # ------------------------------------------------------------------
+    def imu_callback(self, m):
+        q = m.orientation
+        self.dr.set_imu(q.x, q.y, q.z, q.w)
+
     def odom_callback(self, m):
-        q, pp = m.pose.pose.orientation, m.pose.pose.position
-        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
         t = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
-        if not all(math.isfinite(v) for v in (pp.x, pp.y, yaw)):
-            return
         if self.poses and t <= self.poses[-1][0]:
             if t < self.poses[-1][0] - 1.0:      # 시간이 뒤로 감 (시뮬 리셋)
                 self.poses.clear()
                 self.line = None
+                if self.dr is not None:
+                    self.dr.reset()
             return
-        self.poses.append((t, pp.x, pp.y, yaw))
+        if self.dr is not None:
+            pose = self.dr.update(t, m.twist.twist.linear.x)
+            if pose is None:                     # IMU 가 아직 안 옴 -> 예측 안 함 (카메라 값만 나감)
+                if self._imu_wait_t0 is None:
+                    self._imu_wait_t0 = t
+                elif t - self._imu_wait_t0 > 2.0 and not self._imu_warned:
+                    self._imu_warned = True
+                    self.get_logger().warn('/odom 은 오는데 %s 가 2초 넘게 안 옴 - 예측 꺼진 상태 (odom_yaw_source=imu)'
+                                           % self.get_parameter('imu_topic').value)
+                return
+            x, y, yaw = pose
+        else:
+            q, pp = m.pose.pose.orientation, m.pose.pose.position
+            yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+            x, y = pp.x, pp.y
+        if not all(math.isfinite(v) for v in (x, y, yaw)):
+            return
+        self.poses.append((t, x, y, yaw))
 
     def pose_at(self, t):
         """t의 odom 자세 (선형 보간). 기록 범위 밖이면 가장 가까운 끝 (0.3 s 넘게 벗어나면 None)."""

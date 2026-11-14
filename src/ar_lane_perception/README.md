@@ -27,6 +27,7 @@ ros2 launch ar_lane_perception camera_perception.launch.py image_topic:=/my/imag
 | 발행 | `debug_image` | `sensor_msgs/Image` | `publish_debug_image: true`일 때만 (기본 꺼짐) |
 | 발행 | `/perception/lane_status` | `std_msgs/String` (JSON) | 영상 프레임마다 판정 사유(`reason`), raw_valid, n_one/n_good, 처리 시간. `publish_status` (기본 켬). 분석용 |
 | 구독 | `odom_topic` (`/odom`) | `nav_msgs/Odometry` | `predict_enable: true`일 때만 (시뮬 yaml 기본 켬) |
+| 구독 | `imu_topic` (`/imu`) | `sensor_msgs/Imu` | `predict_enable: true` 이고 `odom_yaw_source: imu` 일 때만 (실차 기본) |
 
 ## LaneError 필드
 
@@ -252,6 +253,7 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 | `fork_enable`, `fork_margin_m`, `fork_min_rows`, `fork_min_white_rows`, `fork_timeout_sec` | true, 0.08, 2, 2, 3.0 | 차선 갈라짐(섬 끝) valid=false. **시뮬 기준 임시값** |
 | `cam_height_m`, `cam_x_m`, `cam_pitch_rad`, `focal_px` | 0.21, 0.10, 0.0, 381.0 | 지면 투영. 시뮬 값 |
 | `predict_enable`, `odom_topic`, `predict_rate_hz`, `predict_max_sec` | false (시뮬 true), /odom, 20, 1.0 | odom 예측 발행 |
+| `odom_yaw_source`, `imu_topic` | imu (시뮬 yaml 은 odom), /imu | 예측에 쓰는 차 방향. imu = /odom 속도 + IMU 방향으로 적분 (실차 WeGo 아커만 /odom 방향이 돌 때 약 30% 커서, 11/14 판단팀) |
 | `single_updates_ref` | true (시뮬 false) | 한쪽 선 프레임의 가드 기준 갱신 |
 | `publish_status` | true | `/perception/lane_status` |
 

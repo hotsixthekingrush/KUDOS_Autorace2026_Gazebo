@@ -17,3 +17,4 @@ camera_perception_node:
     cam_x_m: 0.10
     y_top: 320             # 시뮬 탐색 줄 범위 (safe3_* / step0_* 의 실차 값 260 / 405 를 덮어씀)
     y_bot: 470
+    odom_yaw_source: odom  # (11/14) Gazebo odom 방향은 정확 -> /odom pose 그대로 (safe3_* 는 실차용 imu)

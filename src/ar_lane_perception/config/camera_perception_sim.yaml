@@ -14,5 +14,6 @@ camera_perception_node:
     predict_enable: true
     predict_rate_hz: 20.0
     predict_max_sec: 1.0
+    odom_yaw_source: odom     # (11/14) Gazebo odom 방향은 정확 -> /odom pose 그대로 (실차는 imu)
     # 한쪽 선 추정만 있는 프레임은 가드 기준을 못 옮김 (방지턱 위 25 cm 오차 valid 방지). 기준은 odom으로 옮김
     single_updates_ref: false

@@ -94,6 +94,11 @@ camera_perception_node:
     # odom 예측 발행 / 한쪽 선 프레임의 기준 갱신 (README 'odom 예측'). 실차 미검증이라 기본은 예전 동작
     predict_enable: false
     odom_topic: /odom
+    # (11/14, 판단팀) 예측에 쓰는 차 방향. odom = /odom pose 그대로, imu = /odom 속도 + imu_topic 방향으로 직접 적분.
+    #   실차 WeGo 아커만 드라이버 /odom 방향은 돌 때 약 30% 큼 (IMU 105도 vs odom 136도, 11/13 실측) -> 실차는 imu.
+    #   Gazebo 는 camera_perception_sim.yaml / sim_hls.yaml / sim_lab.yaml 이 odom 으로 되돌림 (Gazebo odom 방향은 정확)
+    odom_yaw_source: imu
+    imu_topic: /imu
     predict_rate_hz: 20.0
     predict_max_sec: 1.0
     single_updates_ref: true

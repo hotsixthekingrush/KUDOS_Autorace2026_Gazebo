@@ -149,6 +149,10 @@ PARAM_DEFAULTS = {
         # (11/11) 차선 노드가 한 선만 보고 추정한 값(single_lane_estimated)은 기준 좌표에 안 씀
         #   (차선 팀원 새 방식: 한 선이면 '마지막 폭의 절반' 떨어진 경로 기준 -> 넓어진 곳에선 실제 중앙과 최대 15 cm 다름)
         'frame_reject_single': True,
+        # (11/14) 차선 노드가 valid 로 냈어도 confidence 가 이보다 작으면 조향에 안 씀 (직전 값 유지, stale_sec 지나면 유실).
+        #   실차 lane_run1 지그재그(서행 유도선) 구간: conf 0.00~0.10 값의 방향이 튀어(+0.49 rad) 조향이 +-0.3 흔들림.
+        #   그 녹화에서 conf < 0.1 은 5% (지그재그 20%, 직선 0%), 가장 길게 이어진 게 0.37 초. 0 = 안 거름
+        'min_confidence': 0.1,
         'kp_lateral': 1.2,
         'kd_lateral': 0.15,
         'kp_heading': 0.8,
@@ -272,6 +276,10 @@ PARAM_DEFAULTS = {
         #   단 장애물이 defer_min_distance 안으로 오면 바로 진입. 0 이면 안 미룸
         'defer_turn_rate_deg': 10.0,
         'defer_min_distance': 0.5,
+        # (11/14) 카메라 차선을 기준 좌표로 못 쓸 때(lane_for_frame 이 None) 차 방향이 트랙 축에서 이만큼 넘게 틀어져 있으면 미룸.
+        #   실차 lane_run1: 코너를 빠져나오며 회전은 느려졌지만 축에서 9도 틀어진 채 진입 -> 카메라 차선(방향 34도)을 못 믿어
+        #   차 위치를 가운데 차선으로 잡음 -> 실제론 0.2~0.3 m 옆이라 끝에 바깥 노란 선 위를 달림. 0 = 안 미룸 (axis_snap 일 때만)
+        'defer_axis_deg': 5.0,
         'min_obstacle_radius': 0.10,  # 라바콘(작음)과 구분 [m]
         'max_obstacle_radius': 0.40,
         'start_lane': 1,           # 3차선 시작 차선 (항상 가운데)
@@ -747,6 +755,9 @@ class MissionSupervisor(Node):
         return x_m - self.last_v * age, age
 
     def _cb_lane(self, msg):
+        if msg.valid and float(msg.confidence) < self.lane_gains['min_confidence']:
+            self.dbg('lane/low_conf', float(msg.confidence))
+            return                                # (11/14) 확신도 낮은 값은 버리고 직전 값 유지
         if msg.valid:
             now = self.clock_sec()
             stamp = _stamp_sec(msg.header)
@@ -1031,7 +1042,34 @@ class MissionSupervisor(Node):
                 self.get_logger().info('[AVOID_STATIC] 코너 도는 중 (초당 %.0f도) - 진입 미룸 (앞 장애물 %.2fm)'
                                        % (math.degrees(abs(rate)), near))
             return None
+        why = self._axis_defer(now, near)
+        if why is not None:
+            self.dbg('avoid/deferred_axis', near)
+            if not quiet and (self._defer_log is None or now - self._defer_log > 1.0):
+                self._defer_log = now
+                self.get_logger().info('[AVOID_STATIC] %s - 진입 미룸 (앞 장애물 %.2fm)' % (why, near))
+            return None
         return 'limo'
+
+    def _axis_defer(self, now, near):
+        """(11/14) 카메라 차선을 기준 좌표로 못 쓰는데 차가 트랙 축에서 많이 틀어져 있으면 미룰 이유 글, 아니면 None."""
+        cfg = self.avoid_static
+        lim = cfg['defer_axis_deg']
+        if lim <= 0.0 or not cfg['axis_snap'] or near <= cfg['defer_min_distance']:
+            return None
+        lane, _ = self.lane_for_frame(now)
+        if lane is not None:
+            return None                       # 카메라로 기준 좌표를 잡을 수 있음
+        pose = self._latest('odom')
+        if pose is None:
+            return None
+        ref = math.radians(cfg['axis_ref_deg'])
+        rel = math.atan2(math.sin(pose[2] - ref), math.cos(pose[2] - ref))
+        axis = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
+        err = math.atan2(math.sin(pose[2] - axis), math.cos(pose[2] - axis))
+        if abs(err) <= math.radians(lim) or abs(err) > math.radians(cfg['axis_snap_max_deg']):
+            return None                       # 거의 맞음, 또는 축에서 너무 벗어나 축 맞추기 대상이 아님
+        return '카메라 차선 못 씀 + 트랙 축에서 %.0f도 틀어짐' % math.degrees(abs(err))
 
     def _locked(self, event, now):
         outcome = EVENT_TO_OUTCOME.get(event)

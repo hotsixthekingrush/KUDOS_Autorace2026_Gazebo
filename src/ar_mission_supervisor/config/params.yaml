@@ -39,6 +39,8 @@ mission_supervisor:
       # (11/11 사용자 선택) 차선 노드가 한 선만 보고 추정한 값(single_lane_estimated)은 기준 좌표에 안 씀
       #   (차선 팀원 새 방식: 한 선이면 '마지막 폭의 절반' 떨어진 경로 기준 -> 넓어진 곳에선 실제 중앙과 최대 15 cm 다름)
       frame_reject_single: true
+      min_confidence: 0.1      # (11/14) valid 여도 confidence 가 이보다 작으면 조향에 안 씀 (직전 값 유지). 실차 lane_run1 지그재그
+                               #   구간 conf 0.00~0.10 값의 방향이 튀어 조향 +-0.3 흔들림. 그 녹화에서 5% (지그재그 20%). 0 = 안 거름
       kp_lateral: 1.2
       kd_lateral: 0.15
       kp_heading: 0.8
@@ -180,6 +182,9 @@ mission_supervisor:
       #   단 장애물이 defer_min_distance 안이면 바로 진입. 0 이면 안 미룸
       defer_turn_rate_deg: 10.0   # [도/s]
       defer_min_distance: 0.5     # [m]
+      # (11/14) 카메라 차선을 기준 좌표로 못 쓸 때 차 방향이 트랙 축에서 이만큼 넘게 틀어져 있으면 미룸 (장애물이 defer_min_distance
+      #   안이면 바로). 실차 lane_run1: 코너를 빠져나오며 축에서 9도 틀어진 채 진입 -> 기준 좌표가 0.2~0.3 m 옆 -> 바깥 선 위. 0 = 안 미룸
+      defer_axis_deg: 5.0         # [도]
       min_obstacle_radius: 0.10  # 라바콘(작음)과 구분 [m]
       max_obstacle_radius: 0.40
       start_lane: 1            # 3차선은 항상 가운데에서 시작

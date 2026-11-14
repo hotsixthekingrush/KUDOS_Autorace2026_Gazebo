@@ -42,3 +42,19 @@ camera_perception_node:
     cam_x_m: 0.10          # 실차 미측정 (시뮬 값 그대로)
     y_top: 260             # 실차 탐색 줄 범위 (영상 줄 번호). Gazebo 는 sim_hls / sim_lab 이 320 / 470 으로 덮어씀
     y_bot: 405
+
+    # --- 흔들림 줄이기 (lane-kalman). 실차 값: 보수적 (가제보 S4 와 반응 속도는 같고 잡음 큰 측정에 덜 놀람)
+    #     실차 녹화가 생기면 tools/kf_noise_estimate.py 로 kf_r_* 를 다시 맞출 것
+    transition_smooth: true      # (A) 한 선 <-> 두 선 전환 직후 섞기
+    transition_blend_sec: 0.2
+    lane_filter: kalman          # (D) none | kalman
+    kf_q_lat: 0.02
+    kf_q_head: 0.3
+    kf_r_lat: 0.06
+    kf_r_head: 0.24
+    kf_r_single_scale: 2.0
+    kf_r_trans_scale: 2.0
+    kf_gate: 9.21
+    kf_reset_sec: 0.1
+    side_vote: false             # (G) 가제보 기록에서 좌우 정확도 이득 없음 -> 끔 (코드는 남김)
+    side_confirm_sec: 0.1

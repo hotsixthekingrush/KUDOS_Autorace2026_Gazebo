@@ -18,3 +18,8 @@ camera_perception_node:
     y_top: 320             # 시뮬 탐색 줄 범위 (safe3_* / step0_* 의 실차 값 260 / 405 를 덮어씀)
     y_bot: 470
     odom_yaw_source: odom  # (11/14) Gazebo odom 방향은 정확 -> /odom pose 그대로 (safe3_* 는 실차용 imu)
+    # --- 흔들림 줄이기: 가제보 값 (카메라 잡음이 작음. 가제보 기록에서 고른 S4: 흔들림 -25%, 지연 0.3 프레임)
+    kf_q_lat: 0.005
+    kf_q_head: 0.08
+    kf_r_lat: 0.03
+    kf_r_head: 0.12

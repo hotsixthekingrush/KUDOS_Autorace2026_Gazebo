@@ -39,3 +39,19 @@ camera_perception_node:
     cam_x_m: 0.10          # 실차 미측정 (시뮬 값 그대로)
     y_top: 260             # 실차 탐색 줄 범위 (영상 줄 번호). Gazebo 는 sim_hls / sim_lab 이 320 / 470 으로 덮어씀
     y_bot: 405
+
+    # --- 흔들림 줄이기 (lane-kalman). step0 은 predict_enable false 라 차 움직임(odom)이 없어 칼만이 예측을 못 한다
+    #     (가제보 기록: 지연 1.2 프레임으로 기준 1 프레임 초과) -> 칼만은 끔. 전환 섞기(A)만 켬. 값은 safe3 과 같게 적어 둠
+    transition_smooth: true
+    transition_blend_sec: 0.2
+    lane_filter: none
+    kf_q_lat: 0.02
+    kf_q_head: 0.3
+    kf_r_lat: 0.06
+    kf_r_head: 0.24
+    kf_r_single_scale: 2.0
+    kf_r_trans_scale: 2.0
+    kf_gate: 9.21
+    kf_reset_sec: 0.1
+    side_vote: false
+    side_confirm_sec: 0.1

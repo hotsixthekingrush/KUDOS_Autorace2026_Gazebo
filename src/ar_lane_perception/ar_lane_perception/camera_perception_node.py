@@ -60,6 +60,7 @@ class CameraPerceptionNode(Node):
         for k, v in DEFAULTS.items():
             self.declare_parameter(k, v)
         self.core = LaneCore({k: self.get_parameter(k).value for k in DEFAULTS})
+        self.core.p['predict_max_sec'] = float(self.get_parameter('predict_max_sec').value)   # 칼만 예측 최대 시간
         self.add_on_set_parameters_callback(self._on_params)
 
         self.br = CvBridge()
@@ -260,9 +261,12 @@ class CameraPerceptionNode(Node):
             if prm.name == 'color_space' and prm.value not in ('hls', 'lab'):
                 return SetParametersResult(successful=False,
                                            reason="color_space는 'hls' 또는 'lab'")
+            if prm.name == 'lane_filter' and prm.value not in ('none', 'kalman'):
+                return SetParametersResult(successful=False,
+                                           reason="lane_filter는 'none' 또는 'kalman'")
         for prm in params:
-            if prm.name in DEFAULTS:
-                self.core.p[prm.name] = prm.value
+            if prm.name in DEFAULTS or prm.name == 'predict_max_sec':
+                self.core.p[prm.name] = prm.value      # predict_max_sec: 칼만 예측만으로 이어 가는 최대 시간
         return SetParametersResult(successful=True)
 
     def image_callback(self, msg):
@@ -321,6 +325,9 @@ class CameraPerceptionNode(Node):
                     <= float(self.get_parameter('predict_max_sec').value))
             st.update(src='camera', predicting=bool(pred), predict_sec=round(age, 3) if pred else 0.0,
                       corner_b=float(r['corner_b']), outer_off=bool(r.get('outer_off')))
+            # 흔들림 줄이기: 전환 섞기 비중(0 = 안 섞음), 칼만 임계 초과 여부, 좌우 근거
+            st.update(lane_filter=self.core.p['lane_filter'], blend_w=round(float(r['blend_w']), 3),
+                      kf_gated=bool(r['kf_gated']), side_votes=r['side_votes'])
             # 선 각도(도): 한 선이면 보이는 선, 두 선이면 가운데 점에 맞춘 직선
             pi = r.get('path_info') or {}
             st.update(line_angle_deg=None if not pi else round(pi['ang'], 1))

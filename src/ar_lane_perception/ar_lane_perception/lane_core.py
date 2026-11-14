@@ -63,7 +63,33 @@ DEFAULTS = {
     #      직선과 두 선 프레임은 그대로. 실행 중 ros2 param set 으로 바꿀 수 있다.
     'corner_outer_offset_m': 0.0,
     'single_confidence': 0.5,      # 한 선 프레임의 confidence (고정)
-    'pair_return_rate_mps': 0.3,   # 한 선 -> 두 선 전환 때만 lateral 변화 속도 제한 [m/s]. 0이면 끔
+    'pair_return_rate_mps': 0.3,   # 한 선 -> 두 선 전환 때만 lateral 변화 속도 제한 [m/s]. 0이면 끔 (transition_smooth 가 켜지면 안 씀)
+    # --- 흔들림 줄이기 (lane-kalman). 시간 값은 모두 초 단위, 실행 중 ros2 param set 으로 바꿀 수 있다.
+    #     코드 기본값은 실차용(보수적) 값이다. 가제보는 sim_hls / sim_lab 이 덮어쓴다.
+    # (A) 한 선 <-> 두 선 전환 직후 transition_blend_sec 동안, 직전 출력을 차 움직임만큼 옮긴 값에서 새 값으로 선형으로 넘어간다.
+    #     전환이 아닌 프레임은 그대로. 켜면 위 pair_return_rate_mps 제한은 쓰지 않는다 (같은 일을 함).
+    'transition_smooth': True,
+    'transition_blend_sec': 0.2,
+    # (D) 칼만 필터: 상태 = reference_distance_m 지점 lateral, heading. 예측 = 직전 상태를 차가 움직인 만큼 옮김
+    #     (노드의 odom 예측과 같은 차 자세: odom_yaw_source). 차 자세가 없으면 직전 값 유지.
+    #     보정 = 카메라 값. 측정 잡음은 두 선 kf_r_lat/kf_r_head, 한 선 x kf_r_single_scale, 전환 직후 x kf_r_trans_scale.
+    #     invalid 프레임은 예측만. 예측과 측정의 마할라노비스 거리^2 가 kf_gate 를 넘으면 그만큼 덜 반영하고,
+    #     넘는 상태가 kf_reset_sec 이어지면 진짜 변화로 보고 측정값으로 다시 시작한다 (3차선 차로 변경 등).
+    #     예측만으로 이어 가는 최대 시간 = 노드의 predict_max_sec (노드가 넣어 줌, 없으면 1.0).
+    'lane_filter': 'kalman',       # none | kalman
+    # 실차용 기본값 (가제보 S4 값의 q/r^2 비를 그대로 두고 q, r 을 키움: 같은 반응 속도, 잡음 큰 측정에 덜 놀람)
+    'kf_q_lat': 0.02,              # 예측 잡음 [m^2/s]
+    'kf_q_head': 0.3,              # 예측 잡음 [rad^2/s]
+    'kf_r_lat': 0.06,              # 두 선 프레임 측정 잡음 표준편차 [m]
+    'kf_r_head': 0.24,             # 두 선 프레임 측정 잡음 표준편차 [rad]
+    'kf_r_single_scale': 2.0,      # 한 선 프레임: 측정 잡음 표준편차 배수
+    'kf_r_trans_scale': 2.0,       # 전환 직후(transition_blend_sec 안): 추가 배수
+    'kf_gate': 9.21,               # 마할라노비스 거리^2 임계 (자유도 2, 99%)
+    'kf_reset_sec': 0.1,           # 임계를 넘는 측정이 이 시간 이어지면 측정값으로 다시 시작 (10 Hz 면 두 번째 프레임에서)
+    # (G) 한 선 프레임의 왼쪽/오른쪽 판정에 근거를 더함: 화면 기울기, 화면 아래쪽 위치(center_x 기준), 휘는 방향.
+    #     근거가 지금 판정과 다르게 side_confirm_sec 이어질 때만 바꾸고, 근거가 모두 같은 답이면 바로 바꾼다. 점 3개 미만은 안 씀.
+    'side_vote': False,
+    'side_confirm_sec': 0.1,
     'reference_distance_m': 0.5,
     'cam_height_m': 0.21,
     'cam_x_m': 0.10,
@@ -134,7 +160,13 @@ class LaneCore:
         self.last_kind = None                # 마지막 valid 프레임 종류 'pair' | 'single'
         self.out_lat = self.out_head = self.out_t = None
         self.slew_on = False
-        self.counts = dict(frames=0, pair=0, single=0, fixed_a=0, fixed_b=0, width_reject=0, slew=0)
+        self.counts = dict(frames=0, pair=0, single=0, fixed_a=0, fixed_b=0, width_reject=0, slew=0,
+                           blend=0, kf_gated=0, kf_reset=0, side_flip=0)
+        self.trans_t = None                  # (A) 마지막 한 선 <-> 두 선 전환 시각
+        self.blend_from = None               # (A) 전환 직전 출력 (lat, head, t)
+        self.kf_x = self.kf_P = self.kf_t = None   # (D) 칼만 상태
+        self.kf_out_since = None             # (D) 임계 넘는 측정이 시작된 시각
+        self.side_since = None               # (G) 근거가 지금 판정과 다르기 시작한 시각
 
     def width_fresh(self, t):
         return (self.w_mem is not None and self.w_t is not None
@@ -750,6 +782,101 @@ class LaneCore:
             return False, 'single_no_width'
         return True, ''
 
+    # ------------------------------------------------------------------
+    # (D) 칼만 필터, (G) 왼쪽/오른쪽 근거
+    # ------------------------------------------------------------------
+    _kf_gated = False
+
+    def _kf_reset(self, z, R):
+        self.kf_x, self.kf_P = np.array(z, float), np.array(R, float)
+        self.kf_out_since = None
+
+    def _kf_step(self, t, lat, head, ok, single, in_trans):
+        """칼만 예측(차 움직임만큼 옮김) + 보정(카메라). invalid 프레임은 예측만. 반환 (lat, head)."""
+        g = self.p.get
+        self._kf_gated = False
+        if self.kf_x is not None:
+            dtk = t - self.kf_t
+            if dtk < 0.0 or dtk > float(g('predict_max_sec', 1.0)):
+                self.kf_x = None                       # 너무 오래됐거나 시간이 뒤로 감 -> 다시 시작
+            elif dtk > 0.0:
+                ml, mh = self._moved(float(self.kf_x[0]), float(self.kf_x[1]), self.kf_t, t)
+                self.kf_x = np.array([ml, mh], float)
+                self.kf_P = self.kf_P + np.diag([g('kf_q_lat'), g('kf_q_head')]) * dtk
+                self.kf_t = t
+        if not ok:
+            return lat, head
+        s = (g('kf_r_single_scale') if single else 1.0) * (g('kf_r_trans_scale') if in_trans else 1.0)
+        R = np.diag([(g('kf_r_lat') * s) ** 2, (g('kf_r_head') * s) ** 2])
+        z = np.array([lat, head], float)
+        if self.kf_x is None:
+            self._kf_reset(z, R)
+            self.kf_t = t
+            return lat, head
+        y = z - self.kf_x
+        S = self.kf_P + R
+        d2 = float(y @ np.linalg.solve(S, y))
+        if d2 > g('kf_gate'):
+            self._kf_gated = True
+            self.counts['kf_gated'] += 1
+            if self.kf_out_since is None:
+                self.kf_out_since = t
+            elif t - self.kf_out_since >= g('kf_reset_sec'):
+                self.counts['kf_reset'] += 1
+                self._kf_reset(z, R)
+                return lat, head
+            R = R * (d2 / g('kf_gate'))
+            S = self.kf_P + R
+        else:
+            self.kf_out_since = None
+        K = self.kf_P @ np.linalg.inv(S)
+        self.kf_x = self.kf_x + K @ y
+        self.kf_P = (np.eye(2) - K) @ self.kf_P
+        return float(self.kf_x[0]), float(self.kf_x[1])
+
+    def _side_votes(self, pts, w, h):
+        """한 선 점(dict y->u)에 대한 근거 3개: 화면 기울기, 화면 아래쪽 위치, 휘는 방향. 각 'L' | 'R' | None(판단 안 함)."""
+        ys = np.array(sorted(pts), float)
+        us = np.array([pts[int(y)] for y in ys], float)
+        slope = np.polyfit(ys, us, 1)[0]                   # du/dy: 왼쪽 선은 위로 갈수록 오른쪽 -> 음수
+        v1 = None if abs(slope) < 0.2 else ('L' if slope < 0 else 'R')
+        ub = us[-1]                                        # 화면 맨 아래 점
+        cx = float(self.p['center_x'])
+        v2 = None if abs(ub - cx) < 20 else ('L' if ub < cx else 'R')
+        ks = self.line_curv_signed(pts, w, h)              # 혼자 보이는 선이 오른쪽으로 휘면 코너 바깥(왼쪽) 선
+        v3 = None if abs(ks) <= self.p['corner_curv_min'] else ('L' if ks < 0 else 'R')
+        return [v1, v2, v3]
+
+    def _side_vote(self, newL, newR, t, w, h):
+        """(G) 한 선 프레임의 왼쪽/오른쪽 판정을 근거로 확인. 반환 (newL, newR, 근거 목록 또는 None)."""
+        if bool(newL) == bool(newR):
+            self.side_since = None
+            return newL, newR, None
+        cur = 'L' if newL else 'R'
+        pts = newL or newR
+        if len(pts) < 3:
+            self.side_since = None
+            return newL, newR, None
+        votes = self._side_votes(pts, w, h)
+        vs = [v for v in votes if v is not None]
+        other = 'R' if cur == 'L' else 'L'
+        flip = False
+        if len(vs) >= 2 and all(v == other for v in vs):
+            flip = True                                    # 근거가 모두 반대: 바로 바꿈
+        elif len(vs) >= 2 and sum(v == other for v in vs) * 2 > len(vs):
+            if self.side_since is None:
+                self.side_since = t
+            elif t - self.side_since >= float(self.p['side_confirm_sec']):
+                flip = True
+        else:
+            self.side_since = None
+        if flip:
+            self.side_since = None
+            self.counts['side_flip'] += 1
+            newL, newR = newR, newL
+            self.prevL, self.prevR = newL, newR            # 다음 프레임 추적도 바꾼 쪽으로
+        return newL, newR, votes
+
     def process(self, img, t, want_debug=False):
         """한 프레임 처리. t: 촬영 시각 [s]. 반환 dict."""
         h, w = img.shape[:2]
@@ -762,6 +889,9 @@ class LaneCore:
             self.w_mem, self.w_t, self.wrow = None, None, {}     # 오래된 실측은 버림 -> 경우 (가)
         oldL, oldR = dict(self.prevL), dict(self.prevR)
         newL, newR, pairs, dbg = self.track(img, want_debug)
+        side_votes = None
+        if g('side_vote'):
+            newL, newR, side_votes = self._side_vote(newL, newR, t, w, h)
         tracked = bool(newL or newR)
         self.half = self.cur_width() / 2.0
         lat, head, valid, conf, n_both, n_one = self.lane_error(newL, newR, w, h)
@@ -843,7 +973,23 @@ class LaneCore:
         # --- 한 선 -> 두 선 전환 때만 lateral 변화 속도 제한 (따라잡으면 해제)
         lat_raw = lat
         kind = ('single' if single else 'pair') if ok else ''
+        blend_w = 0.0
         if ok:
+            gap_t = None if self.out_t is None else t - self.out_t
+            if (kind != self.last_kind and self.last_kind in ('pair', 'single') and gap_t is not None
+                    and 0.0 < gap_t <= g('guard_memory_sec')):
+                self.trans_t = t
+                self.blend_from = (self.out_lat, self.out_head, self.out_t)
+        in_trans = (self.trans_t is not None and 0.0 <= t - self.trans_t < float(g('transition_blend_sec')))
+        if ok and g('transition_smooth'):
+            self.slew_on = False
+            if in_trans and self.blend_from is not None:
+                pl, ph = self._moved(self.blend_from[0], self.blend_from[1], self.blend_from[2], t)
+                blend_w = 1.0 - (t - self.trans_t) / max(float(g('transition_blend_sec')), 1e-6)
+                lat = float(blend_w * pl + (1.0 - blend_w) * lat)
+                head = float(blend_w * ph + (1.0 - blend_w) * head)
+                self.counts['blend'] += 1
+        elif ok:
             rate = g('pair_return_rate_mps')
             if kind == 'pair' and self.last_kind == 'single':
                 self.slew_on = True
@@ -860,6 +1006,9 @@ class LaneCore:
                     self.counts['slew'] += 1
             else:
                 self.slew_on = False
+        if g('lane_filter') == 'kalman':
+            lat, head = self._kf_step(t, lat, head, ok, single, in_trans)
+        if ok:
             self.last_kind, self.out_lat, self.out_head, self.out_t = kind, lat, head, t
             self.counts[kind] += 1
             if 'a' in fixed:
@@ -899,6 +1048,7 @@ class LaneCore:
                     confidence=conf, single=n_one > 0, guard=why, width_err=werr,
                     n_one=n_one, n_good=n_good, n_both=n_both, debug=dbg, lat_raw=lat_raw, kind=kind,
                     width_meas=wf, width_mem=self.w_mem, width_used=2.0 * self.half, fixed=fixed if ok else '',
-                    width_note=note, slew=lat != lat_raw, corner_b=self.corner_b,
+                    width_note=note, slew=lat != lat_raw, corner_b=self.corner_b, blend_w=blend_w,
+                    side_votes=side_votes, kf_gated=self._kf_gated,
                     outer_off=('o' in fixed), path=self.path_pts if ok else None,
                     path_info=self.path_info if valid else None, **self.stats)

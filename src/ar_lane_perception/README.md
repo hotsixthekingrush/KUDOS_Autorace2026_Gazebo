@@ -313,3 +313,34 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 - 11/13에 시험한 꺾은선 읽기(`single_path_mode: polyline`)는 가제보 기록에서 코너 효과가 없었고 지그재그에서 lateral이 흔들려 지웠다(11/14).
   줄별 픽셀 가운데(파란 점)와 `/distance_y` 발행도 lateral 계산에 쓰이지 않아 지웠다.
 - 가제보 기록 결과: 코너 한 선에서 line과 거의 같다(Pure Pursuit 필요 대비 24% -> 25%). 코너에서 lateral이 작은 주원인은 바깥 선에서 옮기는 반폭이 실제 코너 폭보다 작은 것이다. 보고: `~/scalecar2026/tools/report_polyline.txt`
+
+## 흔들림 줄이기 (lane-kalman)
+
+판단에 보내는 메시지 형식은 그대로다. 시간 값은 모두 초 단위이고, 아래 값은 모두 실행 중 `ros2 param set`으로 바꿀 수 있다.
+코드 기본값은 실차용(보수적) 값이고, 가제보는 `sim_hls.yaml` / `sim_lab.yaml`이 잡음 값을 덮어쓴다.
+
+- **(A) 전환 섞기** `transition_smooth`(기본 true), `transition_blend_sec`(0.2 s): 한 선 ↔ 두 선이 바뀐 직후 0.2초 동안
+  직전 출력을 차가 움직인 만큼 옮긴 값에서 새 값으로 선형으로 넘어간다. 전환이 아닌 프레임은 그대로다.
+  켜면 예전의 한 선 → 두 선 변화 제한(`pair_return_rate_mps`)은 쓰지 않는다(같은 일을 함).
+- **(D) 칼만 필터** `lane_filter: none | kalman`(기본 kalman): 상태 = 0.5 m 앞 lateral, heading.
+  - 예측: 직전 상태를 차가 움직인 만큼 옮긴다(노드의 odom 예측과 같은 차 자세, `odom_yaw_source`: 실차 imu / 가제보 odom).
+    차 자세가 없으면(`predict_enable: false`) 직전 값을 그대로 둔다. 예측만으로 이어 가는 최대 시간은 `predict_max_sec`(1.0 s).
+  - 보정: 측정 잡음 `kf_r_lat`, `kf_r_head`(두 선), 한 선이면 × `kf_r_single_scale`, 전환 직후면 × `kf_r_trans_scale`. invalid 프레임은 예측만.
+  - 예측 잡음 `kf_q_lat` [m²/s], `kf_q_head` [rad²/s]. 크면 카메라를 더 믿는다(덜 부드럽고 덜 늦음).
+  - 튀는 측정: 마할라노비스 거리² > `kf_gate`(9.21)이면 그만큼 덜 반영하고, 그런 측정이 `kf_reset_sec`(0.1 s) 이어지면 측정값으로 다시 시작한다
+    (차로 변경처럼 값이 실제로 확 바뀌는 경우).
+- **(G) 좌우 구분 근거** `side_vote`(기본 false), `side_confirm_sec`(0.1 s): 한 선 프레임에서 화면 기울기, 화면 아래쪽 위치(`center_x` 기준),
+  휘는 방향을 근거로 왼쪽/오른쪽 판정을 바꾼다. 가제보 기록에서 좌우 정확도가 이미 100%라 이득이 없어 기본으로 꺼 둔다.
+
+| 값 | 실차 (코드 기본, safe3_*) | 가제보 (sim_hls / sim_lab) |
+|---|---|---|
+| `kf_q_lat`, `kf_q_head` | 0.02, 0.3 | 0.005, 0.08 |
+| `kf_r_lat`, `kf_r_head` | 0.06, 0.24 | 0.03, 0.12 |
+| `kf_r_single_scale`, `kf_r_trans_scale` | 2.0, 2.0 | 2.0, 2.0 |
+
+실차 값은 가제보 값의 q / r² 비를 그대로 두고 q, r 을 키웠다: 반응 속도는 같고, 잡음 큰 측정이 임계를 덜 넘는다.
+`step0_*`은 `predict_enable: false`라 차 움직임이 없어 칼만이 예측을 못 하므로(가제보 기록 지연 1.2 프레임) `lane_filter: none`.
+
+- `/perception/lane_status`에 `lane_filter`, `blend_w`(전환 섞기 비중, 0 = 안 섞음), `kf_gated`(임계 넘음), `side_votes`가 추가됐다.
+- 실차 잡음 다시 맞추기: `tools/kf_noise_estimate.py` (녹화 `--record 파일 초`, 추정 `파일`). 직선에서 녹화할 것(코너가 섞이면 잡음이 크게 나옴).
+- 바로 예전 동작으로: `ros2 param set /camera_perception_node lane_filter none` 와 `ros2 param set /camera_perception_node transition_smooth false`.

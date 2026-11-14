@@ -1,0 +1,15 @@
+# Override after lidar.yaml. Input /odom MUST describe the raw rear axle.
+lidar_perception:
+  ros__parameters:
+    use_sim_time: false
+    use_imu_yaw: true
+    imu_topic: /imu
+    lidar_offset_x: 0.1025
+    lidar_offset_y: 0.0  # Assumes the LiDAR is centered left/right.
+    odom_center_offset_x: 0.10
+    output_frame: base_center
+    # Starting limits: verify measured sensor rates and header clock alignment.
+    pose_max_dt: 0.5
+    pose_max_imu_gap: 0.1
+    pose_sync_wait: 0.1
+    pose_max_stamp_skew: 1.0

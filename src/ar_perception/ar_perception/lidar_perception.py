@@ -1,25 +1,30 @@
 import math
+import time
+from collections import deque
 import numpy as np
 
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
+from rclpy.clock import Clock, ClockType
+from rcl_interfaces.msg import SetParametersResult
 
 from scipy.spatial import cKDTree
 
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Imu, LaserScan
 from std_msgs.msg import String
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker, MarkerArray
 
 from ar_msgs.msg import Obstacle, ObstacleArray, WallArray, WallSegment, ParkingGap
+from ar_perception.pose_imu import ImuPose, quaternion_yaw
 
 
 class LidarPerception(Node):
 
-    def __init__(self):
-        super().__init__('lidar_perception')
+    def __init__(self, **kwargs):
+        super().__init__('lidar_perception', **kwargs)
 
         # =========================================================
         # Parameters
@@ -28,6 +33,34 @@ class LidarPerception(Node):
         # LiDAR mounting position
         self.declare_parameter('lidar_offset_x', 0.0)
         self.declare_parameter('lidar_offset_y', 0.0)
+        # Startup-only geometry / motion mode. The simulator keeps raw odom.
+        motion_defaults = {
+            'use_imu_yaw': False, 'imu_topic': '/imu',
+            'odom_center_offset_x': 0.0, 'output_frame': 'base_link',
+            'pose_max_dt': 0.5, 'pose_max_imu_gap': 0.1,
+            'pose_sync_wait': 0.1, 'pose_max_stamp_skew': 1.0,
+        }
+        for name, default in motion_defaults.items():
+            self.declare_parameter(name, default)
+        self.use_imu_yaw = self.get_parameter('use_imu_yaw').value
+        self.output_frame = self.get_parameter('output_frame').value
+        self.center_offset = self.get_parameter('odom_center_offset_x').value
+        self.sync_wait = self.get_parameter('pose_sync_wait').value
+        self.max_stamp_skew = self.get_parameter('pose_max_stamp_skew').value
+        if not self.output_frame or not math.isfinite(self.max_stamp_skew) or self.max_stamp_skew <= 0:
+            raise ValueError('output_frame and pose_max_stamp_skew must be valid')
+        self.imu_pose = ImuPose(
+            max_dt=self.get_parameter('pose_max_dt').value,
+            max_imu_gap=self.get_parameter('pose_max_imu_gap').value,
+            wait=self.sync_wait, center_offset=self.center_offset)
+        self._pose_generation = self.imu_pose.generation
+        self._scan_pose = None
+        self._scan_queue = deque()
+        self._last_scan_stamp = None
+        self._last_clock = None
+        self._last_pose_warning = float('-inf')
+        self._fixed_parameters = set(motion_defaults) | {'lidar_offset_x', 'lidar_offset_y'}
+        self.add_on_set_parameters_callback(self._check_fixed_parameters)
 
         # Self filter
         self.declare_parameter('self_x_min', -0.25)
@@ -158,11 +191,94 @@ class LidarPerception(Node):
         self.parking_gap_id_counter = 0
         self.active_parking_gap_id = 0
 
+        if self.use_imu_yaw:
+            self.create_subscription(Imu, self.get_parameter('imu_topic').value,
+                                     self.imu_callback, qos_profile_sensor_data)
+            # Steady timer also expires queues while a replay ROS clock is paused.
+            self._sync_timer = self.create_timer(
+                0.01, self._drain_pose, clock=Clock(clock_type=ClockType.STEADY_TIME))
+
+    def _check_fixed_parameters(self, parameters):
+        for parameter in parameters:
+            if (parameter.name in self._fixed_parameters
+                    and parameter.value != self.get_parameter(parameter.name).value):
+                return SetParametersResult(successful=False,
+                                           reason='Restart LiDAR to change pose mode or geometry')
+        return SetParametersResult(successful=True)
+
+    @staticmethod
+    def _stamp(msg):
+        return msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+    def _clear_parking(self):
+        self.parking_boundaries = []
+        self.previous_parking_gap = None
+        self.parking_gap_confirm_count = 0
+        self.confirmed_parking_gap = None
+        self.active_parking_gap_id = 0
+
+    def _check_clock(self):
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if self._last_clock is not None and now < self._last_clock:
+            self.imu_pose.reset()
+            self._scan_queue.clear()
+            self._last_scan_stamp = None
+            self._scan_pose = None
+            self._clear_parking()
+        self._last_clock = now
+        return now
+
+    def _valid_stamp(self, msg):
+        return abs(self._stamp(msg) - self._check_clock()) <= self.max_stamp_skew
+
+    def imu_callback(self, msg):
+        if not self._valid_stamp(msg):
+            self._warn_pose()
+            return
+        q = msg.orientation
+        yaw = (None if msg.orientation_covariance[0] == -1 else
+               quaternion_yaw(q.x, q.y, q.z, q.w))
+        self.imu_pose.add_imu(self._stamp(msg), yaw)
+        self._drain_pose()
+
+    def _warn_pose(self):
+        now = time.monotonic()
+        if now - self._last_pose_warning >= 2.0:
+            self.get_logger().warning(
+                'No synchronized IMU/odom pose: parking invalid; check stamps and sensor rates.')
+            self._last_pose_warning = now
+
+    def _drain_pose(self):
+        self._check_clock()
+        now = time.monotonic()
+        self.imu_pose.advance(now)
+        if self._pose_generation != self.imu_pose.generation:
+            self._clear_parking()
+            self._pose_generation = self.imu_pose.generation
+        while self._scan_queue:
+            scan, received = self._scan_queue[0]
+            pose = self.imu_pose.pose_at(self._stamp(scan))
+            if pose is None and now - received < self.sync_wait:
+                break
+            self._scan_queue.popleft()
+            self._scan_pose = pose
+            self._process_scan(scan)
+
     def odom_callback(self, msg):
+        if self.use_imu_yaw:
+            if self._valid_stamp(msg):
+                self.imu_pose.add_odom(self._stamp(msg), msg.twist.twist.linear.x,
+                                       time.monotonic())
+                self._drain_pose()
+            else:
+                self._warn_pose()
+            return
         self.latest_odom = msg
 
     # /odom의 quaternion을 yaw각도로 변환
     def get_odom_pose(self):
+        if self.use_imu_yaw:
+            return self._scan_pose
         if self.latest_odom is None:
             return None
 
@@ -178,7 +294,8 @@ class LidarPerception(Node):
 
         yaw = math.atan2(siny_cosp, cosy_cosp)
 
-        return px, py, yaw
+        return (px + self.center_offset * math.cos(yaw),
+                py + self.center_offset * math.sin(yaw), yaw)
 
     #base_link를 odem으로 좌표변환
     def base_to_odom(self, x_base, y_base):
@@ -221,6 +338,25 @@ class LidarPerception(Node):
     # =============================================================
 
     def on_scan(self, scan):
+        if not self.use_imu_yaw:
+            self._process_scan(scan)
+            return
+        if not self._valid_stamp(scan):
+            self._scan_pose = None
+            self._process_scan(scan)
+            return
+        stamp = self._stamp(scan)
+        if self._last_scan_stamp is not None and stamp <= self._last_scan_stamp:
+            return
+        self._last_scan_stamp = stamp
+        if len(self._scan_queue) >= 100:
+            old_scan, _ = self._scan_queue.popleft()
+            self._scan_pose = None
+            self._process_scan(old_scan)
+        self._scan_queue.append((scan, time.monotonic()))
+        self._drain_pose()
+
+    def _process_scan(self, scan):
         self.parking_frame_id += 1
 
         # ---------------------------------------------------------
@@ -242,13 +378,18 @@ class LidarPerception(Node):
         parking_walls = self.detect_parking_walls(filtered_points)
 
         wall_array = WallArray()
-        wall_array.header = scan.header
-        wall_array.header.frame_id = 'base_link'
+        wall_array.header.stamp = scan.header.stamp
+        wall_array.header.frame_id = self.output_frame
         wall_array.walls = parking_walls
 
         self.pub_walls.publish(wall_array)
-        self.update_parking_boundaries(parking_walls)
-        self.evaluate_parking_gaps(scan.header.stamp)
+        if self.use_imu_yaw and self._scan_pose is None:
+            self._clear_parking()
+            self.publish_parking_gap(scan.header.stamp, False, False, 0)
+            self._warn_pose()
+        else:
+            self.update_parking_boundaries(parking_walls)
+            self.evaluate_parking_gaps(scan.header.stamp)
 
 # ---------------------------------------------------------
 # General perception ROI
@@ -328,7 +469,7 @@ class LidarPerception(Node):
         obstacle_array = ObstacleArray()
 
         obstacle_array.header.stamp = scan.header.stamp
-        obstacle_array.header.frame_id = 'base_link'
+        obstacle_array.header.frame_id = self.output_frame
 
         cone_margin = self.get_parameter(
             'cone_radius_margin'
@@ -791,7 +932,7 @@ class LidarPerception(Node):
         marker = Marker()
 
         marker.header.stamp = scan.header.stamp
-        marker.header.frame_id = 'base_link'
+        marker.header.frame_id = self.output_frame
 
         marker.ns = 'lidar_roi'
         marker.id = 0
@@ -886,7 +1027,7 @@ class LidarPerception(Node):
             point_marker = Marker()
 
             point_marker.header.stamp = scan.header.stamp
-            point_marker.header.frame_id = 'base_link'
+            point_marker.header.frame_id = self.output_frame
 
             point_marker.ns = 'lidar_cluster_points'
             point_marker.id = cluster_id
@@ -923,7 +1064,7 @@ class LidarPerception(Node):
             if limo is not None:
                 label = Marker()
                 label.header.stamp = scan.header.stamp
-                label.header.frame_id = 'base_link'
+                label.header.frame_id = self.output_frame
                 label.ns = 'lidar_limo_candidates'
                 label.id = 3000 + cluster_id
                 label.type = Marker.TEXT_VIEW_FACING
@@ -945,7 +1086,7 @@ class LidarPerception(Node):
 
                 center_marker = Marker()
                 center_marker.header.stamp = scan.header.stamp
-                center_marker.header.frame_id = 'base_link'
+                center_marker.header.frame_id = self.output_frame
                 center_marker.ns = 'lidar_limo_centers'
                 center_marker.id = 4000 + cluster_id
                 center_marker.type = Marker.SPHERE
@@ -969,7 +1110,7 @@ class LidarPerception(Node):
             text_marker = Marker()
 
             text_marker.header.stamp = scan.header.stamp
-            text_marker.header.frame_id = 'base_link'
+            text_marker.header.frame_id = self.output_frame
 
             text_marker.ns = 'lidar_cluster_text'
             text_marker.id = 1000 + cluster_id
@@ -1018,7 +1159,7 @@ class LidarPerception(Node):
                 circle_marker = Marker()
 
                 circle_marker.header.stamp = scan.header.stamp
-                circle_marker.header.frame_id = 'base_link'
+                circle_marker.header.frame_id = self.output_frame
 
                 circle_marker.ns = 'lidar_cluster_circles'
                 circle_marker.id = 2000 + cluster_id
@@ -1668,7 +1809,7 @@ class LidarPerception(Node):
         msg = ParkingGap()
 
         msg.header.stamp = scan_stamp
-        msg.header.frame_id = 'base_link'
+        msg.header.frame_id = self.output_frame
 
         msg.valid = bool(valid)
         msg.confirmed = bool(confirmed)

@@ -1,5 +1,9 @@
 lidar_perception:
   ros__parameters:
+    # Gazebo defaults. Real hardware loads lidar_real.yaml AFTER this file.
+    use_imu_yaw: false
+    odom_center_offset_x: 0.0
+    output_frame: base_link
 
     # LiDAR mounting position relative to base_link
     lidar_offset_x: 0.1236

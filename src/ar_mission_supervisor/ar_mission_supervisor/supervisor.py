@@ -427,6 +427,16 @@ PARAM_DEFAULTS = {
 # 파라미터 그룹 -> 노드 속성 이름 (다른 경우만)
 GROUP_ATTR = {'lane': 'lane_gains'}
 
+# (11/14) 켤 때만 읽는 값. 실행 중 ros2 param set 으로 바꾸면 거절 (판단을 다시 켜야 적용).
+#   나머지는 매번 dict 에서 읽어서 바로 적용 (미션 시작 때 복사해 두는 값은 다음 미션부터).
+INIT_ONLY_PARAMS = {
+    'control_rate',            # 제어 타이머 주기
+    'cmd_output', 'ackermann_topic',          # 명령 publisher 종류·토픽
+    'odom_heading_source', 'imu_topic',       # /imu 구독 여부·토픽
+    'perception.stale_sec', 'yolo.hold_sec',  # 인지 버퍼 만들 때 씀
+    'perception.debounce_count',              # Debouncer 만들 때 씀
+}
+
 
 # ----------------------------------------------------------------------
 # 보조 클래스
@@ -605,6 +615,47 @@ class MissionSupervisor(Node):
                     setattr(self, key, value)
 
         self.control_period = 1.0 / self.control_rate
+        # (11/14) 실행 중 ros2 param set 반영 (선언 뒤에 등록해야 선언 때 안 불림)
+        self.add_on_set_parameters_callback(self._on_set_params)
+
+    def _check_params(self, params):
+        """바꿀 수 있는지만 봄. 문제 있으면 이유 글, 없으면 None."""
+        for p in params:
+            group, _, key = p.name.rpartition('.')
+            items = PARAM_DEFAULTS.get(group)
+            if items is None or key not in items:
+                return '판단에 없는 파라미터: %s' % p.name
+            if p.name in INIT_ONLY_PARAMS:
+                return '%s 는 켤 때만 읽음 - 판단을 다시 켜야 적용' % p.name
+            default = items[key]
+            try:
+                if isinstance(default, bool) and not isinstance(p.value, bool):
+                    raise ValueError
+                type(default)(p.value)
+            except (TypeError, ValueError):
+                return '%s: %s 값이어야 함 (예: 3 이 아니라 3.0)' % (p.name, type(default).__name__)
+        return None
+
+    def _on_set_params(self, params):
+        """(11/14) ros2 param set /mission_supervisor lane.pd_kp 3.0 같은 걸 실행 중 바로 반영.
+        전부 바꿀 수 있을 때만 한꺼번에 바꿈. 켤 때만 읽는 값(INIT_ONLY_PARAMS)·없는 이름·틀린 형식은 거절."""
+        from rcl_interfaces.msg import SetParametersResult
+        why = self._check_params(params)
+        if why is not None:
+            self.get_logger().warn('파라미터 안 바꿈: %s' % why)
+            return SetParametersResult(successful=False, reason=why)
+        for p in params:
+            group, _, key = p.name.rpartition('.')
+            value = type(PARAM_DEFAULTS[group][key])(p.value)
+            if group:
+                d = getattr(self, GROUP_ATTR.get(group, group))
+                old = d.get(key)
+                d[key] = value
+            else:
+                old = getattr(self, key, None)
+                setattr(self, key, value)
+            self.get_logger().info('파라미터 바뀜: %s %s -> %s' % (p.name, old, value))
+        return SetParametersResult(successful=True)
 
     # ------------------------------------------------------------------
     # 콜백

@@ -39,6 +39,8 @@ mission_supervisor:
       # (11/11 사용자 선택) 차선 노드가 한 선만 보고 추정한 값(single_lane_estimated)은 기준 좌표에 안 씀
       #   (차선 팀원 새 방식: 한 선이면 '마지막 폭의 절반' 떨어진 경로 기준 -> 넓어진 곳에선 실제 중앙과 최대 15 cm 다름)
       frame_reject_single: true
+      min_confidence: 0.1      # (11/14) valid 여도 confidence 가 이보다 작으면 조향에 안 씀 (직전 값 유지). 실차 lane_run1 지그재그
+                               #   구간 conf 0.00~0.10 값의 방향이 튀어 조향 +-0.3 흔들림. 그 녹화에서 5% (지그재그 20%). 0 = 안 거름
       kp_lateral: 1.2
       kd_lateral: 0.15
       kp_heading: 0.8
@@ -161,6 +163,13 @@ mission_supervisor:
       a_lane: 0                # odom 모드: A(좌) 경로 차선 (0 왼쪽, 1 가운데, 2 오른쪽)
       b_lane: 2                # odom 모드: B(우) 경로 차선
       odom_hold_distance: 0.6  # 목표 차선 도착 후 이만큼 더 간 뒤 종료 [m]
+      # (11/13) 카메라 방식(3차선 정보 없을 때)에서 옆으로 옮기는 중, 차선 노드가 '지금 들어간 차선' 가운데로 바꿔 주면
+      #   lateral 이 차선 폭만큼 튐 (왼쪽 차선으로 바뀌면 +폭). 그 횟수만큼 목표 이동량에서 빼서 한 차선 더 가지 않게 함.
+      #   차선 노드 약속 (11/13 팀원 답변): 항상 '차가 지금 들어가 있는 차선' 가운데 기준
+      lane_jump: true
+      jump_max_gap: 1.0        # 이 시간 안의 연속 차선 값끼리만 비교 [s]
+      jump_wait_sec: 3.0       # (11/14) settle 뒤 차선 노드 기준이 새 차선으로 안 바뀌었으면 최대 이만큼 더 옮기며 기다림 [s]
+                               #   (기본값으로 끝날 때 옆 0.28 m 라 점선 0.26 m 를 겨우 넘음, 못 넘고 끝나면 처음 차선으로 돌아감)
 
     # 미션 7 - 정적 장애물 회피 (3차선, LIMO 7대). 차선 번호: 0 왼쪽, 1 가운데, 2 오른쪽
     avoid_static:
@@ -173,6 +182,9 @@ mission_supervisor:
       #   단 장애물이 defer_min_distance 안이면 바로 진입. 0 이면 안 미룸
       defer_turn_rate_deg: 10.0   # [도/s]
       defer_min_distance: 0.5     # [m]
+      # (11/14) 카메라 차선을 기준 좌표로 못 쓸 때 차 방향이 트랙 축에서 이만큼 넘게 틀어져 있으면 미룸 (장애물이 defer_min_distance
+      #   안이면 바로). 실차 lane_run1: 코너를 빠져나오며 축에서 9도 틀어진 채 진입 -> 기준 좌표가 0.2~0.3 m 옆 -> 바깥 선 위. 0 = 안 미룸
+      defer_axis_deg: 5.0         # [도]
       min_obstacle_radius: 0.10  # 라바콘(작음)과 구분 [m]
       max_obstacle_radius: 0.40
       start_lane: 1            # 3차선은 항상 가운데에서 시작

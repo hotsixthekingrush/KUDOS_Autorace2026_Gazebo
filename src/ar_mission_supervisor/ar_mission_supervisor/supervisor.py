@@ -149,6 +149,10 @@ PARAM_DEFAULTS = {
         # (11/11) 차선 노드가 한 선만 보고 추정한 값(single_lane_estimated)은 기준 좌표에 안 씀
         #   (차선 팀원 새 방식: 한 선이면 '마지막 폭의 절반' 떨어진 경로 기준 -> 넓어진 곳에선 실제 중앙과 최대 15 cm 다름)
         'frame_reject_single': True,
+        # (11/14) 차선 노드가 valid 로 냈어도 confidence 가 이보다 작으면 조향에 안 씀 (직전 값 유지, stale_sec 지나면 유실).
+        #   실차 lane_run1 지그재그(서행 유도선) 구간: conf 0.00~0.10 값의 방향이 튀어(+0.49 rad) 조향이 +-0.3 흔들림.
+        #   그 녹화에서 conf < 0.1 은 5% (지그재그 20%, 직선 0%), 가장 길게 이어진 게 0.37 초. 0 = 안 거름
+        'min_confidence': 0.1,
         'kp_lateral': 1.2,
         'kd_lateral': 0.15,
         'kp_heading': 0.8,
@@ -256,6 +260,10 @@ PARAM_DEFAULTS = {
         'a_lane': 0,               # odom 모드에서 A(좌) 경로로 이어지는 차선 (0 왼쪽, 1 가운데, 2 오른쪽)
         'b_lane': 2,
         'odom_hold_distance': 0.6, # 목표 차선 도착 후 이만큼 더 간 뒤 종료 [m]
+        # (11/13) 카메라 방식: 옮기는 중 차선 노드가 '지금 들어간 차선' 기준으로 바뀌면 lateral 이 차선 폭만큼 튐 -> 목표 이동량에서 뺌
+        'lane_jump': True,
+        'jump_max_gap': 1.0,       # 이 시간 안의 연속 차선 값끼리만 비교 [s]
+        'jump_wait_sec': 3.0,      # (11/14) settle 뒤 차선 노드 기준이 새 차선으로 바뀔 때까지 더 기다리는 최대 시간 [s]
     },
     'avoid_static': {
         'trigger_distance': 1.2,   # 라이다: 진행 경로 앞 이 거리 안 장애물이면 진입 [m]
@@ -268,6 +276,10 @@ PARAM_DEFAULTS = {
         #   단 장애물이 defer_min_distance 안으로 오면 바로 진입. 0 이면 안 미룸
         'defer_turn_rate_deg': 10.0,
         'defer_min_distance': 0.5,
+        # (11/14) 카메라 차선을 기준 좌표로 못 쓸 때(lane_for_frame 이 None) 차 방향이 트랙 축에서 이만큼 넘게 틀어져 있으면 미룸.
+        #   실차 lane_run1: 코너를 빠져나오며 회전은 느려졌지만 축에서 9도 틀어진 채 진입 -> 카메라 차선(방향 34도)을 못 믿어
+        #   차 위치를 가운데 차선으로 잡음 -> 실제론 0.2~0.3 m 옆이라 끝에 바깥 노란 선 위를 달림. 0 = 안 미룸 (axis_snap 일 때만)
+        'defer_axis_deg': 5.0,
         'min_obstacle_radius': 0.10,  # 라바콘(작음)과 구분 [m]
         'max_obstacle_radius': 0.40,
         'start_lane': 1,           # 3차선 시작 차선 (항상 가운데)
@@ -422,6 +434,16 @@ PARAM_DEFAULTS = {
 
 # 파라미터 그룹 -> 노드 속성 이름 (다른 경우만)
 GROUP_ATTR = {'lane': 'lane_gains'}
+
+# (11/14) 켤 때만 읽는 값. 실행 중 ros2 param set 으로 바꾸면 거절 (판단을 다시 켜야 적용).
+#   나머지는 매번 dict 에서 읽어서 바로 적용 (미션 시작 때 복사해 두는 값은 다음 미션부터).
+INIT_ONLY_PARAMS = {
+    'control_rate',            # 제어 타이머 주기
+    'cmd_output', 'ackermann_topic',          # 명령 publisher 종류·토픽
+    'odom_heading_source', 'imu_topic',       # /imu 구독 여부·토픽
+    'perception.stale_sec', 'yolo.hold_sec',  # 인지 버퍼 만들 때 씀
+    'perception.debounce_count',              # Debouncer 만들 때 씀
+}
 
 
 # ----------------------------------------------------------------------
@@ -601,6 +623,47 @@ class MissionSupervisor(Node):
                     setattr(self, key, value)
 
         self.control_period = 1.0 / self.control_rate
+        # (11/14) 실행 중 ros2 param set 반영 (선언 뒤에 등록해야 선언 때 안 불림)
+        self.add_on_set_parameters_callback(self._on_set_params)
+
+    def _check_params(self, params):
+        """바꿀 수 있는지만 봄. 문제 있으면 이유 글, 없으면 None."""
+        for p in params:
+            group, _, key = p.name.rpartition('.')
+            items = PARAM_DEFAULTS.get(group)
+            if items is None or key not in items:
+                return '판단에 없는 파라미터: %s' % p.name
+            if p.name in INIT_ONLY_PARAMS:
+                return '%s 는 켤 때만 읽음 - 판단을 다시 켜야 적용' % p.name
+            default = items[key]
+            try:
+                if isinstance(default, bool) and not isinstance(p.value, bool):
+                    raise ValueError
+                type(default)(p.value)
+            except (TypeError, ValueError):
+                return '%s: %s 값이어야 함 (예: 3 이 아니라 3.0)' % (p.name, type(default).__name__)
+        return None
+
+    def _on_set_params(self, params):
+        """(11/14) ros2 param set /mission_supervisor lane.pd_kp 3.0 같은 걸 실행 중 바로 반영.
+        전부 바꿀 수 있을 때만 한꺼번에 바꿈. 켤 때만 읽는 값(INIT_ONLY_PARAMS)·없는 이름·틀린 형식은 거절."""
+        from rcl_interfaces.msg import SetParametersResult
+        why = self._check_params(params)
+        if why is not None:
+            self.get_logger().warn('파라미터 안 바꿈: %s' % why)
+            return SetParametersResult(successful=False, reason=why)
+        for p in params:
+            group, _, key = p.name.rpartition('.')
+            value = type(PARAM_DEFAULTS[group][key])(p.value)
+            if group:
+                d = getattr(self, GROUP_ATTR.get(group, group))
+                old = d.get(key)
+                d[key] = value
+            else:
+                old = getattr(self, key, None)
+                setattr(self, key, value)
+            self.get_logger().info('파라미터 바뀜: %s %s -> %s' % (p.name, old, value))
+        return SetParametersResult(successful=True)
 
     # ------------------------------------------------------------------
     # 콜백
@@ -692,6 +755,9 @@ class MissionSupervisor(Node):
         return x_m - self.last_v * age, age
 
     def _cb_lane(self, msg):
+        if msg.valid and float(msg.confidence) < self.lane_gains['min_confidence']:
+            self.dbg('lane/low_conf', float(msg.confidence))
+            return                                # (11/14) 확신도 낮은 값은 버리고 직전 값 유지
         if msg.valid:
             now = self.clock_sec()
             stamp = _stamp_sec(msg.header)
@@ -976,7 +1042,34 @@ class MissionSupervisor(Node):
                 self.get_logger().info('[AVOID_STATIC] 코너 도는 중 (초당 %.0f도) - 진입 미룸 (앞 장애물 %.2fm)'
                                        % (math.degrees(abs(rate)), near))
             return None
+        why = self._axis_defer(now, near)
+        if why is not None:
+            self.dbg('avoid/deferred_axis', near)
+            if not quiet and (self._defer_log is None or now - self._defer_log > 1.0):
+                self._defer_log = now
+                self.get_logger().info('[AVOID_STATIC] %s - 진입 미룸 (앞 장애물 %.2fm)' % (why, near))
+            return None
         return 'limo'
+
+    def _axis_defer(self, now, near):
+        """(11/14) 카메라 차선을 기준 좌표로 못 쓰는데 차가 트랙 축에서 많이 틀어져 있으면 미룰 이유 글, 아니면 None."""
+        cfg = self.avoid_static
+        lim = cfg['defer_axis_deg']
+        if lim <= 0.0 or not cfg['axis_snap'] or near <= cfg['defer_min_distance']:
+            return None
+        lane, _ = self.lane_for_frame(now)
+        if lane is not None:
+            return None                       # 카메라로 기준 좌표를 잡을 수 있음
+        pose = self._latest('odom')
+        if pose is None:
+            return None
+        ref = math.radians(cfg['axis_ref_deg'])
+        rel = math.atan2(math.sin(pose[2] - ref), math.cos(pose[2] - ref))
+        axis = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
+        err = math.atan2(math.sin(pose[2] - axis), math.cos(pose[2] - axis))
+        if abs(err) <= math.radians(lim) or abs(err) > math.radians(cfg['axis_snap_max_deg']):
+            return None                       # 거의 맞음, 또는 축에서 너무 벗어나 축 맞추기 대상이 아님
+        return '카메라 차선 못 씀 + 트랙 축에서 %.0f도 틀어짐' % math.degrees(abs(err))
 
     def _locked(self, event, now):
         outcome = EVENT_TO_OUTCOME.get(event)

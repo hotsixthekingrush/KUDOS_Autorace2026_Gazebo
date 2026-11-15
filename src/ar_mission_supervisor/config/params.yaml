@@ -150,7 +150,10 @@ mission_supervisor:
       speed: 0.2               # 규정: 기본 속도의 1/2, 최대 0.2 m/s
       # (11/05) 끝내는 기준 시간 -> 거리. 표지판까지 거리(YOLO) + after_sign_distance 를 odom 으로 다 가면 끝.
       #   lane_yolo_run1: 표지판을 1.7 m 앞에서 보고 8초 만에 끝나 방지턱 1 m 전에 서행이 풀렸음.
-      after_sign_distance: 1.8 # 표지판 -> 서행 끝 [m]. 연습 트랙(Gazebo track.json) 표지판 x 2.3 ~ 방지턱 끝 x 3.7 = 1.4
+      # (11/15 사용자) 표지판 옆을 지나고 after_sign_sec 초 뒤 끝 (0.2 m/s 면 3초 = 0.6 m). 0 이면 아래 after_sign_distance 방식.
+      #   주의: 연습 트랙은 표지판 -> 방지턱 끝 1.4 m 라 3초(0.6 m)면 방지턱 중간에 풀림. 실제 트랙 배치 보고 다시 정할 것.
+      after_sign_sec: 3.0
+      after_sign_distance: 1.8 # (after_sign_sec 0 일 때) 표지판 -> 서행 끝 [m]. 연습 트랙(Gazebo track.json) 표지판 x 2.3 ~ 방지턱 끝 x 3.7 = 1.4
                                #   + 뒷바퀴(차 중심 뒤 0.10~0.12) + 여유 0.3. 실제 대회 트랙에서 다시 확인
       unknown_sign_distance: 2.0  # 표지판 위치를 한 번도 못 받았을 때 표지판까지 거리로 침 [m]
       duration_sec: 8.0        # odom 이 없을 때만: 진입 후 이 시간 뒤 끝 (예전 방식)

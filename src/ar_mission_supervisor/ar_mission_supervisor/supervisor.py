@@ -248,7 +248,8 @@ PARAM_DEFAULTS = {
     },
     'bump': {
         'speed': 0.2,              # 규정: 기본 속도의 1/2, 최대 0.2 m/s
-        'after_sign_distance': 1.8,    # 표지판을 지나 이만큼 더 가면 끝 (odom) [m] (11/05)
+        'after_sign_sec': 3.0,     # (11/15 사용자) 표지판 옆을 지나고 이 시간 뒤 끝 [s]. 0 = 아래 거리 방식
+        'after_sign_distance': 1.8,    # after_sign_sec 0 일 때: 표지판을 지나 이만큼 더 가면 끝 (odom) [m] (11/05)
         'unknown_sign_distance': 2.0,  # 표지판 위치를 한 번도 못 받았을 때 표지판까지 거리로 침 [m]
         'duration_sec': 8.0,       # odom 이 없을 때만: 진입 후 이 시간 뒤 끝 (예전 방식)
         'max_duration': 30.0,      # 안전용 최대 시간 [s]

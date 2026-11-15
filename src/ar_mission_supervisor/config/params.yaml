@@ -161,6 +161,7 @@ mission_supervisor:
       handoff_stopline: 0.5    # 보행자 표지판을 본 뒤 정지선이 이 거리 안이면 CROSSWALK_STOP 으로 [m]
       handoff_sign: 1.0        # 정지선이 아직 안 보이면 표지판이 이 거리 안일 때 (0 = 끔) [m]
       max_duration: 20.0       # 보행자 표지판을 끝내 못 보면 이 시간 뒤 복귀
+      exit_past_stopline: 0.3  # (11/15 사용자) 표지판 못 본 채 정지선이 차 기준점 뒤로 이만큼 지나면(횡단보도 지남) 바로 복귀 [m]. 0 = 끔
 
     # 미션 2 - 갈림길 A/B
     left_a_right_b:

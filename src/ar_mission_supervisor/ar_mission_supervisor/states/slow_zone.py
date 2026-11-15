@@ -20,6 +20,8 @@
        0.7 m 쯤에서 화면 밖으로 빠지는데, 그때 정지선은 아직 0.9 m -> 예전엔 "표지판 보이는 중 + 정지선 0.5 m" 가
        한 번도 같이 안 맞아서 안 넘어가고 횡단보도를 지나 20초 뒤 복귀했음.
      끝내 못 보면 max_duration 뒤 LANE_FOLLOWING 으로 복귀.
+     (11/15 사용자) 표지판을 못 본 채 정지선 추정이 차 뒤로 exit_past_stopline 만큼 넘어가면(횡단보도 지남) 바로 복귀
+       (stop_run2: 횡단보도 지나서도 헤딩 고정으로 20초·4 m 직진해 코너에서 벗어났음).
 규정: 직진 헤딩을 유지하며 서행 통과. 일반 차로이탈 기준 적용.
 """
 
@@ -84,6 +86,12 @@ class SlowZone(SafeState):
             if self.ped_seen is not None and self._near_crosswalk(cfg, sign_visible=outcome is not None):
                 node.get_logger().info('[SLOW_ZONE] 보행자 표지판 인식 - CROSSWALK_STOP 으로 바로 전환')
                 return self.ped_seen
+
+            # (11/15) 표지판을 못 보고 횡단보도를 지났으면 헤딩 고정 직진을 끝내고 일반 주행으로
+            line = node.stopline.est
+            if cfg['exit_past_stopline'] > 0.0 and line is not None and line <= -cfg['exit_past_stopline']:
+                node.get_logger().warn('[SLOW_ZONE] 보행자 표지판 못 보고 정지선을 %.2fm 지남 - 복귀' % -line)
+                return 'done'
 
             elapsed = now - self.entered_at
             if elapsed > cfg['max_duration']:

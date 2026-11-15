@@ -253,6 +253,7 @@ PARAM_DEFAULTS = {
         'handoff_stopline': 0.5,   # 보행자 표지판을 본 뒤, 정지선이 이 거리 안일 때 CROSSWALK_STOP 으로
         'handoff_sign': 1.0,       # 정지선이 안 보이면 표지판이 이 거리 안일 때 (0 = 이 조건 끔)
         'max_duration': 20.0,      # 보행자 표지판을 끝내 못 보면 이 시간 뒤 LANE_FOLLOWING 복귀
+        'exit_past_stopline': 0.3, # (11/15) 표지판 못 본 채 정지선이 차 기준점 뒤로 이만큼 지나면 복귀 [m] (0 = 끔)
     },
     'left_a_right_b': {
         'trigger_distance': 0.8,

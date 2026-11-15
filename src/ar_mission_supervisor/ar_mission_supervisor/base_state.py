@@ -23,6 +23,9 @@ class SafeState(smach.State):
     # -- SMACH 진입점 --------------------------------------------------
     def execute(self, userdata):
         self.node.get_logger().info('전이: -> %s' % self.label)
+        entered = getattr(self.node, 'mission_entered', None)
+        if entered is not None:
+            entered(self.label)                 # (11/15) 미션 순서: 다음 받을 미션을 이 미션 뒤로
         self.node.publish_state(self.label)
         self.node.publish_state(self.label)
         try:

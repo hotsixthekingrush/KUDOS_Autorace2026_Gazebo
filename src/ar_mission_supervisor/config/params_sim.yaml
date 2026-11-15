@@ -46,3 +46,6 @@ mission_supervisor:
 
     parking:
       turn_radius: 0.50        # (11/13) Gazebo 는 예전 값 그대로 (실차 params.yaml 은 실측으로 0.65)
+
+    # (11/15) Gazebo 는 미션 하나씩 시험하는 일이 많아서 미션 순서 끔. 전체 코스를 순서대로 볼 땐 런치에서 mission_start:=BUMP
+    mission_start: any

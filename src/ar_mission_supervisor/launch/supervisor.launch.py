@@ -28,6 +28,10 @@ def _launch_setup(context, *args, **kwargs):
     off = LaunchConfiguration('odom_offset').perform(context).strip()
     if off:
         params.append({'odom_center_offset_x': float(off)})
+    # (11/15) 미션 재도전: 다음에 받을 미션부터. 예: mission_start:=AVOID_STATIC, 순서 안 볼 때 mission_start:=any
+    ms = LaunchConfiguration('mission_start').perform(context).strip()
+    if ms:
+        params.append({'mission_start': ms})
 
     return [Node(package='ar_mission_supervisor',
                  executable='supervisor',
@@ -46,5 +50,7 @@ def generate_launch_description():
                               description='비우면 params 값 (실차 ackermann, sim twist). twist = /cmd_vel, ackermann = /limo/ack_cmd'),
         DeclareLaunchArgument('odom_offset', default_value='',
                               description='비우면 params 값 (실차 0.10, sim 0). odom 점에서 몸통 가운데까지 앞쪽 거리 [m]'),
+        DeclareLaunchArgument('mission_start', default_value='',
+                              description='비우면 params 값 (BUMP = 처음부터). 재도전: 그 미션 이름부터 (예: AVOID_STATIC). any = 미션 순서 안 봄'),
         OpaqueFunction(function=_launch_setup),
     ])

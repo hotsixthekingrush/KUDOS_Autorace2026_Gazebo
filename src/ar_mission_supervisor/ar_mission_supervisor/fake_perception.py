@@ -67,6 +67,8 @@ class FakePerception(Node):
         self.declare_parameter('distance', 1.5)        # 정지선/표지판까지 거리 (시나리오 시작 기준)
         self.declare_parameter('sign_position_valid', True)  # bump: false 면 표지판 위치 없이 보냄 (시험용)
         self.declare_parameter('sign_lateral', -0.35)        # bump: 표지판 좌우 위치 (왼쪽 +) [m]
+        # (11/15) bump: >0 이면 표지판에서 이만큼 뒤에 지그재그 유도선 시작 + 그 0.3 m 앞에 서행 표지판 하나 더 (서행 구간마다 표지판)
+        self.declare_parameter('zig_after_sign', 0.0)
         self.declare_parameter('side_lateral', -1.15)        # side_signs: 신호등·주차 표지판 좌우 위치 (왼쪽 +) [m]
         self.declare_parameter('lane_valid', True)           # false 면 차선 valid=false (차선 유실 시험)
         self.declare_parameter('lane_confidence', 1.0)       # 차선 확신도 (코너 감속 시험)
@@ -333,6 +335,13 @@ class FakePerception(Node):
                      float(self._p('sign_lateral')))
         if self.objects and not self._p('sign_position_valid'):
             self.objects[-1].position_valid = False
+        zig = float(self._p('zig_after_sign'))
+        if zig > 0.0:
+            start_wx = float(self._p('distance')) + zig
+            zig_start, zig_end = self._ahead(start_wx), self._ahead(start_wx + 1.677)
+            if zig_end > 0.3 and zig_start < 2.0:
+                self._object(MissionObject.SLOW_GUIDE_LINE, max(0.3, zig_start), 0.0)
+            self._object(MissionObject.SLOW_SIGN, self._ahead(start_wx - 0.3), float(self._p('sign_lateral')))
 
     def _s_side_signs(self):
         """옆 길 표지판 시험 (11/05): 빨간 신호등(distance+0.3)·주차 표지판(distance+2.0)을 side_lateral 옆에,

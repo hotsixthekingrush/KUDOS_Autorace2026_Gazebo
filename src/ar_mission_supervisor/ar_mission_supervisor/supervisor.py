@@ -8,6 +8,7 @@ State 9개
 미션 State 는 끝나면 LANE_FOLLOWING 으로 돌아온다.
 예외: SLOW_ZONE 은 보행자 표지판을 보면 LANE_FOLLOWING 을 거치지 않고
 CROSSWALK_STOP 으로 바로 넘어간다 (두 미션이 붙어 있음).
+(11/15) BUMP 는 서행 유도선을 보면 SLOW_ZONE 으로, AVOID_STATIC 은 A/B 표지판을 보면 LEFT_A_RIGHT_B 로 바로 넘어간다.
 """
 
 import collections

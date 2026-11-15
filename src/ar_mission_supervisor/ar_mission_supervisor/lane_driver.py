@@ -6,6 +6,10 @@
     Pure Pursuit 는 lateral 이 정확한 m 단위일 때만 맞게 꺾는데, 실차 카메라 값이 아직 시뮬 값이라 실차 곡선을 못 돎.
     이 방식은 실차에서 게인을 맞추면 그 오차까지 흡수 (팀원 실차 곡선 2곳 통과, Gazebo 첫 코너 4/4).
   false - Pure Pursuit (11/04, 아래 lane_steer 설명).
+  (11/15, 차선 팀원 제안) lane.pd_speed_ref > 0 이면 그 속도보다 느릴 때 회전속도에 (속도 / pd_speed_ref) 를 곱해
+    조향 세기(옆오차 1 m 당 조향각)를 pd_speed_ref 때로 묶는다. 회전속도를 속도로 나눠 조향각을 구하는 구조라
+    느릴수록 세지기 때문 (0.12 m/s 에서 옆오차 5 cm 면 조향 한계, 차선 팀원 real_1114_e 직선 13% · 코너 60% 한계).
+    pd_speed_ref 보다 빠르면 예전과 같다. 주차(PARKING 칸 찾기)는 이 제한을 안 씀 (사용자 결정, LaneDriver(speed_ref=False)).
 """
 
 import math
@@ -15,8 +19,9 @@ from ar_mission_supervisor.controllers import clamp, steering_to_omega
 
 class LaneDriver(object):
 
-    def __init__(self, node):
+    def __init__(self, node, speed_ref=True):
         self.node = node
+        self.speed_ref = speed_ref     # (11/15) False 면 lane.pd_speed_ref 저속 제한 안 씀 (주차)
         self.reset()
 
     def reset(self):
@@ -92,6 +97,9 @@ class LaneDriver(object):
             omega = self.lane_omega(lane, offset)
             v = speed if speed is not None else getattr(node, 'last_v', 0.0)
             v = max(abs(v), node.lane_gains['min_speed'], 1e-3)
+            ref = float(node.lane_gains.get('pd_speed_ref', 0.0))
+            if self.speed_ref and ref > 0.0 and v < ref:
+                omega *= v / ref            # (11/15) 느릴 때 조향 세기를 pd_speed_ref 때로 묶음
             return clamp(math.atan(node.wheel_base * omega / v), -node.max_steer, node.max_steer)
         # lateral = 로봇 기준 차선 중앙의 위치 (왼쪽 +).
         # 목표 지점은 차선 중앙에서 offset 만큼 옆이므로 로봇 기준 위치는 lateral + offset.

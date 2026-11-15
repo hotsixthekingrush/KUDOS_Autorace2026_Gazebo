@@ -9,6 +9,8 @@ lane.corner_hold_sec 동안은 감속을 유지한다. 차선 팀원 시험: 0.4
 (11/12) lane.speed_by_lateral (기본, 차선 팀원 제안 = 예전 limo_control 식): 위 코너 감속 대신
   속도 = base_speed * max(min_ratio, 1 - |lateral| / slow_lat), 한 선 추정이면 min_ratio, 최저 min_speed.
   목표 속도로 갈 때 가속 accel_max, 감속 decel_max 까지 (새 차선 값마다 속도가 툴툴 바뀌지 않게).
+  (11/15) 최저 비율로 줄이는 조건 = lane.slow_rule: 'quality'(기본) 확신도 < corner_min_confidence 또는
+  |방향| > corner_heading_deg. 'single' = 예전처럼 한 선 추정이면 (실차는 한 선이 평소라 거의 항상 최저 속도였음).
   조향은 LaneDriver 의 omega_pd. 팀원 Gazebo: 원본(코너 평균 0.42 m/s) 첫 코너 이탈 -> 이 방식(0.18 m/s) 4/4 통과.
 """
 
@@ -64,6 +66,18 @@ class LaneFollowing(SafeState):
         node.dbg('lane/corner_slow', 1.0 if slow else 0.0)
         return min(node.base_speed, cfg['corner_speed']) if slow else node.base_speed
 
+    @staticmethod
+    def _slow_frame(lane, cfg):
+        """speed_by_lateral 에서 최저 비율(min_ratio)로 줄일 차선 값인지.
+        (11/15, 차선 팀원 제안) slow_rule 'quality' (기본): 확신도 < corner_min_confidence 또는 |방향| > corner_heading_deg.
+          실차는 한 선으로 경로를 만드는 게 평소 상태라(차선 팀원 real_1114_e: 직선에서도 79%, single 표시 고친 뒤에도 83%)
+          single 로 줄이면 거의 항상 최저 속도 -> 느릴수록 조향이 세져 흔들림 (lane_run3 도 single 70%, 목표 속도 70% 가 0.12).
+        'single': 예전 (11/12) 처럼 single_lane_estimated 면 줄임."""
+        if str(cfg.get('slow_rule', 'quality')) == 'single':
+            return bool(lane.single)
+        return (lane.confidence < cfg['corner_min_confidence']
+                or abs(lane.heading) > math.radians(cfg['corner_heading_deg']))
+
     def _lateral_speed(self, lane, now):
         """(11/12) 차선 오차에 비례해 감속 + 가속·감속 제한."""
         node = self.node
@@ -72,7 +86,7 @@ class LaneFollowing(SafeState):
         target = base
         if lane is not None:
             ratio = max(cfg['min_ratio'], 1.0 - abs(lane.lateral) / max(cfg['slow_lat'], 1e-6))
-            if lane.single:
+            if self._slow_frame(lane, cfg):
                 ratio = cfg['min_ratio']
             target = max(min(base, cfg['min_speed']), base * ratio)
         # 기준은 마지막으로 실제 보낸 속도 (페일세이프·정지 뒤에도 거기서부터 이어짐)

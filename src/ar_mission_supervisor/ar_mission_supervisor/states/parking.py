@@ -43,7 +43,7 @@ class Parking(SafeState):
 
     def __init__(self, node):
         SafeState.__init__(self, node, 'PARKING', self.OUTCOMES)
-        self.driver = LaneDriver(node)
+        self.driver = LaneDriver(node, speed_ref=False)   # (11/15) 칸 찾기는 저속 조향 제한(pd_speed_ref) 안 씀 (사용자 결정)
         self.frame = LaneFrame()
         self.map = ObstacleMap()
         self.phase = self.SEARCH

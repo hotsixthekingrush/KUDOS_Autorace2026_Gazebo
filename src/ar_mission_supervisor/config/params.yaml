@@ -68,10 +68,18 @@ mission_supervisor:
       pd_d_jump: 0.12          # 이웃 차선 값이 이만큼 넘게 다르면 변화율 버림 [m]
       pd_max_omega: 1.0        # [rad/s]
       steer_rate_max: 2.0      # 조향각 변화 한계 [rad/s]
-      # 속도 (LANE_FOLLOWING 만): base_speed * max(min_ratio, 1 - |lateral| / slow_lat), 한 선 추정이면 min_ratio,
+      # (11/15, 차선 팀원 제안 + 사용자 B') 회전속도를 속도로 나눠 조향각을 구해서 느릴수록 조향이 세짐
+      #   (0.12 m/s 에서 옆오차 1 m 당 8.3 rad, 5 cm 면 한계). 이 속도보다 느리면 세기를 이 속도 때(0.2 -> 5.0 rad/m)로 묶음.
+      #   이보다 빠르면 예전과 같음. 주차 칸 찾기는 안 씀 (사용자 결정). 0 = 끔
+      pd_speed_ref: 0.2        # [m/s]
+      # 속도 (LANE_FOLLOWING 만): base_speed * max(min_ratio, 1 - |lateral| / slow_lat), slow_rule 조건이면 min_ratio,
       #   최저 min_speed, 가속 accel_max / 감속 decel_max 까지. 켜면 위 corner_* 감속은 안 씀. false = corner_* 감속
       speed_by_lateral: true
       slow_lat: 0.17           # [m]
+      # (11/15, 차선 팀원 제안) min_ratio 로 줄이는 조건. quality = 확신도 < corner_min_confidence(0.3) 또는
+      #   |방향| > corner_heading_deg(15도). single = 예전처럼 한 선 추정이면 (실차는 한 선이 평소라 lane_run3 에서
+      #   목표 속도 70% 가 최저 0.12, 차선 팀원 real_1114_e 98%. quality 로 같은 녹화 다시 계산하면 28%)
+      slow_rule: quality
       min_ratio: 0.4
       min_speed: 0.12          # 팀원 실차: 0.08 에서 모터가 섰다 갔다 [m/s]
       accel_max: 0.4           # [m/s^2]

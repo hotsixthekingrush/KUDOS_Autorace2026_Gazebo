@@ -139,16 +139,6 @@ PARAM_DEFAULTS = {
         #   실제보다 30% 넘게 큼 (전체 회전 IMU 105도 vs odom 136도), IMU 방향은 자이로 적분과 0.3도 안으로 맞음.
         'odom_heading_source': 'odom',
         'imu_topic': '/imu',
-        # (11/15, 사용자) 미션 순서. 트랙 순서대로만 미션에 들어가고, 한 번 들어간 미션(과 그 앞 미션)은 다시 안 받는다
-        #   (옆 길 신호등·마커를 보고 엉뚱한 미션으로 넘어가는 것 막기). 규정집 v3 트랙 순서:
-        #   방지턱(서행) -> 서행 유도선 -> 보행자 표지판 -> 3차선 -> 갈림길 A/B -> 라바콘 -> 횡단보도/신호등 -> T자 주차.
-        #   목록에 없는 미션은 아예 안 들어감.
-        'mission_order': 'BUMP,SLOW_ZONE,CROSSWALK_STOP,AVOID_STATIC,LEFT_A_RIGHT_B,AVOID_CONE,TRAFFIC_LIGHT,PARKING',
-        # 다음에 받을 미션 이름 (재도전 때 진행 위치). 'any' = 순서 안 봄 (예전처럼 아무 미션이나, 재진입은 lockout_sec 만).
-        #   ('off' 도 되지만 YAML·ros2 param set 이 off 를 false 로 읽어서 any 를 씀)
-        #   실행 중 ros2 param set /mission_supervisor mission_start AVOID_CONE 으로 바로 옮길 수 있음
-        'mission_start': 'BUMP',
-        'mission_lookahead': 1,    # 다음 몇 개 미션까지 받을지 (1 = 바로 다음만, 2 = 하나 건너뛰는 것도)
     },
     'lane': {
         # 차선 노드가 lateral 을 재는 지점 = 차 앞 몇 m (차선 노드 reference_distance_m 과 같아야 함, 11/04 0.5 로 정함)
@@ -463,7 +453,6 @@ INIT_ONLY_PARAMS = {
     'odom_heading_source', 'imu_topic',       # /imu 구독 여부·토픽
     'perception.stale_sec', 'yolo.hold_sec',  # 인지 버퍼 만들 때 씀
     'perception.debounce_count',              # Debouncer 만들 때 씀
-    'mission_order',                          # 미션 순서 목록 (켤 때 한 번 읽음)
 }
 
 
@@ -622,7 +611,6 @@ class MissionSupervisor(Node):
         self.lockout = {}
         self._reset_flag = False
         self._lock = threading.Lock()
-        self._setup_mission_order()
 
         self.create_timer(0.5, self._publish_state_tick)
         self.get_logger().info('mission_supervisor 준비 완료 (%.1f Hz)'
@@ -664,12 +652,6 @@ class MissionSupervisor(Node):
                 type(default)(p.value)
             except (TypeError, ValueError):
                 return '%s: %s 값이어야 함 (예: 3 이 아니라 3.0)' % (p.name, type(default).__name__)
-            if p.name == 'mission_start':
-                name = str(p.value).strip().upper()
-                if name not in ('ANY', 'OFF', '') and name not in self._mission_order:
-                    return 'mission_start %s 는 미션 순서에 없음 (any 또는 %s)' % (p.value, ', '.join(self._mission_order))
-            if p.name == 'mission_lookahead' and int(p.value) < 1:
-                return 'mission_lookahead 는 1 이상'
         return None
 
     def _on_set_params(self, params):
@@ -691,8 +673,6 @@ class MissionSupervisor(Node):
                 old = getattr(self, key, None)
                 setattr(self, key, value)
             self.get_logger().info('파라미터 바뀜: %s %s -> %s' % (p.name, old, value))
-            if p.name == 'mission_start':
-                self._apply_mission_start()
         return SetParametersResult(successful=True)
 
     # ------------------------------------------------------------------
@@ -947,7 +927,6 @@ class MissionSupervisor(Node):
         msg = String()
         msg.data = self.current_label
         self.state_pub.publish(msg)
-        self.dbg('mission/next', self.next_mission_name())     # (11/15) 다음 받을 미션
         self._publish_pose_dbg()
 
     def _publish_pose_dbg(self):
@@ -1039,8 +1018,6 @@ class MissionSupervisor(Node):
             found = [n for n in found if EVENT_TO_OUTCOME.get(n) in allowed]
         if skip_locked:
             found = [n for n in found if not self._locked(n, now)]
-        # (11/15) 미션 순서: 지금 받을 차례가 아닌 미션의 이벤트는 빼고 고른다 (우선순위 높은 이벤트가 가리지 않게)
-        found = [n for n in found if self._event_in_order(n, now)]
         if not found:
             return None
         for name in EVENT_PRIORITY:
@@ -1132,74 +1109,7 @@ class MissionSupervisor(Node):
             return None
         if self.lockout.get(OUTCOME_TO_STATE[outcome], 0.0) > now:
             return None
-        if not self.mission_allowed(OUTCOME_TO_STATE[outcome]):
-            return None
         return outcome
-
-    # ------------------------------------------------------------------
-    # (11/15) 미션 순서
-    # ------------------------------------------------------------------
-    def _setup_mission_order(self):
-        self._mission_order = [n.strip().upper() for n in str(self.mission_order).split(',') if n.strip()]
-        bad = [n for n in self._mission_order if n not in MISSION_LABELS]
-        if bad:
-            self.get_logger().warn('[미션 순서] 모르는 이름 무시: %s (가능: %s)' % (', '.join(bad), ', '.join(MISSION_LABELS)))
-            self._mission_order = [n for n in self._mission_order if n in MISSION_LABELS]
-        self._order_log = {}
-        self._apply_mission_start()
-
-    def _apply_mission_start(self):
-        name = str(self.mission_start).strip().upper()
-        if name in ('ANY', 'OFF', ''):
-            self._mission_next = None
-            self.get_logger().info('[미션 순서] 끔 - 순서 안 보고 아무 미션이나 받음 (재진입은 %.0f초만 막음)'
-                                   % self.perception['lockout_sec'])
-            return
-        if name not in self._mission_order:
-            self.get_logger().warn('[미션 순서] mission_start=%s 가 순서에 없음 - 처음(%s)부터'
-                                   % (self.mission_start, self._mission_order[0] if self._mission_order else '-'))
-            name = self._mission_order[0] if self._mission_order else None
-        self._mission_next = self._mission_order.index(name) if name else len(self._mission_order)
-        self.get_logger().info('[미션 순서] %s 부터 받음 (순서: %s)'
-                               % (self.next_mission_name(), ' -> '.join(self._mission_order)))
-
-    def next_mission_name(self):
-        if self._mission_next is None:
-            return 'any'
-        if self._mission_next >= len(self._mission_order):
-            return 'done'
-        return self._mission_order[self._mission_next]
-
-    def mission_allowed(self, label):
-        """이 미션 State 로 들어가도 되는지 (순서 꺼져 있으면 항상 됨)."""
-        if self._mission_next is None:
-            return True
-        if label not in self._mission_order:
-            return False
-        i = self._mission_order.index(label)
-        return self._mission_next <= i < self._mission_next + max(1, int(self.mission_lookahead))
-
-    def _event_in_order(self, event, now):
-        outcome = EVENT_TO_OUTCOME.get(event)
-        if outcome is None:
-            return True
-        label = OUTCOME_TO_STATE[outcome]
-        if self.mission_allowed(label):
-            return True
-        self.dbg('mission/ignored', event)
-        last = self._order_log.get(event)
-        if last is None or now - last > 3.0:
-            self._order_log[event] = now
-            self.get_logger().info('[미션 순서] %s 이벤트 무시 (%s 차례 아님, 지금 받는 미션: %s)'
-                                   % (event, label, self.next_mission_name()))
-        return False
-
-    def mission_entered(self, label):
-        """미션 State 에 들어갈 때 (SafeState.execute). 다음 받을 미션을 그 뒤로 옮긴다."""
-        if self._mission_next is None or label not in self._mission_order:
-            return
-        self._mission_next = self._mission_order.index(label) + 1
-        self.get_logger().info('[미션 순서] %s 시작 - 다음 받는 미션: %s' % (label, self.next_mission_name()))
 
     def stopline_distance(self):
         """base_link -> 정지선 앞쪽 가장자리 거리 [m] (지연 보정됨) 또는 None."""

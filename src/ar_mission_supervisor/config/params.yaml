@@ -28,14 +28,6 @@ mission_supervisor:
     #   (ack_calib4: 전체 회전 IMU 105도 vs odom 136도), IMU 방향은 자이로 적분과 0.3도 안. 'odom' = /odom 그대로
     odom_heading_source: imu
     imu_topic: /imu
-    # (11/15, 사용자) 미션 순서: 트랙 순서대로만 미션에 들어가고, 한 번 들어간 미션(과 그 앞)은 다시 안 받음
-    #   (옆 길 신호등·마커를 보고 엉뚱한 미션으로 넘어가는 것 막기). 규정집 v3 트랙 순서. 목록에 없는 미션은 안 들어감
-    mission_order: BUMP,SLOW_ZONE,CROSSWALK_STOP,AVOID_STATIC,LEFT_A_RIGHT_B,AVOID_CONE,TRAFFIC_LIGHT,PARKING
-    # 다음에 받을 미션 (재도전 때 진행 위치). any = 순서 안 봄 (off 는 YAML 이 false 로 읽어서 안 씀).
-    #   런치 mission_start:=AVOID_STATIC 처럼 바꾸거나
-    #   실행 중 ros2 param set /mission_supervisor mission_start TRAFFIC_LIGHT. 지금 값: ros2 topic echo /supervisor/debug/mission/next
-    mission_start: BUMP
-    mission_lookahead: 1       # 다음 몇 개까지 받을지 (1 = 바로 다음만, 2 = 하나 못 보고 지나가도 그다음 미션 받음)
 
     lane:
       reference_distance_m: 0.5  # 차선 노드가 lateral 을 재는 차 앞 거리 (차선 노드 값과 같아야 함, 11/04 0.5)
@@ -119,7 +111,7 @@ mission_supervisor:
       max_lateral: 0.7         # 표지판·신호등·유도선 [m]
       sign_ab_max_lateral: 1.5 # A/B 표지판 (3차선 가운데 섬 앞이라 옆 차선(0.52 m)에서도 봐야 함) [m]
       #   (11/15 사용자 제안 1.1 -> 1.5) 장애물 피해 옆 차선에서 비스듬히(20도) 가면 2 m 앞 표지판이 옆 1.2 m 로 보임.
-      #   미션 순서(LEFT_A_RIGHT_B 차례일 때만 받음) 덕분에 넓혀도 다른 데서 잘못 들어갈 걱정은 적음.
+      #   (11/15 밤) 미션 순서 기능은 지움 -> 이 한계가 트랙 어디서나 A/B 진입에 걸림. 옆 길 A/B 표지판 오진입 생기면 1.1 로.
       crosswalk_max_lateral: 0.35  # 정지 기준 횡단보도 (가운데까지 옆 거리) [m]
       # (11/05) 정지선 = YOLO 횡단보도(줄무늬) 앞끝보다 이만큼 차 쪽. 그만큼 앞에서 선다 (신호등·보행자 둘 다).
       #   Gazebo 맵(track_paint white.dae): 오른쪽 길 정지선 y 2.491~2.507, 줄무늬 2.436 / 안쪽 길 선 x 3.202~3.226, 줄무늬 3.273

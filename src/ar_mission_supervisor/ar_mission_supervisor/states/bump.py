@@ -13,8 +13,8 @@
   (lane_yolo_run1: 표지판을 1.7 m 앞에서 보고 8초 만에 끝나 방지턱 1 m 전에 서행이 풀렸음)
 규정: 기본 주행 속도의 1/2 수준, 최대 0.2 m/s 이하. 심사위원 육안 판정.
 (11/15) 서행 표지판이 모든 서행 구간 앞에 놓이게 바뀜 (사용자) -> 지그재그 앞 서행 표지판을 BUMP 안에서 보면 끝 지점이
-  그 표지판 기준으로 늘어나 지그재그까지 BUMP 로 지나갈 수 있음 (BUMP 는 다른 미션으로 안 넘어갔음 -> SLOW_ZONE 을 놓치고
-  미션 순서상 그 뒤 미션도 못 받음). 그래서 BUMP 중에 YOLO 서행 유도선(slow_line)을 보면 SLOW_ZONE 으로 바로 넘긴다.
+  그 표지판 기준으로 늘어나 지그재그까지 BUMP 로 지나갈 수 있음 (BUMP 는 다른 미션으로 안 넘어갔음 -> SLOW_ZONE 을 놓침).
+  그래서 BUMP 중에 YOLO 서행 유도선(slow_line)을 보면 SLOW_ZONE 으로 바로 넘긴다.
 """
 
 import math
@@ -134,7 +134,7 @@ class Bump(SafeState):
                                                % (self.travelled, elapsed))
                         return 'done'
 
-            # (11/15) 지그재그 서행 유도선을 보면 SLOW_ZONE 으로 바로 (미션 순서상 BUMP 다음)
+            # (11/15) 지그재그 서행 유도선을 보면 SLOW_ZONE 으로 바로
             outcome = node.detect_mission(allowed=self.HANDOFF)
             if outcome is not None:
                 node.get_logger().info('[BUMP] 서행 유도선 인식 (%.2fm 주행) - SLOW_ZONE 으로 바로 전환' % self.travelled)

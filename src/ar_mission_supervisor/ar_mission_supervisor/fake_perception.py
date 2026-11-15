@@ -84,6 +84,10 @@ class FakePerception(Node):
         self.declare_parameter('stopline_visible', 1.2)   # 횡단보도(정지 기준) 위치가 이 거리 안에서만 나옴
         self.declare_parameter('stopline_min', 0.25)      # 이보다 가까우면 박스 아래가 화면 밖 (위치 없음)
         self.declare_parameter('zigzag_length', 1.677)
+        # (11/15 stop_run2) slow_zone: 보행자 표지판 위치 = 정지선 + ped_offset (실차는 정지선 앞 약 0.3 m = -0.3),
+        #   ped_visible_min 보다 가까우면 표지판이 화면 밖 (실차 0.7 m 에서 빠짐). 0 = 항상 보임 (예전)
+        self.declare_parameter('ped_offset', 0.2)
+        self.declare_parameter('ped_visible_min', 0.0)
         self.declare_parameter('publish_odom', True)
         self.declare_parameter('sign', 'A')            # static_3lane 끝의 A/B 표지판 (none = 없음)
         self.declare_parameter('gap', 1.5)             # parking: 목표 칸 중심까지 거리
@@ -364,7 +368,9 @@ class FakePerception(Node):
         line_wx = start_wx + self._p('zigzag_length') + 0.2
         line = self._ahead(line_wx)
         # 실제 트랙처럼 표지판은 유도선 입구에서부터 보인다
-        self._object(MissionObject.PEDESTRIAN_SIGN, line + 0.2, -0.35)
+        ped = line + float(self._p('ped_offset'))
+        if ped >= float(self._p('ped_visible_min')):
+            self._object(MissionObject.PEDESTRIAN_SIGN, ped, -0.35)
         self._stopline(line)
 
     def _s_sign_a(self):

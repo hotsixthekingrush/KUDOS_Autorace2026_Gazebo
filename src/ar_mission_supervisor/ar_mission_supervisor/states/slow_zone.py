@@ -16,6 +16,9 @@
        - 정지선을 본 적이 있으면 정지선 추정 거리 <= handoff_stopline 일 때
        - 정지선이 안 보이면 표지판 거리 <= handoff_sign 일 때
        - 둘 다 거리 정보가 없으면 바로
+     (11/15 stop_run2) 표지판은 한 번 보면 기억한다. 실차는 표지판이 정지선보다 앞(약 0.3 m)에 길옆으로 서 있어서
+       0.7 m 쯤에서 화면 밖으로 빠지는데, 그때 정지선은 아직 0.9 m -> 예전엔 "표지판 보이는 중 + 정지선 0.5 m" 가
+       한 번도 같이 안 맞아서 안 넘어가고 횡단보도를 지나 20초 뒤 복귀했음.
      끝내 못 보면 max_duration 뒤 LANE_FOLLOWING 으로 복귀.
 규정: 직진 헤딩을 유지하며 서행 통과. 일반 차로이탈 기준 적용.
 """
@@ -40,12 +43,14 @@ class SlowZone(SafeState):
         self.target_yaw = None
         self.start_pose = None
         self.lock_after = None
+        self.ped_seen = None        # (11/15) 보행자 표지판을 본 적 있으면 그 outcome (기억)
 
     def on_enter(self):
         node = self.node
         self.driver.reset()
         self.entered_at = node.clock_sec()
         self.target_yaw = None
+        self.ped_seen = None
         # 보행자 정지선 추정을 여기서부터 이어간다 (CROSSWALK_STOP 이 이어받음)
         node.stopline.begin(self.entered_at)
         # 헤딩 고정 시점: 유도선 시작점까지 남은 거리
@@ -71,9 +76,14 @@ class SlowZone(SafeState):
             node.stopline.update(now, node.last_v)
 
             outcome = node.detect_mission(allowed=self.HANDOFF)
-            if outcome is not None and self._near_crosswalk(cfg):
+            if outcome is not None and self.ped_seen is None:
+                self.ped_seen = outcome
+                node.get_logger().info('[SLOW_ZONE] 보행자 표지판 봄 - 정지선 %.2fm 안에 오면 CROSSWALK_STOP'
+                                       % cfg['handoff_stopline'])
+            # (11/15) 표지판이 화면 밖으로 빠져도 기억한 채로 정지선 거리만 보고 넘어간다
+            if self.ped_seen is not None and self._near_crosswalk(cfg, sign_visible=outcome is not None):
                 node.get_logger().info('[SLOW_ZONE] 보행자 표지판 인식 - CROSSWALK_STOP 으로 바로 전환')
-                return outcome
+                return self.ped_seen
 
             elapsed = now - self.entered_at
             if elapsed > cfg['max_duration']:
@@ -106,18 +116,18 @@ class SlowZone(SafeState):
         node.dbg('slow_zone/travelled', travelled)
         return travelled >= self.lock_after
 
-    def _near_crosswalk(self, cfg):
+    def _near_crosswalk(self, cfg, sign_visible=True):
         """보행자 표지판을 본 상태에서, 넘어갈 만큼 정지선에 가까운지."""
         node = self.node
         line = node.stopline.est            # 정지선 추정 (화면 밖으로 빠져도 이어서 추정)
         if line is not None:
             node.dbg('slow_zone/handoff_line', line)
             return line <= cfg['handoff_stopline']
-        sign = node.pedestrian_sign_distance()
+        sign = node.pedestrian_sign_distance() if sign_visible else None
         if sign is not None and cfg['handoff_sign'] > 0.0:
             node.dbg('slow_zone/handoff_sign', sign)
             return sign <= cfg['handoff_sign']
-        return True                      # 거리 정보가 전혀 없으면 바로 넘어간다
+        return True                      # 거리 정보가 전혀 없으면 (표지판도 화면 밖) 바로 넘어간다
 
     def _hold_heading(self, now, yaw, cfg):
         node = self.node

@@ -139,6 +139,9 @@ PARAM_DEFAULTS = {
         #   실제보다 30% 넘게 큼 (전체 회전 IMU 105도 vs odom 136도), IMU 방향은 자이로 적분과 0.3도 안으로 맞음.
         'odom_heading_source': 'odom',
         'imu_topic': '/imu',
+        # (11/16 사용자 A안) 판단 켤 때 차 방향을 몇 도로 볼지 [도]. 대회 출발선에 똑바로 놓고 켜면 0.
+        #   트랙 중간에서 켜고 시험할 땐 출발 직선 기준 지금 방향 (시계방향 트랙: 첫 코너 뒤 -90, 3차선 직선 180)
+        'start_yaw_deg': 0.0,
     },
     'lane': {
         # 차선 노드가 lateral 을 재는 지점 = 차 앞 몇 m (차선 노드 reference_distance_m 과 같아야 함, 11/04 0.5 로 정함)
@@ -359,6 +362,13 @@ PARAM_DEFAULTS = {
         'axis_snap': True,
         'axis_ref_deg': 0.0,
         'axis_snap_max_deg': 30.0,
+        # (11/16 사용자 A안) 3차선 직선 방향을 알고 있으면 (판단 켤 때 방향 0 = 출발 직선 기준) 기준 좌표 방향을 늘 이 값으로.
+        #   카메라 차선을 믿을 때도 방향만은 이 값 (옆 위치는 카메라). 차 방향이 이 값에서 three_lane_axis_max_deg 넘게
+        #   벗어나 있으면 (판단을 다른 데서 켰거나 다른 곳 LIMO) 안 쓰고 예전 방식. 시계방향 트랙: 3차선은 출발 직선의 반대 = 180
+        #   (실차 stop_run3: 3차선 끝 -175도, 진입 -131도 = 49도 틀어진 채 '그대로 씀' -> 트랙 밖)
+        'three_lane_axis_use': True,
+        'three_lane_axis_deg': 180.0,
+        'three_lane_axis_max_deg': 60.0,
         # (11/12 사용자 선택) 차 방향 기준일 때 옆 위치(d = 0)도 차 위치라 차가 비켜 있으면 세 차선이 다 밀림
         #   (pd_lane_run4: 11 cm). 차 앞 lat_snap_range 안에서 확실히 본 LIMO 가 lat_snap_min_items 대 이상,
         #   차선 가운데에서 비킨 값이 lat_snap_spread 안에 절반 넘게 모이면 그 평균만큼 한 번 옮김.
@@ -616,7 +626,8 @@ class MissionSupervisor(Node):
         if self.odom_heading_source == 'imu':
             from sensor_msgs.msg import Imu
             sub(Imu, self.imu_topic, self._cb_imu, 10)
-            self.get_logger().info('차 위치: /odom 속도 + %s 방향 (판단 켤 때 방향 0)' % self.imu_topic)
+            self.get_logger().info('차 위치: /odom 속도 + %s 방향 (판단 켤 때 방향 %.0f도)'
+                                   % (self.imu_topic, self.start_yaw_deg))
         elif self.odom_heading_source != 'odom':
             self.get_logger().warn('odom_heading_source=%r 모름 - /odom 그대로 씀' % self.odom_heading_source)
             self.odom_heading_source = 'odom'
@@ -700,7 +711,7 @@ class MissionSupervisor(Node):
         if self._imu_yaw0 is None:
             self._imu_yaw0 = yaw
             self.get_logger().info('%s 들어옴 - 지금 방향을 0 으로 하고 위치 계산 시작' % self.imu_topic)
-        d = yaw - self._imu_yaw0
+        d = yaw - self._imu_yaw0 + math.radians(self.start_yaw_deg)   # (11/16) 켤 때 방향 = start_yaw_deg
         self._imu_yaw = math.atan2(math.sin(d), math.cos(d))
 
     def _dead_reckon(self, msg):
@@ -733,6 +744,12 @@ class MissionSupervisor(Node):
                 return
         else:
             pose = _pose_from_odom(msg)
+            if self.start_yaw_deg:
+                # (11/16) /odom 을 start_yaw_deg 만큼 돌려서 씀 (켤 때 방향 = start_yaw_deg)
+                a = math.radians(self.start_yaw_deg)
+                c, s = math.cos(a), math.sin(a)
+                pose = (c * pose[0] - s * pose[1], s * pose[0] + c * pose[1],
+                        math.atan2(math.sin(pose[2] + a), math.cos(pose[2] + a)))
         off = self.odom_center_offset_x
         if off:
             # (11/13) odom 점(WeGo 아커만: 뒷바퀴 축) -> 판단 기준점(몸통 가운데)
@@ -740,6 +757,18 @@ class MissionSupervisor(Node):
         now = self.clock_sec()
         self.buf['odom'].set(pose, now)
         self.yaw_hist.append((now, pose[2]))
+
+    def known_lane_axis(self, yaw):
+        """(11/16 A안) 3차선 직선 방향을 쓸 수 있으면 (방향, 차 방향 - 그 방향) [rad], 아니면 None."""
+        cfg = self.avoid_static
+        if not cfg['three_lane_axis_use']:
+            return None
+        axis = math.radians(cfg['three_lane_axis_deg'])
+        axis = math.atan2(math.sin(axis), math.cos(axis))
+        err = math.atan2(math.sin(yaw - axis), math.cos(yaw - axis))
+        if abs(err) > math.radians(cfg['three_lane_axis_max_deg']):
+            return None
+        return axis, err
 
     def track_axis(self, yaw):
         """(11/16) yaw 에서 가장 가까운 트랙 축(avoid_static.axis_ref_deg + 90도 단위)과 그 차이 (축, 차이) [rad]."""
@@ -1104,13 +1133,19 @@ class MissionSupervisor(Node):
         pose = self._latest('odom')
         if pose is None:
             return None
-        ref = math.radians(cfg['axis_ref_deg'])
-        rel = math.atan2(math.sin(pose[2] - ref), math.cos(pose[2] - ref))
-        axis = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
-        err = math.atan2(math.sin(pose[2] - axis), math.cos(pose[2] - axis))
+        known = self.known_lane_axis(pose[2])     # (11/16 A안) 3차선 방향을 알면 그 방향 기준
+        if known is not None:
+            err = known[1]
+        else:
+            ref = math.radians(cfg['axis_ref_deg'])
+            rel = math.atan2(math.sin(pose[2] - ref), math.cos(pose[2] - ref))
+            axis = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
+            err = math.atan2(math.sin(pose[2] - axis), math.cos(pose[2] - axis))
         if abs(err) <= math.radians(lim) or abs(err) > math.radians(cfg['axis_snap_max_deg']):
-            return None                       # 거의 맞음, 또는 축에서 너무 벗어나 축 맞추기 대상이 아님
-        return '카메라 차선 못 씀 + 트랙 축에서 %.0f도 틀어짐' % math.degrees(abs(err))
+            # 거의 맞음, 또는 많이 틀어짐 (차선 추종이 엉뚱한 선에 붙어 안 도는 중일 수 있음 -> 기다려도 안 맞음, stop_run3)
+            return None
+        return '카메라 차선 못 씀 + %s에서 %.0f도 틀어짐' % ('3차선 방향' if known is not None else '트랙 축',
+                                                    math.degrees(abs(err)))
 
     def _locked(self, event, now):
         outcome = EVENT_TO_OUTCOME.get(event)

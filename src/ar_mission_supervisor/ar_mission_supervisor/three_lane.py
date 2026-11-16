@@ -103,13 +103,15 @@ class ThreeLanePlanner(object):
         cfg = self.cfg
         self.lat_offset = 0.0
         self.relax_logged = False
+        known = self._known_axis(pose)          # (11/16 A안) 3차선 직선 방향을 알면 방향은 늘 그 값
         if lane_ref is not None:
             self.lat_snap_pending = False
-            self.node.get_logger().info('[3차선] 기준 좌표: %s' % why)
+            self.node.get_logger().info('[3차선] 기준 좌표: %s%s' % (why, known or ''))
         else:
             self.lat_snap_pending = bool(cfg['lat_snap'])
             self.node.get_logger().info('[3차선] 기준 좌표: 차 방향 (%s)%s%s' % (
-                why, self._snap_axis(pose), ' - 옆 위치는 LIMO 보이면 맞춤' if self.lat_snap_pending else ''))
+                why, known if known is not None else self._snap_axis(pose),
+                ' - 옆 위치는 LIMO 보이면 맞춤' if self.lat_snap_pending else ''))
         ghost = None
         if cfg['ghost_min_hits'] > 0:
             ghost = (cfg['limo_length'] + cfg['ghost_margin'], cfg['limo_width'] + cfg['ghost_margin'],
@@ -127,6 +129,22 @@ class ThreeLanePlanner(object):
         self.active = True
         self.released_at = None
         return True
+
+    def _known_axis(self, pose):
+        """(11/16 A안) 3차선 직선 방향(three_lane_axis_deg)을 쓸 수 있으면 기준 좌표 방향을 그 값으로. 로그 글 또는 None."""
+        cfg = self.cfg
+        if not cfg['three_lane_axis_use']:
+            return None
+        known = self.node.known_lane_axis(pose[2])
+        if known is None:
+            self.node.get_logger().warn('[3차선] 차 방향 %.0f도가 3차선 방향 %.0f도에서 %.0f도 넘게 벗어남 - 3차선 방향 안 씀'
+                                        % (math.degrees(pose[2]), cfg['three_lane_axis_deg'], cfg['three_lane_axis_max_deg']))
+            return None
+        axis, err = known
+        ox, oy, oyaw = self.frame.origin
+        self.frame.origin = (ox, oy, axis)
+        return ' -> 방향은 3차선 방향 %.0f도로 (차 방향 %.0f도, %+.0f도 차이)' % (
+            math.degrees(axis), math.degrees(pose[2]), math.degrees(err))
 
     def _snap_axis(self, pose):
         """(11/12) 차 방향 기준일 때 가까운 트랙 축으로 맞춤. 로그에 붙일 설명을 돌려준다."""

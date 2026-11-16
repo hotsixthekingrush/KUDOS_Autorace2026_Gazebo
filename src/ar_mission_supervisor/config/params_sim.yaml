@@ -34,6 +34,7 @@ mission_supervisor:
       speed: 0.4
 
     avoid_static:
+      three_lane_axis_use: false # (11/16) Gazebo 는 스폰 방향이 대회 출발선과 달라 3차선 방향 고정 안 씀 (예전 축 맞추기)
       # (11/04) 정적 장애물에서 옆을 긁던 문제. Gazebo 차 충돌 모양 그대로 검사 (Gazebo 파일은 안 고침):
       #   몸통 상자 앞뒤 0.19 x 좌우 0.31 (limo_car/gazebo/ackermann.xacro base_x/y_size, 실차는 0.322 x 0.22)
       #   + 바퀴 네 개를 감싼 사각형 0.33 x 0.258 (축간 0.24 + 바퀴 지름, 윤거 0.168 + 바퀴 폭 x 2)

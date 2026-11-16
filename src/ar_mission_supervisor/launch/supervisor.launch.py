@@ -28,6 +28,10 @@ def _launch_setup(context, *args, **kwargs):
     off = LaunchConfiguration('odom_offset').perform(context).strip()
     if off:
         params.append({'odom_center_offset_x': float(off)})
+    # (11/16) 트랙 중간에서 켤 때: start_yaw_deg:=180 (출발 직선 기준 지금 차 방향)
+    yaw0 = LaunchConfiguration('start_yaw_deg').perform(context).strip()
+    if yaw0:
+        params.append({'start_yaw_deg': float(yaw0)})
 
     return [Node(package='ar_mission_supervisor',
                  executable='supervisor',
@@ -44,6 +48,8 @@ def generate_launch_description():
                               description='비우면 params.yaml 값. 예: 0.2 (실차 첫 시험)'),
         DeclareLaunchArgument('cmd_output', default_value='',
                               description='비우면 params 값 (실차 ackermann, sim twist). twist = /cmd_vel, ackermann = /limo/ack_cmd'),
+        DeclareLaunchArgument('start_yaw_deg', default_value='',
+                              description='비우면 params 값 (0). 판단 켤 때 차 방향 [도], 출발 직선 기준 (3차선 직선 = 180)'),
         DeclareLaunchArgument('odom_offset', default_value='',
                               description='비우면 params 값 (실차 0.10, sim 0). odom 점에서 몸통 가운데까지 앞쪽 거리 [m]'),
         OpaqueFunction(function=_launch_setup),

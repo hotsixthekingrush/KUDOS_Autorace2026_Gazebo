@@ -28,6 +28,10 @@ mission_supervisor:
     #   (ack_calib4: 전체 회전 IMU 105도 vs odom 136도), IMU 방향은 자이로 적분과 0.3도 안. 'odom' = /odom 그대로
     odom_heading_source: imu
     imu_topic: /imu
+    # (11/16 사용자 A안) 판단 켤 때 차 방향을 몇 도로 볼지 [도]. 대회 출발선에 똑바로 놓고 켜면 0.
+    #   트랙 중간에서 켜고 시험할 땐 출발 직선 기준 지금 방향 (시계방향 트랙: 첫 코너 뒤 -90, 3차선 직선 180).
+    #   런치: supervisor.launch.py start_yaw_deg:=180
+    start_yaw_deg: 0.0
 
     lane:
       reference_distance_m: 0.5  # 차선 노드가 lateral 을 재는 차 앞 거리 (차선 노드 값과 같아야 함, 11/04 0.5)
@@ -274,6 +278,14 @@ mission_supervisor:
       axis_snap: true
       axis_ref_deg: 0.0
       axis_snap_max_deg: 30.0
+      # (11/16 사용자 A안) 3차선 직선 방향 (판단 켤 때 방향 0 = 출발 직선 기준). 규정: 좌측 상단 출발, 시계방향 ->
+      #   출발 직선 동쪽(0) -> 우측 상단 코너 -> 지그재그·보행자(-90) -> 코너 -> 3차선(180). stop_run3 끝 -175도와 맞음.
+      #   쓰면 3차선 기준 좌표 방향은 늘 이 값 (카메라 차선을 믿을 때도 방향만은 이 값, 옆 위치는 카메라/LIMO).
+      #   차 방향이 이 값에서 three_lane_axis_max_deg 넘게 벗어나면 (판단을 다른 데서 켬 등) 안 쓰고 예전 방식 + 경고 로그.
+      #   stop_run3: 49도 틀어진 채 진입해 '트랙 축에서 44도 벗어나 그대로 씀' -> 차 방향 기준 좌표라 트랙 밖.
+      three_lane_axis_use: true
+      three_lane_axis_deg: 180.0
+      three_lane_axis_max_deg: 60.0
       # (11/12 사용자 선택) 차 방향 기준일 때 옆 위치(d = 0)도 차 위치라, 차가 차선 가운데에서 비켜 있으면 세 차선이 다 밀림
       #   (pd_lane_run4: 11 cm). 차 앞 lat_snap_range 안에서 확실히 본 LIMO 가 lat_snap_min_items 대 이상이고,
       #   '차선 가운데에서 비킨 값'이 lat_snap_spread 안에 절반 넘게 모이면 그 평균만큼 옆으로 한 번 옮김.

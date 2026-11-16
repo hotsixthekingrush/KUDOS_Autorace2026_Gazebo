@@ -32,7 +32,7 @@ class LaneFollowing(SafeState):
 
     OUTCOMES = ['to_traffic_light', 'to_left_a_right_b', 'to_crosswalk',
                 'to_parking', 'to_bump', 'to_slow_zone', 'to_avoid_static',
-                'to_cone']
+                'to_cone', 'to_slow']
 
     def __init__(self, node):
         SafeState.__init__(self, node, 'LANE_FOLLOWING', self.OUTCOMES,

@@ -139,6 +139,18 @@ mission_supervisor:
       green_confirm_sec: 0.3   # 정지 후 초록불이 이 시간 유지되면 출발
       approach_timeout: 25.0   # 정지선 거리를 끝내 못 받으면 이 시간 뒤 현 위치에서 판정
       max_wait_sec: 10.0       # 정지 후 초록불을 이 시간 못 보면 출발 (0 = 무한 대기). 미션 Time-out 15초 안에 들도록
+      # (11/17 사용자) 출발할 때 옆 신호등을 보고 TRAFFIC_LIGHT 로 들어감 -> 판단 켠 자리에서 ignore_start_distance 를 가기 전엔
+      #   신호등 무시 (신호등 미션은 출발 방향과 같은 곳). 신호등 재도전·시험 때는 false: launch 에 tl_ignore_start:=false
+      #   또는 ros2 param set /mission_supervisor traffic_light.ignore_at_start false. 로그 '[신호등] 출발 쪽 신호등 무시'
+      ignore_at_start: true
+      ignore_start_distance: 3.0   # 켠 자리에서 직선거리 [m]
+      ignore_start_max_sec: 30.0   # odom 이 안 오면 켠 뒤 이 시간 지나면 무시 끝 [s]
+
+    # (11/17 사용자) 서행 표지판(원형, SLOW_SIGN) -> SLOW: 차선 추종 그대로 속도만 speed. 신호등·지그재그(SLOW_ZONE)·방지턱 표지판(BUMP)·
+    #   보행자 표지판(CROSSWALK_STOP)으로만 넘어감. 방지턱 표지판은 예전처럼 BUMP (예전엔 서행 표지판도 BUMP 였음)
+    slow:
+      speed: 0.2
+      max_duration: 0.0        # >0 이면 이 시간 뒤 LANE_FOLLOWING (서행 표지판 오인식 대비). 0 = 위 미션 나올 때까지 계속 [s]
 
     # 미션 3 - 보행자 표지판
     crosswalk:

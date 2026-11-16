@@ -40,6 +40,7 @@ from ar_mission_supervisor.states.crosswalk_stop import CrosswalkStop
 from ar_mission_supervisor.states.parking import Parking
 from ar_mission_supervisor.states.bump import Bump
 from ar_mission_supervisor.states.slow_zone import SlowZone
+from ar_mission_supervisor.states.slow import Slow
 from ar_mission_supervisor.states.avoid_cone import AvoidCone
 from ar_mission_supervisor.states.avoid_static import AvoidStatic
 
@@ -52,7 +53,8 @@ EVENT_TO_OUTCOME = {
     'sign_ab': 'to_left_a_right_b',
     'pedestrian_sign': 'to_crosswalk',
     'parking_sign': 'to_parking',
-    'slow_sign': 'to_bump',
+    'slow_sign': 'to_slow',        # (11/17 사용자) 서행 표지판 -> SLOW (예전 BUMP)
+    'bump_sign': 'to_bump',        # 방지턱 표지판 -> BUMP
     'slow_line': 'to_slow_zone',
     'cone': 'to_cone',
     'limo': 'to_avoid_static',
@@ -64,6 +66,7 @@ OUTCOME_TO_STATE = {
     'to_crosswalk': 'CROSSWALK_STOP',
     'to_parking': 'PARKING',
     'to_bump': 'BUMP',
+    'to_slow': 'SLOW',
     'to_slow_zone': 'SLOW_ZONE',
     'to_avoid_static': 'AVOID_STATIC',
     'to_cone': 'AVOID_CONE',
@@ -77,6 +80,7 @@ IMPLEMENTED = {
     'CROSSWALK_STOP': CrosswalkStop,
     'PARKING': Parking,
     'BUMP': Bump,
+    'SLOW': Slow,
     'SLOW_ZONE': SlowZone,
     'AVOID_CONE': AvoidCone,
     'AVOID_STATIC': AvoidStatic,
@@ -90,7 +94,7 @@ EVENT_SOURCES = ('yolo', 'lidar', 'test')
 # slow_line 이 pedestrian_sign 보다 앞: 유도선 입구에서는 보행자 표지판도 같이 보이므로
 # 먼저 SLOW_ZONE 으로 들어가고, SLOW_ZONE 이 끝 무렵 CROSSWALK_STOP 으로 넘긴다.
 EVENT_PRIORITY = ('traffic_light', 'slow_line', 'pedestrian_sign', 'cone', 'sign_ab',
-                  'slow_sign', 'parking_sign', 'limo')
+                  'bump_sign', 'slow_sign', 'parking_sign', 'limo')
 
 # YOLO 클래스 -> 이벤트 이름
 YOLO_EVENT = {
@@ -100,7 +104,7 @@ YOLO_EVENT = {
     MissionObject.SIGN_B: 'sign_ab',
     MissionObject.SLOW_GUIDE_LINE: 'slow_line',
     MissionObject.SLOW_SIGN: 'slow_sign',
-    MissionObject.BUMP_SIGN: 'slow_sign',
+    MissionObject.BUMP_SIGN: 'bump_sign',
     MissionObject.PARKING_SIGN: 'parking_sign',
     MissionObject.LIMO: 'limo',       # 진행 경로 앞에 있을 때만 (주차 구역 LIMO 무시)
 }
@@ -239,6 +243,16 @@ PARAM_DEFAULTS = {
         'green_confirm_sec': 0.3,  # 정지 후 초록불이 이 시간 이상 유지되면 출발
         'approach_timeout': 25.0,  # 정지선 거리를 끝내 못 받으면 이 시간 뒤 현 위치에서 판정
         'max_wait_sec': 10.0,      # 정지 후 이 시간 안에 초록불을 못 보면 출발 (0 = 무한 대기)
+        # (11/17 사용자) 출발할 때 옆 신호등을 보고 TRAFFIC_LIGHT 로 들어감 -> 판단 켠 자리에서 이 거리를 가기 전엔 신호등 무시.
+        #   신호등 재도전·시험(신호등 앞에 놓고 켤 때)은 false 로 (launch tl_ignore_start:=false)
+        'ignore_at_start': True,
+        'ignore_start_distance': 3.0,  # [m] 켠 자리에서 직선거리
+        'ignore_start_max_sec': 30.0,  # odom 이 없으면 켠 뒤 이 시간 지나면 무시 끝 [s]
+    },
+    'slow': {
+        # (11/17 사용자) 서행 표지판 -> SLOW: 차선 추종 그대로, 속도만. 신호등·지그재그·방지턱·보행자 표지판으로만 넘어감
+        'speed': 0.2,
+        'max_duration': 0.0,       # >0 이면 이 시간 뒤 LANE_FOLLOWING (0 = 위 미션 나올 때까지 계속) [s]
     },
     'crosswalk': {
         'approach_speed': 0.2,
@@ -686,6 +700,10 @@ class MissionSupervisor(Node):
         self.three_lane = ThreeLanePlanner(self)  # 3차선 좌표·차선 번호 (AVOID_STATIC -> LEFT_A_RIGHT_B)
         self.white_lines = WhiteLines(self)       # (11/16) 흰 점선 관측 모음 (몇 번 차선인지 확인용)
         self.entry_armed = True                   # (11/16) 3차선 입구 직진을 다음에 할 수 있는지
+        self.tl_start_xy = None                   # (11/17) 판단 켠 자리 (출발 신호등 무시용)
+        self.tl_start_t = None
+        self.tl_start_done = False
+        self.tl_start_logged = False
 
         # --- 구독 ---
         store = self._store
@@ -1005,13 +1023,10 @@ class MissionSupervisor(Node):
 
         # 방지턱·서행 표지판까지 거리 -> BUMP 가 서행을 끝낼 곳을 정할 때 씀 (11/05).
         # 옆으로 먼 검출은 위 _yolo_lateral_ok 에서 이미 빠짐 (lane_yolo_run1: 왼쪽 2.2 m 오검출 1번).
-        # 둘 다 보이면 먼 쪽 (서행을 더 길게 = 안전한 쪽)
-        bump_signs = [o for o in (best.get(MissionObject.BUMP_SIGN),
-                                  best.get(MissionObject.SLOW_SIGN))
-                      if o is not None and o.position_valid]
-        if bump_signs:
-            far = max(bump_signs, key=lambda o: o.x_m)
-            dist, _ = self._latency_compensated(X(far), msg.header, now)
+        # (11/17 사용자) 방지턱 표지판만. 서행 표지판은 이제 SLOW 라 BUMP 끝을 늘리지 않음 (예전: 둘 다 보면 먼 쪽)
+        bs = best.get(MissionObject.BUMP_SIGN)
+        if bs is not None and bs.position_valid:
+            dist, _ = self._latency_compensated(X(bs), msg.header, now)
             self.buf['bump_dist'].set(dist, now)
 
         light = best.get(MissionObject.TRAFFIC_LIGHT)
@@ -1165,6 +1180,9 @@ class MissionSupervisor(Node):
         path = self._path_event(now, quiet=allowed is not None)
         if path is not None and path not in found:
             found.append(path)
+        self._tl_note_start(now)
+        if 'traffic_light' in found and self._tl_start_ignored(now):
+            found.remove('traffic_light')
         if allowed is not None:
             found = [n for n in found if EVENT_TO_OUTCOME.get(n) in allowed]
         if skip_locked:
@@ -1175,6 +1193,40 @@ class MissionSupervisor(Node):
             if name in found:
                 return name
         return found[0]
+
+    def _tl_note_start(self, now):
+        """판단 켠 자리·시각을 기억 (신호등이 처음 보인 자리가 아니라). 매 주기 merged_event 에서 부름."""
+        if self.tl_start_t is None:
+            self.tl_start_t = now
+        if self.tl_start_xy is None:
+            pose = self.odom_pose()
+            if pose is not None:
+                self.tl_start_xy = (pose[0], pose[1])
+
+    def _tl_start_ignored(self, now):
+        """(11/17 사용자) 판단 켠 자리에서 traffic_light.ignore_start_distance 를 가기 전이면 True (신호등 무시).
+        출발선 옆 신호등(신호등 미션은 출발 방향과 같은 곳)을 보고 TRAFFIC_LIGHT 로 들어가던 것 막기."""
+        cfg = self.traffic_light
+        if not cfg['ignore_at_start'] or self.tl_start_done:
+            return False
+        pose = self.odom_pose()
+        if pose is not None and self.tl_start_xy is not None:
+            gone = math.hypot(pose[0] - self.tl_start_xy[0], pose[1] - self.tl_start_xy[1])
+            if gone >= cfg['ignore_start_distance']:
+                self.tl_start_done = True
+                return False
+            what = '켠 자리에서 %.1fm' % gone
+        else:
+            if now - self.tl_start_t >= cfg['ignore_start_max_sec']:
+                self.tl_start_done = True
+                return False
+            what = 'odom 없음, 켠 뒤 %.0f초' % (now - self.tl_start_t)
+        if not self.tl_start_logged:
+            self.tl_start_logged = True
+            self.get_logger().info('[신호등] 출발 쪽 신호등 무시 (%s, %.1fm 가기 전까지. 끄려면 traffic_light.ignore_at_start false)'
+                                   % (what, cfg['ignore_start_distance']))
+        self.dbg('traffic_light/start_ignored', 1.0)
+        return True
 
     def _path_event(self, now, quiet=False):
         """라이다 장애물이 진행 경로 앞에 있으면 'limo' (AVOID_STATIC 진입용).

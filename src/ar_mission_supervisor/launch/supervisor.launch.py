@@ -32,6 +32,10 @@ def _launch_setup(context, *args, **kwargs):
     yaw0 = LaunchConfiguration('start_yaw_deg').perform(context).strip()
     if yaw0:
         params.append({'start_yaw_deg': float(yaw0)})
+    # (11/17) 신호등 재도전·시험: tl_ignore_start:=false (출발 쪽 신호등 무시 끔)
+    tl = LaunchConfiguration('tl_ignore_start').perform(context).strip().lower()
+    if tl:
+        params.append({'traffic_light.ignore_at_start': tl in ('true', '1', 'yes')})
 
     return [Node(package='ar_mission_supervisor',
                  executable='supervisor',
@@ -50,6 +54,8 @@ def generate_launch_description():
                               description='비우면 params 값 (실차 ackermann, sim twist). twist = /cmd_vel, ackermann = /limo/ack_cmd'),
         DeclareLaunchArgument('start_yaw_deg', default_value='',
                               description='비우면 params 값 (0). 판단 켤 때 차 방향 [도], 출발 직선 기준 (3차선 직선 = 180)'),
+        DeclareLaunchArgument('tl_ignore_start', default_value='',
+                              description='비우면 params 값 (true). false = 출발 뒤 3 m 신호등 무시를 끔 (신호등 재도전·시험)'),
         DeclareLaunchArgument('odom_offset', default_value='',
                               description='비우면 params 값 (실차 0.10, sim 0). odom 점에서 몸통 가운데까지 앞쪽 거리 [m]'),
         OpaqueFunction(function=_launch_setup),

@@ -1,6 +1,6 @@
 """미션 5 - 서행 구간 (방지턱).
 
-진입: YOLO 가 서행 표지판 또는 방지턱 표지판을 인식하면.
+진입: YOLO 가 방지턱 표지판을 인식하면 (11/17: 서행 표지판은 이제 SLOW, states/slow.py. SLOW 에서 방지턱 표지판을 보면 여기로).
 동작: 차선 추종은 그대로 두고 속도만 speed(0.2 m/s)로 낮춘다.
 끝 (11/15 사용자: 표지판 지나고 3초):
   표지판까지 거리(YOLO)를 odom 으로 다 가면(= 표지판 옆) 그때부터 after_sign_sec 초 뒤 LANE_FOLLOWING 으로 복귀.
@@ -12,9 +12,10 @@
   - 무슨 일이 있어도 max_duration 이 지나면 끝.
   (lane_yolo_run1: 표지판을 1.7 m 앞에서 보고 8초 만에 끝나 방지턱 1 m 전에 서행이 풀렸음)
 규정: 기본 주행 속도의 1/2 수준, 최대 0.2 m/s 이하. 심사위원 육안 판정.
-(11/15) 서행 표지판이 모든 서행 구간 앞에 놓이게 바뀜 (사용자) -> 지그재그 앞 서행 표지판을 BUMP 안에서 보면 끝 지점이
-  그 표지판 기준으로 늘어나 지그재그까지 BUMP 로 지나갈 수 있음 (BUMP 는 다른 미션으로 안 넘어갔음 -> SLOW_ZONE 을 놓침).
-  그래서 BUMP 중에 YOLO 서행 유도선(slow_line)을 보면 SLOW_ZONE 으로 바로 넘긴다.
+(11/15) 서행 표지판이 모든 서행 구간 앞에 놓이게 바뀜 (사용자) -> 그때는 서행 표지판도 BUMP 라, 지그재그 앞 서행 표지판을
+  BUMP 안에서 보면 끝 지점이 늘어나 지그재그까지 BUMP 로 지나갈 수 있어서 BUMP 중 서행 유도선이면 SLOW_ZONE 으로 넘겼음.
+(11/17 사용자) 서행 표지판이 SLOW 로 나뉘어 그 이유가 없어짐 -> 끝 지점은 방지턱 표지판만 보고, 다른 미션으로 안 넘어감
+  (방지턱과 지그재그는 한참 떨어져 있음).
 """
 
 import math
@@ -25,8 +26,7 @@ from ar_mission_supervisor.lane_driver import LaneDriver
 
 class Bump(SafeState):
 
-    OUTCOMES = ['done', 'to_slow_zone']
-    HANDOFF = ('to_slow_zone',)          # (11/15) 서행 유도선 보면 바로 SLOW_ZONE
+    OUTCOMES = ['done']                  # (11/17 사용자) 다른 미션으로 안 넘어감 (11/15 의 SLOW_ZONE 넘어가기 뺌)
     MAX_STEP = 0.5      # odom 이 한 번에 이보다 많이 움직이면 (순간이동·리셋) 거리에 안 더함 [m]
 
     def __init__(self, node):
@@ -133,12 +133,6 @@ class Bump(SafeState):
                         node.get_logger().info('[BUMP] %.2fm 주행 (%.1f초) - 서행 종료'
                                                % (self.travelled, elapsed))
                         return 'done'
-
-            # (11/15) 지그재그 서행 유도선을 보면 SLOW_ZONE 으로 바로
-            outcome = node.detect_mission(allowed=self.HANDOFF)
-            if outcome is not None:
-                node.get_logger().info('[BUMP] 서행 유도선 인식 (%.2fm 주행) - SLOW_ZONE 으로 바로 전환' % self.travelled)
-                return outcome
 
             self.driver.step(cfg['speed'])
             self.sleep()

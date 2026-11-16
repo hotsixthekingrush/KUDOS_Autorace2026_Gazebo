@@ -11,7 +11,8 @@
   lane            차선만
   traffic_light   신호등 + 정지선. 색은 -p light_color:=red|yellow|green (실행 중 param set 가능)
   pedestrian      보행자 표지판 + 정지선
-  bump            서행 표지판
+  bump            방지턱 표지판 (11/17: 서행 표지판 -> 방지턱 표지판. 서행 표지판은 아래 slow)
+  slow            서행 표지판 (11/17 SLOW) + then_gap 뒤에 -p then:=bump|zig|ped|light|parking|ab|none
   slow_zone       distance 앞에서 시작하는 지그재그 유도선(zigzag_length) + 0.2m 뒤 보행자 정지선
   sign_a, sign_b  갈림길 A / B 표지판
   cone            좌우 라바콘 3쌍 (라이다 cone 이벤트)
@@ -72,6 +73,8 @@ class FakePerception(Node):
         self.declare_parameter('sign_lateral', -0.35)        # bump: 표지판 좌우 위치 (왼쪽 +) [m]
         # (11/15) bump: >0 이면 표지판에서 이만큼 뒤에 지그재그 유도선 시작 + 그 0.3 m 앞에 서행 표지판 하나 더 (서행 구간마다 표지판)
         self.declare_parameter('zig_after_sign', 0.0)
+        self.declare_parameter('then', 'none')               # slow: 서행 표지판 뒤에 올 것 (11/17)
+        self.declare_parameter('then_gap', 1.0)              # slow: 서행 표지판에서 그것까지 [m]
         self.declare_parameter('side_lateral', -1.15)        # side_signs: 신호등·주차 표지판 좌우 위치 (왼쪽 +) [m]
         self.declare_parameter('lane_valid', True)           # false 면 차선 valid=false (차선 유실 시험)
         self.declare_parameter('lane_confidence', 1.0)       # 차선 확신도 (코너 감속 시험)
@@ -349,7 +352,8 @@ class FakePerception(Node):
         self._stopline(line)
 
     def _s_bump(self):
-        self._object(MissionObject.SLOW_SIGN, self._ahead(self._p('distance')),
+        # (11/17) 방지턱 표지판 -> BUMP (서행 표지판은 이제 SLOW, _s_slow)
+        self._object(MissionObject.BUMP_SIGN, self._ahead(self._p('distance')),
                      float(self._p('sign_lateral')))
         if self.objects and not self._p('sign_position_valid'):
             self.objects[-1].position_valid = False
@@ -360,6 +364,28 @@ class FakePerception(Node):
             if zig_end > 0.3 and zig_start < 2.0:
                 self._object(MissionObject.SLOW_GUIDE_LINE, max(0.3, zig_start), 0.0)
             self._object(MissionObject.SLOW_SIGN, self._ahead(start_wx - 0.3), float(self._p('sign_lateral')))
+
+    def _s_slow(self):
+        """(11/17) 서행 표지판(distance) 뒤 then_gap 만큼에 다음 것 (then: bump / zig / ped / light / parking / ab / none)."""
+        d = float(self._p('distance'))
+        self._object(MissionObject.SLOW_SIGN, self._ahead(d), float(self._p('sign_lateral')))
+        nxt = str(self._p('then'))
+        w = d + float(self._p('then_gap'))
+        if nxt == 'bump':
+            self._object(MissionObject.BUMP_SIGN, self._ahead(w), float(self._p('sign_lateral')))
+        elif nxt == 'zig':
+            self._object(MissionObject.SLOW_GUIDE_LINE, max(0.3, self._ahead(w)), 0.0)
+        elif nxt == 'ped':
+            self._object(MissionObject.PEDESTRIAN_SIGN, self._ahead(w) + 0.2, -0.35)
+            self._stopline(self._ahead(w))
+        elif nxt == 'light':
+            color = LIGHT.get(str(self._p('light_color')), MissionObject.LIGHT_UNKNOWN)
+            self._object(MissionObject.TRAFFIC_LIGHT, self._ahead(w) + 0.3, 0.35, color)
+            self._stopline(self._ahead(w))
+        elif nxt == 'parking':
+            self._object(MissionObject.PARKING_SIGN, self._ahead(w), -0.35)
+        elif nxt == 'ab':
+            self._object(MissionObject.SIGN_A, self._ahead(w), 0.3)
 
     def _s_side_signs(self):
         """옆 길 표지판 시험 (11/05): 빨간 신호등(distance+0.3)·주차 표지판(distance+2.0)을 side_lateral 옆에,

@@ -33,6 +33,21 @@ from ar_mission_supervisor.geometry import normalize_angle
 from ar_mission_supervisor.lane_driver import LaneDriver
 
 
+def heading_hold_steer(node, driver, target_yaw, yaw, now):
+    """고정 헤딩 유지 조향 (SLOW_ZONE, CROSSWALK_STOP 공용, 11/16).
+    조향 = k_yaw x 헤딩 오차 + lane_blend x confidence x 차선 추종 조향. (조향, 헤딩 오차, 차선 몫) 을 돌려준다."""
+    cfg = node.slow_zone
+    yaw_err = normalize_angle(target_yaw - yaw)
+    steer = cfg['k_yaw'] * yaw_err
+    lane = node.lane_error(now)
+    lane_part = 0.0
+    if lane is not None and cfg['lane_blend'] > 0.0:
+        confidence = clamp(lane[2], 0.0, 1.0)
+        lane_part = cfg['lane_blend'] * confidence * driver.lane_steer(lane, now)
+    steer = clamp(steer + lane_part, -node.max_steer, node.max_steer)
+    return steer, yaw_err, lane_part
+
+
 class SlowZone(SafeState):
 
     OUTCOMES = ['done', 'to_crosswalk']
@@ -85,6 +100,8 @@ class SlowZone(SafeState):
             # (11/15) 표지판이 화면 밖으로 빠져도 기억한 채로 정지선 거리만 보고 넘어간다
             if self.ped_seen is not None and self._near_crosswalk(cfg, sign_visible=outcome is not None):
                 node.get_logger().info('[SLOW_ZONE] 보행자 표지판 인식 - CROSSWALK_STOP 으로 바로 전환')
+                if self.target_yaw is not None:
+                    node.heading_handoff = (self.target_yaw, now)   # (11/16) CROSSWALK_STOP 이 이 헤딩으로 이어감
                 return self.ped_seen
 
             # (11/15) 표지판을 못 보고 횡단보도를 지났으면 헤딩 고정 직진을 끝내고 일반 주행으로
@@ -139,15 +156,7 @@ class SlowZone(SafeState):
 
     def _hold_heading(self, now, yaw, cfg):
         node = self.node
-        yaw_err = normalize_angle(self.target_yaw - yaw)
-        steer = cfg['k_yaw'] * yaw_err
-
-        lane = node.lane_error(now)
-        lane_part = 0.0
-        if lane is not None and cfg['lane_blend'] > 0.0:
-            confidence = clamp(lane[2], 0.0, 1.0)
-            lane_part = cfg['lane_blend'] * confidence * self.driver.lane_steer(lane, now)
-        steer = clamp(steer + lane_part, -node.max_steer, node.max_steer)
+        steer, yaw_err, lane_part = heading_hold_steer(node, self.driver, self.target_yaw, yaw, now)
 
         v = cfg['speed']
         node.publish_cmd(v, steering_to_omega(v, steer, node.wheel_base))

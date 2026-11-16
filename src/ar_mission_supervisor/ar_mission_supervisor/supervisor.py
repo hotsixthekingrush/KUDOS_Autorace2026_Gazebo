@@ -218,6 +218,14 @@ PARAM_DEFAULTS = {
         'crosswalk_max_lateral': 0.35, # 정지 기준 횡단보도 [m]
         # (11/05) 정지선은 YOLO 횡단보도(줄무늬) 앞끝보다 이만큼 차 쪽에 있음 -> 그만큼 앞에서 선다 [m]
         'crosswalk_to_stopline': 0.06,
+        # (11/16 YOLO 팀원) YOLO x_m 기준점(그쪽 base_link) -> 판단 기준점(차 몸통 가운데) 앞뒤 차이 [m].
+        #   YOLO base_link 가 뒷바퀴 축이면 -0.10 (판단 기준점이 0.10 m 앞). 모든 YOLO 거리에 더함
+        'x_offset': 0.0,
+        # (11/16 YOLO 팀원) 횡단보도 x_m 이 이보다 가까우면 덜 정확 (실차 렌즈 0.7 m 에서 5.7 cm 짧음, 1.0 m 에서 0.3 cm).
+        #   먼 값(>= 이 값)을 한 번이라도 받았으면 가까운 값은 버리고 odom 으로 이어감. 가까운 값만 있으면 near_bias 를 더해 씀.
+        #   YOLO x_m 그대로(x_offset 더하기 전) 기준 [m]. 0 = 끔
+        'crosswalk_trust_x': 1.1,
+        'crosswalk_near_bias': 0.05,
     },
     'traffic_light': {
         'approach_speed': 0.2,
@@ -235,6 +243,12 @@ PARAM_DEFAULTS = {
         'stop_gap': 0.03,
         'wait_sec': 4.0,           # 규정: 완전정지 후 3초 이상, 15초 이내 출발
         'approach_timeout': 25.0,
+        # (11/16 사용자) 횡단보도가 지그재그 바로 뒤라 접근 중에도 SLOW_ZONE 처럼 헤딩 고정 (k_yaw·lane_blend 는 slow_zone 값).
+        #   SLOW_ZONE 에서 넘어오면 그 헤딩을 이어받고, 아니면 회전이 hold_turn_rate_deg 아래일 때 고정.
+        #   고정할 때 차 방향이 트랙 축(avoid_static.axis_ref_deg + 90도 단위)에서 hold_axis_snap_deg 안이면 그 축으로.
+        'heading_hold': True,
+        'hold_turn_rate_deg': 10.0,
+        'hold_axis_snap_deg': 12.0,
     },
     'bump': {
         'speed': 0.2,              # 규정: 기본 속도의 1/2, 최대 0.2 m/s
@@ -576,6 +590,7 @@ class MissionSupervisor(Node):
         self.buf = dict((k, Buffer(stale)) for k in self.BUFFER_KEYS)
         self.yaw_hist = collections.deque(maxlen=80)   # (수신 시각, yaw) - 회전 속도 계산용 (11/12)
         self._defer_log = None
+        self.heading_handoff = None     # (11/16) SLOW_ZONE -> CROSSWALK_STOP 으로 넘기는 고정 헤딩 (yaw, 시각)
         for k in self.YOLO_KEYS:
             self.buf[k].stale_sec = max(stale, self.yolo['hold_sec'])
         self._yolo_streak = {}
@@ -726,6 +741,14 @@ class MissionSupervisor(Node):
         self.buf['odom'].set(pose, now)
         self.yaw_hist.append((now, pose[2]))
 
+    def track_axis(self, yaw):
+        """(11/16) yaw 에서 가장 가까운 트랙 축(avoid_static.axis_ref_deg + 90도 단위)과 그 차이 (축, 차이) [rad]."""
+        ref = math.radians(self.avoid_static['axis_ref_deg'])
+        rel = math.atan2(math.sin(yaw - ref), math.cos(yaw - ref))
+        axis = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
+        axis = math.atan2(math.sin(axis), math.cos(axis))
+        return axis, math.atan2(math.sin(yaw - axis), math.cos(yaw - axis))
+
     def turn_rate(self, now, window=0.4):
         """odom 으로 구한 최근 window 초 회전 속도 [rad/s] (왼쪽 +). 기록이 모자라면 None."""
         hist = [h for h in list(self.yaw_hist) if now - window - 0.05 <= h[0] <= now + 0.05]
@@ -803,15 +826,20 @@ class MissionSupervisor(Node):
                 best[o.class_id] = o
 
         st = self.avoid_static
+        x_off = float(self.yolo['x_offset'])
+
+        def X(o):
+            # (11/16) YOLO 기준점 -> 판단 기준점(몸통 가운데)
+            return float(o.x_m) + x_off
 
         def near(o):
             if o.class_id == MissionObject.LIMO:
                 # 진행 경로 앞에 있는 LIMO 만 (주차 구역처럼 옆에 선 LIMO 는 무시)
-                return (o.position_valid and o.x_m <= st['yolo_range']
+                return (o.position_valid and X(o) <= st['yolo_range']
                         and abs(o.y_m) <= st['trigger_half_width'])
             # 위치를 못 구했으면 거리 조건 없이 인정 (가까워서 화면 밖일 수 있음)
             limit = ped_rng if o.class_id == MissionObject.PEDESTRIAN_SIGN else rng
-            return (not o.position_valid) or o.x_m <= limit
+            return (not o.position_valid) or X(o) <= limit
 
         # 이번 프레임에 보이는 이벤트들 -> 연속 프레임 수 갱신
         seen = set()
@@ -841,16 +869,18 @@ class MissionSupervisor(Node):
         # 위치를 못 구한 프레임(가까워서 박스 아래가 화면 밖 등)은 버리고, 판단이 odom 으로 이어서 추정한다.
         cw = best.get(MissionObject.CROSSWALK)
         if cw is not None and cw.position_valid:
-            line_x = float(cw.x_m) - self.yolo['crosswalk_to_stopline']
+            trust = float(self.yolo['crosswalk_trust_x'])
+            close = trust > 0.0 and float(cw.x_m) < trust   # (11/16) 가까운 측정 = 덜 정확
+            line_x = X(cw) - self.yolo['crosswalk_to_stopline']
             dist, age = self._latency_compensated(line_x, msg.header, now)
-            self.buf['stopline'].set(dist, now)
+            self.buf['stopline'].set((dist, close), now)
             self.dbg('stopline/age', age)
 
         for cls, key in ((MissionObject.PEDESTRIAN_SIGN, 'ped_dist'),
                          (MissionObject.SLOW_GUIDE_LINE, 'slowline_dist')):
             o = best.get(cls)
             if o is not None and o.position_valid:
-                dist, _ = self._latency_compensated(float(o.x_m), msg.header, now)
+                dist, _ = self._latency_compensated(X(o), msg.header, now)
                 self.buf[key].set(dist, now)
 
         # 방지턱·서행 표지판까지 거리 -> BUMP 가 서행을 끝낼 곳을 정할 때 씀 (11/05).
@@ -861,7 +891,7 @@ class MissionSupervisor(Node):
                       if o is not None and o.position_valid]
         if bump_signs:
             far = max(bump_signs, key=lambda o: o.x_m)
-            dist, _ = self._latency_compensated(float(far.x_m), msg.header, now)
+            dist, _ = self._latency_compensated(X(far), msg.header, now)
             self.buf['bump_dist'].set(dist, now)
 
         light = best.get(MissionObject.TRAFFIC_LIGHT)
@@ -875,7 +905,7 @@ class MissionSupervisor(Node):
             self.buf['marker_type'].set(
                 'A' if sign.class_id == MissionObject.SIGN_A else 'B', now)
             if sign.position_valid:
-                dist, _ = self._latency_compensated(float(sign.x_m), msg.header, now)
+                dist, _ = self._latency_compensated(X(sign), msg.header, now)
                 self.buf['marker_dist'].set(dist, now)
 
         stamp = _stamp_sec(msg.header)
@@ -1114,10 +1144,11 @@ class MissionSupervisor(Node):
 
     def stopline_distance(self):
         """base_link -> 정지선 앞쪽 가장자리 거리 [m] (지연 보정됨) 또는 None."""
-        return self._latest('stopline')
+        v = self._latest('stopline')
+        return v[0] if isinstance(v, tuple) else v
 
     def stopline_measurement(self):
-        """(거리, 수신 시각) 또는 None. 같은 측정을 두 번 쓰지 않게 시각도 준다."""
+        """((거리, 가까운 측정인지), 수신 시각) 또는 None. 같은 측정을 두 번 쓰지 않게 시각도 준다."""
         return self.buf['stopline'].get_with_stamp(self.clock_sec())
 
     def slow_line_distance(self):

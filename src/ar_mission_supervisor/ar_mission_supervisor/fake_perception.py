@@ -64,6 +64,9 @@ class FakePerception(Node):
         self.declare_parameter('rate', 10.0)
         self.declare_parameter('lateral_error', 0.0)
         self.declare_parameter('heading_error', 0.0)
+        # (11/16) 지그재그 선 때문에 차선 값이 좌우로 흔들리는 것 흉내: 옆 값에 진폭 lane_wobble [m], 주기 lane_wobble_period [s] 사인 더함
+        self.declare_parameter('lane_wobble', 0.0)
+        self.declare_parameter('lane_wobble_period', 2.0)
         self.declare_parameter('distance', 1.5)        # 정지선/표지판까지 거리 (시나리오 시작 기준)
         self.declare_parameter('sign_position_valid', True)  # bump: false 면 표지판 위치 없이 보냄 (시험용)
         self.declare_parameter('sign_lateral', -0.35)        # bump: 표지판 좌우 위치 (왼쪽 +) [m]
@@ -83,6 +86,11 @@ class FakePerception(Node):
         self.declare_parameter('light_color', 'red')
         self.declare_parameter('stopline_visible', 1.2)   # 횡단보도(정지 기준) 위치가 이 거리 안에서만 나옴
         self.declare_parameter('stopline_min', 0.25)      # 이보다 가까우면 박스 아래가 화면 밖 (위치 없음)
+        # (11/16 실차 YOLO) 횡단보도가 stopline_near_x 보다 가까우면 거리를 stopline_near_short 만큼 짧게 보냄 (0 = 정확)
+        self.declare_parameter('stopline_near_x', 1.1)
+        self.declare_parameter('stopline_near_short', 0.0)
+        # (11/16) YOLO x_m 기준점이 판단 기준점(몸통 가운데)보다 뒤에 있는 실차 흉내: 모든 YOLO x_m 에 더함 (뒷바퀴 축이면 +0.10)
+        self.declare_parameter('x_shift', 0.0)
         self.declare_parameter('zigzag_length', 1.677)
         # (11/15 stop_run2) slow_zone: 보행자 표지판 위치 = 정지선 + ped_offset (실차는 정지선 앞 약 0.3 m = -0.3),
         #   ped_visible_min 보다 가까우면 표지판이 화면 밖 (실차 0.7 m 에서 빠짐). 0 = 항상 보임 (예전)
@@ -276,6 +284,11 @@ class FakePerception(Node):
             fy = ty + float(self._p('lane_ref_x')) * math.sin(tyaw)
             lane.lateral_offset_m = float((center - fy) / max(0.2, math.cos(tyaw)))
             lane.heading_error_rad = float(-tyaw)
+        wob = float(self._p('lane_wobble'))
+        if wob != 0.0:
+            t_now = self.get_clock().now().nanoseconds * 1e-9
+            lane.lateral_offset_m = float(lane.lateral_offset_m
+                                          + wob * math.sin(2.0 * math.pi * t_now / float(self._p('lane_wobble_period'))))
         self.pub_lane.publish(lane)
 
         self.objects = []
@@ -305,7 +318,7 @@ class FakePerception(Node):
         o.confidence = 0.9
         o.light_color = color
         o.position_valid = True
-        o.x_m = float(x_m)
+        o.x_m = float(x_m) + float(self._p('x_shift'))
         o.y_m = float(y_m)
         o.position_source = MissionObject.POS_DEPTH
         self.objects.append(o)
@@ -315,7 +328,8 @@ class FakePerception(Node):
         보이는 거리 안일 때만 위치와 함께 보냄."""
         cw = dist + float(self._p('crosswalk_after_line'))
         if self._p('stopline_min') <= cw <= self._p('stopline_visible'):
-            self._object(MissionObject.CROSSWALK, cw, 0.0)
+            short = float(self._p('stopline_near_short')) if cw < float(self._p('stopline_near_x')) else 0.0
+            self._object(MissionObject.CROSSWALK, cw - short, 0.0)
 
     # ------------------------------------------------------------------
     # 시나리오

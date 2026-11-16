@@ -117,6 +117,14 @@ mission_supervisor:
       #   Gazebo 맵(track_paint white.dae): 오른쪽 길 정지선 y 2.491~2.507, 줄무늬 2.436 / 안쪽 길 선 x 3.202~3.226, 줄무늬 3.273
       #   -> 5~7 cm. lane_yolo_run5: 앞바퀴가 줄무늬 앞 0.4 cm 에 섬 = 정지선 6~7 cm 넘음 (규정 ±5 cm). 실제 트랙에서 재서 바꿀 것.
       crosswalk_to_stopline: 0.06
+      # (11/16 YOLO 팀원) YOLO x_m 기준점(그쪽 base_link) -> 판단 기준점(차 몸통 가운데) 앞뒤 차이 [m]. 모든 YOLO 거리에 더함.
+      #   YOLO base_link 가 뒷바퀴 축이면 -0.10. 팀원이 기준점 알려 주면 정할 것
+      x_offset: 0.0
+      # (11/16 YOLO 팀원) 실차 횡단보도 거리: 렌즈 1.0 m 에서 0.3 cm 오차, 0.7 m 에서 5.7 cm 짧음, 0.5 m 안쪽은 화면 밖.
+      #   YOLO x_m(그대로)이 crosswalk_trust_x 보다 가까우면 덜 정확한 값: 먼 값을 받은 적 있으면 버리고 odom 으로 이어감,
+      #   가까운 값만 있으면 crosswalk_near_bias 를 더해 씀. 0 = 끔 (예전처럼 모든 값 그대로)
+      crosswalk_trust_x: 1.1
+      crosswalk_near_bias: 0.05
 
     # 미션 1 - 신호등
     traffic_light:
@@ -136,6 +144,13 @@ mission_supervisor:
       stop_gap: 0.03
       wait_sec: 4.0            # 규정: 3초 이상 대기, 15초 이내 출발
       approach_timeout: 25.0
+      # (11/16 사용자) 횡단보도가 지그재그 바로 뒤 -> 접근 중에도 SLOW_ZONE 처럼 헤딩 고정 (k_yaw·lane_blend 는 slow_zone 값).
+      #   stop_run3: 유도선을 못 잡아 LANE_FOLLOWING 에서 바로 들어와 차선 추종으로 지그재그를 지나며 조향 +-0.41 흔들림.
+      #   SLOW_ZONE 에서 오면 그 헤딩 이어받음, 아니면 회전이 hold_turn_rate_deg 아래일 때 고정.
+      #   고정할 때 트랙 축(avoid_static.axis_ref_deg + 90도 단위)에서 hold_axis_snap_deg 안이면 그 축으로 (stop_run3 진입 -83도 -> -90도)
+      heading_hold: true
+      hold_turn_rate_deg: 10.0
+      hold_axis_snap_deg: 12.0
 
     # 미션 5 - 서행 구간 (방지턱)
     bump:

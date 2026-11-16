@@ -341,9 +341,14 @@ PARAM_DEFAULTS = {
         'slow_speed': 0.10,        # 그때 감속 속도
         'stop_distance': 0.25,     # 그래도 이 거리 안에서 닿게 되면 정지 [m]
         'backup_after': 1.0,       # 이만큼 서 있으면 후진 [s] (11/04)
-        'backup_distance': 0.20,   # 한 번에 후진하는 거리 [m]
+        'backup_distance': 0.20,   # 펴는 후진(예전 방식)일 때 한 번에 후진하는 거리 [m]
         'backup_speed': 0.10,      # 후진 속도 [m/s]
-        'backup_max': 3,           # 한 미션에 후진하는 최대 횟수
+        'backup_max': 8,           # 한 미션에 후진하는 최대 횟수 (11/16 3 -> 8)
+        # (11/16 사용자) 'search' = 조향 6가지 x backup_search_dists 를 지도로 굴려 앞으로 갈 거리가 가장 길어지는 후진,
+        #   LIMO 에 닿거나 3차선 바깥 선 넘는 후진은 버림. 'straighten' = 예전 (차선 방향으로 펴며 backup_distance)
+        'backup_mode': 'search',
+        'backup_search_dists': [0.20, 0.30, 0.40],
+        'backup_min_gain': 0.05,   # 지금보다 앞 거리가 이만큼 넘게 길어지는 후진이 없으면 예전처럼 펴며 후진 [m]
         'backup_k_heading': 1.5,   # 후진하며 차 방향을 차선 방향으로 펴는 게인 [rad/rad]
         'settle_tolerance': 0.08,  # 목표 차선 중앙 +- 이 안 + 방향 오차 settle_heading 이하면 변경 완료
         'settle_heading': 0.20,

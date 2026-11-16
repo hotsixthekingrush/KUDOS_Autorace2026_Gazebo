@@ -46,6 +46,16 @@ step(now, goal) 한 번 = 한 제어 주기:
   - (11/04 사용자 요청) 선 채로 backup_after 초가 지나면, 뒤가 비어 있을 때 backup_speed 로 backup_distance 만큼
     후진하고(차 방향을 차선 방향으로 펴면서) 다시 계산한다. 한 미션에 backup_max 번까지. LIMO 는 안 움직여서
     서서 기다리기만 하면 계속 막혀 있고, 규정상 진행 불가는 미션 처음부터 재출발이라서.
+  - (11/16 사용자) 후진을 꼭 차선과 평행하게 펴지 않는다 (backup_mode 'search'). 막히면 backup_after 뒤,
+    조향 6가지(차선 방향으로 펴기 + 고정 조향 -최대/-반/0/+반/+최대) x 후진 거리(backup_search_dists) 를 지도(LIMO 박스)로
+    굴려 보고, LIMO 에 닿거나 3차선 바깥 선을 넘는(edge_check, 앞으로 굴릴 때와 같은 검사) 후진은 버린다.
+    남은 후보마다 그 자리에서 앞으로 굴려 본 거리(plan reach)가 가장 긴 것을 고름 (같으면 짧은 후진·작은 조향).
+    지금보다 backup_min_gain 넘게 나아지는 후보가 없으면 예전처럼 펴면서 backup_distance 후진.
+    횟수는 backup_max (3 -> 8). 기다림 backup_after 는 1.0 s 그대로 (0.3 s 로 줄이면 static_noise 간격 0.48 에서 34 -> 21/40 로 나빠짐:
+    라이다 지도가 자리 잡기 전에 후진함). 후진 거리 후보를 0.15 부터 하면 너무 조금 물러나 다시 막히는 일이 있어 0.20 부터.
+    static_noise 실차 설정 40번 (예전 -> 지금): 간격 0.48 34 -> 34, 0.46 6 -> 7, 0.55 유령 LIMO 31 -> 31, 0.55/0.50/0.75 40 -> 40,
+    Gazebo 29 -> 28 = 이 시험 배치들에선 거의 같음 (펴는 후진이 막히는 배치가 아님). 후진 뒤 고를 때 본 차선을 유지하게도
+    해 봤지만 0.48 에서 28 로 나빠져서 뺌.
 """
 
 import math
@@ -79,7 +89,7 @@ class ThreeLanePlanner(object):
         self.logged_blocked = False
         self.max_obstacle_s = None
         self.blocked_since = None
-        self.backing = None         # 후진 중이면 시작 (x, y)
+        self.backing = None         # 후진 중이면 (시작 x, 시작 y, 조향 또는 None, 거리)
         self.backups = 0
         self.target_since = -1e9
         self.lat_snap_pending = False   # 옆 위치를 LIMO 로 맞춰야 하는지 (차 위치 기준일 때, 11/12)
@@ -456,38 +466,66 @@ class ThreeLanePlanner(object):
         """후진하면서 차 방향을 차선 방향(psi = 0)으로 펴는 조향각. 후진(v < 0)이면 psi 가 줄어든다."""
         return clamp(self.cfg['backup_k_heading'] * psi, -self.node.max_steer, self.node.max_steer)
 
-    def rollout_back(self, s0, d0, psi0, boxes, dist):
-        """후진하며 back_steer 로 dist 만큼 굴려 보고, 닿기 전까지 간 거리 [m]."""
+    def _back_sim(self, s0, d0, psi0, boxes, dist, steer=None, marks=()):
+        """후진하며 dist 만큼 굴려 봄. steer None = back_steer(차선 방향으로 펴기), 아니면 그 조향 고정.
+        (닿기 전까지 간 거리, [(marks 거리, s, d, psi) ...]). LIMO 박스에 닿거나 바깥 선을 넘기(edge_check) 직전에 멈춤 (11/16)."""
         wb = self.node.wheel_base
         shapes = self._shapes()
         ds = 0.02
         s_, d, psi = s0, d0, psi0
         traveled = 0.0
-        while traveled < dist:
-            steer = self.back_steer(psi)
-            psi -= ds * math.tan(steer) / wb
+        got = []
+        todo = sorted(m for m in marks if m > 0.0)
+        while traveled < dist - 1e-9:
+            st = self.back_steer(psi) if steer is None else steer
+            psi -= ds * math.tan(st) / wb
             s_ -= ds * math.cos(psi)
             d -= ds * math.sin(psi)
             traveled += ds
-            if self._car_hits(s_, d, psi, boxes, shapes):
-                return traveled - ds
-        return dist
+            if self._car_hits(s_, d, psi, boxes, shapes) or self._off_edge(d, psi):
+                return traveled - ds, got
+            while todo and traveled >= todo[0] - 1e-9:
+                got.append((todo.pop(0), s_, d, psi))
+        return dist, got
+
+    def rollout_back(self, s0, d0, psi0, boxes, dist, steer=None):
+        """후진하며 dist 만큼 굴려 보고, 닿기(또는 바깥 선 넘기) 전까지 간 거리 [m]."""
+        return self._back_sim(s0, d0, psi0, boxes, dist, steer)[0]
+
+    def _choose_backup(self, s_, d, psi, boxes, now_reach):
+        """(11/16) 후진 후보 중 앞으로 갈 거리가 가장 길어지는 것. (조향 또는 None, 거리, 그 뒤 앞 거리) 또는 None."""
+        cfg = self.cfg
+        ms = self.node.max_steer
+        dists = [float(v) for v in cfg['backup_search_dists']]
+        best = None
+        for st in (None, -ms, -0.5 * ms, 0.0, 0.5 * ms, ms):
+            _, got = self._back_sim(s_, d, psi, boxes, max(dists), st, dists)
+            for r, ss, dd, pp in got:
+                info, _ = self.plan(ss, dd, pp, boxes)
+                ahead = max(v['reach'] for v in info.values())
+                key = (round(ahead, 3), -r, -(0.0 if st is None else abs(st)))
+                if best is None or key > best[0]:
+                    best = (key, st, r, ahead)
+        if best is None or best[3] < now_reach + cfg['backup_min_gain']:
+            return None
+        return best[1], best[2], best[3]
 
     def _back_step(self, pose, s_, d, psi, now, who):
         """후진 중 한 주기. 다 했으면 False (다시 계산으로)."""
         cfg = self.cfg
         node = self.node
-        x0, y0 = self.backing
+        x0, y0, steer, dist = self.backing
         done = math.hypot(pose[0] - x0, pose[1] - y0)
-        if (done >= cfg['backup_distance']
-                or self.rollout_back(s_, d, psi, self._relax(self._all_boxes(), s_, d, psi), 0.04) < 0.04):
+        if (done >= dist
+                or self.rollout_back(s_, d, psi, self._relax(self._all_boxes(), s_, d, psi), 0.04, steer) < 0.04):
             node.get_logger().info('[%s] 후진 %.2fm 끝 - 다시 계산' % (who, done))
             self.backing = None
             self.blocked_since = None
             self.logged_blocked = False
             return False
         v = -cfg['backup_speed']
-        node.publish_cmd(v, steering_to_omega(v, self.back_steer(psi), node.wheel_base))
+        st = self.back_steer(psi) if steer is None else steer
+        node.publish_cmd(v, steering_to_omega(v, st, node.wheel_base))
         node.dbg('static/mode', 'backup')
         return True
 
@@ -578,13 +616,23 @@ class ThreeLanePlanner(object):
                 if self.blocked_since is None:
                     self.blocked_since = now
                 elif (now - self.blocked_since >= cfg['backup_after'] and self.backups < cfg['backup_max']):
-                    room = self.rollout_back(s_, d, psi, self._relax(self._all_boxes(), s_, d, psi),
-                                             cfg['backup_distance'])
+                    bxs = self._relax(self._all_boxes(), s_, d, psi)
+                    pick = None
+                    if cfg['backup_mode'] == 'search':
+                        pick = self._choose_backup(s_, d, psi, bxs, max(reach.values()))
+                    if pick is not None:
+                        st, dist, ahead = pick
+                        how = '조향 %+.2f' % st if st is not None else '차선 방향으로 펴며'
+                        room = dist
+                        extra = ' -> 그 뒤 앞으로 %.2fm (지금 %.2fm)' % (ahead, max(reach.values()))
+                    else:
+                        st, how, extra = None, '차선 방향으로 펴며', ''
+                        room = min(self.rollout_back(s_, d, psi, bxs, cfg['backup_distance']), cfg['backup_distance'])
                     if room >= 0.05:
                         self.backups += 1
-                        self.backing = (pose[0], pose[1])
-                        log.warn('[%s] %.1f초 막힘 - %.2fm 후진 후 다시 계산 (%d/%d번째, 차선별 갈 거리 %s)'
-                                 % (who, now - self.blocked_since, min(room, cfg['backup_distance']),
+                        self.backing = (pose[0], pose[1], st, room)
+                        log.warn('[%s] %.1f초 막힘 - %.2fm 후진 (%s)%s 후 다시 계산 (%d/%d번째, 차선별 갈 거리 %s)'
+                                 % (who, now - self.blocked_since, room, how, extra,
                                     self.backups, cfg['backup_max'],
                                     ' '.join('%s=%.2f' % (self.name(ln), free[ln]) for ln in self.LANES)))
                 return StepResult(pose, s_, d, psi, blocked=True)

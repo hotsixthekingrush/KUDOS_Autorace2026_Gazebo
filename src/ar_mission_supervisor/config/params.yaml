@@ -287,6 +287,18 @@ mission_supervisor:
       maneuver_goal_heading_deg: 20.0
       maneuver_goal_lane_tol: 0.15
       maneuver_max_back: 0.35    # 입구 사선 구간 보호 (static_1116_1 후진하다 입구 왼쪽 선 넘음)
+      # (11/16 사용자) 입구 사선 보호: 3차선 입구는 0.55 m 동안 45도로 넓어지는데 바깥 선 검사는 전체 폭으로 봐서, 입구 쪽으로
+      #   후진하면 사선을 넘음. 입구 선 위치를 모르니 '첫 LIMO 가운데 + back_floor_offset 에서 다 넓어진다' 로 보고, 그 뒤로는
+      #   뒤로 1 m 갈 때 한쪽 폭이 back_floor_slope m 씩 줄어 가운데 차선 폭까지 좁아진다고 봄. 뒤로 갈 때만 검사 (후진 + 앞뒤 움직임).
+      #   '첫 LIMO 뒤로 후진 금지'(slope 99)는 static_1116_1 배치에서 10번 중 0번 통과라 사선 모양으로 함.
+      #   static_noise (입구 선 = 첫 LIMO 0.5 m 앞이라 치고 MOUTH=0.62) 네 배치, 뒤로 가다 사선 넘은 횟수 (끔 20번 / offset 0 40번 / 0.10 40번):
+      #   20도 진입 20/20 (최대 24 cm) / 39/40 (8 cm) / 0/40, 39도 진입 15/20 (25 cm) / 15/40 (9 cm) / 1/40 (1 cm).
+      #   통과는 19·20/20 / 40·40/40 / 39·39/40, 시간은 0.10 에서 8초쯤 더 (49 -> 57초, 46 -> 54초).
+      #   기본 배치(간격 0.55/0.48/0.46)는 그대로 40/39/38. 앞으로 가다 사선 넘는 건 이걸로 못 막음 (입구 선 위치가 필요)
+      back_floor: true
+      back_floor_offset: 0.10    # 사선이 끝나는 곳 = 첫 LIMO 가운데 + 이만큼 앞 [m] (클수록 조심)
+      back_floor_slope: 1.0      # 1.0 = 45도. 99 = 그 뒤로는 가운데 차선 폭 안에서만 후진
+      maneuver_back_floor: true  # 앞뒤 움직임의 뒤로 가는 조각에도 적용
       maneuver_margin: 0.02      # 길 찾을 때 LIMO 박스를 이만큼 더 키움 (움직일 땐 원래 박스로 확인 -> 조금 어긋나도 안 멈춤) [m]
                                  #   그렇게 길이 없으면 절반, 그래도 없으면 0 으로 다시 찾음 (촘촘한 배치)
       maneuver_check_slack: 0.005  # 움직이는 중 확인은 박스를 이만큼 줄여서 (계획과 몇 mm 차이로 멈추지 않게) [m]
@@ -431,6 +443,51 @@ mission_supervisor:
       search_distance: 6.0
       turn_timeout: 15.0
       align_timeout: 15.0
+
+    # (11/16 사용자·차선 팀원) 흰 점선으로 '실제로 몇 번 차선인지' 확인. 차선 팀원 흰색 노드 /perception/white_status
+    #   (std_msgs/String JSON: t, left/right 의 seen, offset_m(둘 다 양수), heading_rad, conf, n_dash).
+    #   AVOID_STATIC 진입 때 '가운데 차선' 은 가정일 뿐 - 넓어지는 입구에서 왼쪽 선을 따라 왼쪽 차선으로 들어와 있으면
+    #   없는 차선(더 왼쪽)을 있다고 보고 진짜 오른쪽 차선은 트랙 밖으로 봄. 진입 조건(라이다)은 그대로 두고, 진입 뒤
+    #   pending_dist / pending_sec 동안 관측을 모아 기준 좌표를 한 번만 고치고 그 뒤로는 odom 으로 유지.
+    #   - 양쪽 점선(왼쪽 + 오른쪽 = 차선 폭)을 min_votes 번 넘게 봄 -> 바로 확정 (가운데 차선 + 옆 위치)
+    #   - 한쪽만 single_min_votes 번 넘게 봄 -> '한 차선 밀렸을 수도' 로만: 양쪽 가정에 다 있는 차선만 쓰고 천천히 가며
+    #     라이다 LIMO 로 가림 (한쪽 가정에서만 차선 가운데에 놓이는 LIMO). 못 가리면 처음 가정 그대로.
+    #   흰색 노드가 안 켜져 있으면 아무 것도 안 함 (예전과 같음). 실차 값(conf 크기, offset 정확도)은 아직 확인 못 함
+    white:
+      use: true
+      alive_sec: 1.0
+      max_age: 0.5             # 영상 시각 t 가 이보다 오래됐으면 버림 [s]
+      min_conf: 0.0            # 팀원: conf 는 점수일 뿐 확률 아님 -> 실차 값 보고 정할 것
+      min_dash: 2
+      min_offset: 0.03
+      max_offset: 0.95         # 먼 쪽 점선(0.78)까지
+      axis_tol_deg: 30.0       # 차 방향이 3차선 방향에서 이보다 벗어난 동안은 안 모음
+      heading_tol_deg: 20.0    # 점선 방향이 3차선 방향과 이보다 다르면 버림 (횡단보도·글씨)
+      window_sec: 3.0
+      window_dist: 1.0
+      pair_tol: 0.15
+      lane_tol: 0.20
+      min_votes: 3
+      single_min_votes: 6
+      ratio: 0.7
+      use_offset: true         # 양쪽 다 봤으면 옆 위치도 그 값으로 (max_fine 까지)
+      max_fine: 0.15
+      pending_dist: 2.0
+      pending_sec: 10.0
+      limo_tol: 0.25
+
+    # (11/16 사용자) 3차선 입구 직진: 우회전 끝나 차 방향이 3차선 방향(avoid_static.three_lane_axis_deg, 180도) 에서 start_deg 안이면
+    #   distance 만큼은 차선을 안 따라가고 방향만 잡고 곧게 감 (넓어지는 입구에서 왼쪽 선을 따라 왼쪽 차선으로 가는 걸 막음).
+    #   판단 켤 때 start_yaw_deg 를 맞게 넣어야 함. IMU 방향이 틀어지면 그만큼 비스듬히 감 (5도면 2 m 에 17 cm) - 실차 확인 필요
+    entry_hold:
+      enable: true
+      arm_deg: 45.0
+      start_deg: 15.0
+      distance: 2.0
+      abort_deg: 40.0
+      k_yaw: 1.5
+      lane_blend: 0.0          # 0 = 방향만. 올리면 차선 보정을 섞음 (입구에선 그게 왼쪽으로 끄는 원인)
+      max_speed: 0.3
 
     debug:
       enabled: true            # 대회 때는 false

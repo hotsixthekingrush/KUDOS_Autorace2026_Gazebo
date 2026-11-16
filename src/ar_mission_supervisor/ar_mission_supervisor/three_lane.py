@@ -72,6 +72,21 @@ step(now, goal) 한 번 = 한 제어 주기:
     static_noise 실차 설정 40번 (예전 -> 지금): 간격 0.48 34 -> 34, 0.46 6 -> 7, 0.55 유령 LIMO 31 -> 31, 0.55/0.50/0.75 40 -> 40,
     Gazebo 29 -> 28 = 이 시험 배치들에선 거의 같음 (펴는 후진이 막히는 배치가 아님). 후진 뒤 고를 때 본 차선을 유지하게도
     해 봤지만 0.48 에서 28 로 나빠져서 뺌.
+  - (11/16 사용자) 입구 사선 보호 (back_floor): 3차선 입구는 0.55 m 동안 45도 사선으로 넓어지는데 바깥 선 검사는 3차선 전체
+    폭이라, 입구 쪽으로 후진하면 사선을 넘는다 (static_1116_1). 입구 선 위치를 모르므로 '첫 LIMO 가운데 + back_floor_offset 에서
+    다 넓어진다' 로 보고, 그보다 뒤에서는 폭이 back_floor_slope (1.0 = 45도) 로 좁아져 가운데 차선 폭까지 줄어든다고 본다.
+    뒤로 갈 때만 차 네 모서리를 검사 (후진 고르기·펴는 후진·앞뒤 움직임의 뒤로 가는 조각).
+    '첫 LIMO 뒤로 후진 금지' 를 먼저 넣어 봤지만 static_1116_1 배치에서 10번 중 0번 통과 (첫 LIMO 옆에서 막히면 그 뒤로 조금
+    물러나야만 빠져나옴) -> 사선 모양으로. 앞으로 가다 사선을 넘는 것은 못 막는다 (입구 선 위치가 있어야 함 - 차선 팀원 흰 가로선).
+    static_noise MOUTH=0.62 (입구 선이 첫 LIMO 0.5 m 앞이라 침) 네 배치, 뒤로 가다 사선 넘음: 끔 20/20·15/20 (최대 25 cm)
+    -> offset 0 39/40·15/40 (9 cm) -> offset 0.10 0/40·1/40 (1 cm). 통과 39/40 씩, 시간 8초쯤 더. 기본 배치는 그대로.
+  - (11/16 사용자·차선 팀원) 진입 때 '가운데 차선' 은 가정일 뿐 (넓어지는 입구에서 왼쪽 선을 따라 왼쪽 차선으로 들어와 있을 수
+    있음 -> 없는 차선을 있다고 보고 진짜 차선은 트랙 밖으로 봄). 차선 팀원 흰 점선 노드(/perception/white_status)가 켜져 있으면
+    진입 뒤 white.pending_dist 동안 확인해 기준 좌표를 한 번만 고친다 (_ident_begin / _ident_step, white_lines.py).
+    양쪽 점선을 여러 번 보면 바로 확정. 한쪽만 보이면 '한 차선 밀렸을 수도' 로 두고, 양쪽 가정에 다 있는 차선만 쓰면서
+    (edge_shrink) 천천히 가며 라이다 LIMO 로 가린다. 못 가리면 처음 가정 그대로.
+    static_noise WHITE=1: 실제로는 왼쪽/오른쪽 차선(Y0=-0.52/+0.52, LANEHEAD=0)인데 가운데로 가정 -> 흰 점선 없이 0/20 (전부 트랙 밖),
+    있으면 20/20. 제대로 가운데로 들어온 경우 (한쪽 점선이 늘 가려진 WMISS 포함) 는 그대로: 0.55 40·40·40, 0.48 39·40·38, 0.46 38.
 """
 
 import math
@@ -108,10 +123,13 @@ class ThreeLanePlanner(object):
         self.backing = None         # 후진 중이면 (시작 x, 시작 y, 조향 또는 None, 거리)
         self.maneuver = None        # (11/16) 앞뒤로 움직여 빠져나가는 중이면 그 계획
         self.maneuvers = 0
+        self.logged_floor = False
         self.last_backup_s = None   # 마지막으로 후진을 시작한 자리 s (그 근처에서 또 막히면 후진 말고 앞뒤 움직임)
         self.backups = 0
         self.target_since = -1e9
         self.lat_snap_pending = False   # 옆 위치를 LIMO 로 맞춰야 하는지 (차 위치 기준일 때, 11/12)
+        self.ident = None               # (11/16) 흰 점선으로 몇 번 차선인지 확인하는 중이면 {'t0', 's0', 'hyp'}
+        self.edge_shrink = (0.0, 0.0)   # (오른쪽 바깥 선, 왼쪽 바깥 선)을 안쪽으로 당긴 양 [m] - 확인 전까지 양쪽 가정 모두에서 안전한 폭만
         self.relax_logged = False       # 겹친 LIMO 여유 줄임 로그 (11/12)
         self.lat_offset = 0.0
 
@@ -157,9 +175,11 @@ class ThreeLanePlanner(object):
         self.maneuver = None
         self.maneuvers = 0
         self.last_backup_s = None
+        self.logged_floor = False
         self.target_since = -1e9
         self.active = True
         self.released_at = None
+        self._ident_begin()
         return True
 
     def _known_axis(self, pose):
@@ -230,6 +250,137 @@ class ThreeLanePlanner(object):
                  % (who, len(group), len(res), off))
         return True
 
+    # ---------------- (11/16 사용자·차선 팀원) 흰 점선으로 '실제로 몇 번 차선인지' ----------------
+    def _ident_begin(self):
+        """진입 때 '지금 가운데 차선' 은 가정일 뿐 (왼쪽 선을 따라 왼쪽 차선으로 들어와 있을 수 있음).
+        흰 점선 노드가 살아 있으면 white.pending_dist / pending_sec 동안 확인한다 (white_lines.py 설명).
+          - 양쪽 점선을 본 관측이 모이면 (그 k 로만 설명되는 관측 min_votes 개 이상, 전체의 ratio 이상) 바로 확정:
+            기준 좌표를 k 차선 + 잔차만큼 한 번 옮기고 끝. 그 뒤로는 odom 으로 유지 (다시 안 옮김).
+          - 한쪽만 계속 보이면 '한 차선 밀렸을 수도' 로만 둔다: 양쪽 가정 모두에서 있는 차선만 쓰고(바깥 선을 한 차선
+            안으로), 천천히 가면서 라이다 LIMO 로 가린다 - 한쪽 가정에서만 차선 가운데에 놓이는 LIMO 가 있으면 그쪽으로 확정.
+          - 끝내 못 가리면 처음 가정(가운데) 그대로."""
+        self.ident = None
+        self.edge_shrink = (0.0, 0.0)
+        node = self.node
+        wl = getattr(node, 'white_lines', None)
+        cfg = getattr(node, 'white', None)
+        if wl is None or cfg is None or not cfg['use']:
+            return
+        self.ident = {'t0': node.clock_sec(), 's0': 0.0, 'hyp': None, 'seen': False}
+
+    def _ident_end(self):
+        self.ident = None
+        self.edge_shrink = (0.0, 0.0)
+        half = 1.5 * self.width() + 0.15
+        self.map.items = [it for it in self.map.items if abs(it['d']) <= half]
+
+    def _shift_frame(self, off, now):
+        """기준 좌표를 옆으로 off 만큼 옮김 (차·LIMO 의 d 가 off 만큼 줄어듦). 한 차선쯤 옮기면 차선 번호·계획도 새로."""
+        nx, ny = self.frame.frame_to_odom(0.0, off)
+        self.frame.origin = (nx, ny, self.frame.origin[2])
+        for it in self.map.items:
+            it['d'] -= off
+        self.lat_offset += off
+        if abs(off) > 0.5 * self.width():
+            pose = self.node.odom_pose()
+            if pose is not None:
+                self.lane = self.target = self.lane_of(self.frame.car(pose)[1])
+            self.changing = False
+            self.mismatch_since = None
+            self.backing = None
+            self.maneuver = None
+            self.blocked_since = None
+            self.logged_blocked = False
+            self.target_since = now
+
+    def _ident_step(self, pose, s_, d, psi, now, who):
+        """흰 점선 확인 한 주기. 기준 좌표를 옮겼으면 True."""
+        node = self.node
+        cfg = node.white
+        idn = self.ident
+        log = node.get_logger()
+        w = self.width()
+        if s_ - idn['s0'] > cfg['pending_dist'] or now - idn['t0'] > cfg['pending_sec']:
+            if idn['hyp'] is not None:
+                log.warn('[%s] 흰 점선: 실제로는 %s 차선일 수도 있었는데 끝내 확인 못 함 - 처음 가정 그대로 감 (지금 %s 차선)'
+                         % (who, self._true_lane_name(d, idn['hyp']), self.name(self.lane_of(d))))
+            elif idn['seen']:
+                log.info('[%s] 흰 점선으로 차선을 확정할 만큼은 못 봄 - 처음 가정 그대로' % who)
+            self._ident_end()
+            return False
+        v = node.white_lines.votes(now, pose, self.frame, w)
+        if v is None:
+            return False
+        idn['seen'] = True
+        n, supp, excl = v['n'], v['supp'], v['excl']
+        node.dbg('static/white_n', float(n))
+        cand = [k for k in (-1, 0, 1) if supp[k] >= cfg['min_votes'] and supp[k] >= cfg['ratio'] * n]
+        both_n, left_n, right_n = v['kinds']
+        seen_txt = '양쪽 %d번, 왼쪽만 %d번, 오른쪽만 %d번' % (both_n, left_n, right_n)
+        if len(cand) == 1 and excl[cand[0]] >= cfg['min_votes']:
+            return self._ident_confirm(cand[0], v['fine'][cand[0]], d, now, who, '흰 점선 ' + seen_txt)
+        hyp = None
+        if len(cand) == 2 and 0 in cand and n >= cfg['single_min_votes']:
+            hyp = cand[0] if cand[1] == 0 else cand[1]
+        if hyp is None:
+            return False
+        if idn['hyp'] != hyp:
+            cut = (w, 0.0) if hyp > 0 else (0.0, w)          # hyp -1: 실제로는 한 차선 왼쪽 -> 기준 좌표의 왼쪽 차선은 없는 차선
+            ext = 0.5 * math.hypot(self.cfg['car_length'], self.cfg['car_width'])
+            lim = 1.5 * w
+            inside = (d + ext <= lim - cut[1]) and (d - ext >= -lim + cut[0])
+            idn['hyp'] = hyp
+            self.edge_shrink = cut if inside else (0.0, 0.0)
+            log.warn('[%s] 흰 점선이 한쪽에만 보임 (%s) - 실제로는 %s 차선일 수도 있음. 확인될 때까지 천천히%s'
+                     % (who, seen_txt, self._true_lane_name(d, hyp),
+                        (', 기준 좌표의 %s 차선으로는 안 감' % self.name(0 if hyp < 0 else 2)) if inside else ''))
+        # 라이다 LIMO 로 가리기: 한쪽 가정에서만 차선 가운데(3차선 안)에 놓이는 LIMO
+        tol = cfg['limo_tol']
+        only0 = onlyk = 0
+        for it in self.map.confirmed(self.cfg['confirm_hits']):
+            if not (s_ - 0.3 <= it['s'] <= s_ + 3.5):
+                continue
+            ok = []
+            for k in (0, hyp):
+                dd = it['d'] - k * w
+                j = math.floor(dd / w + 0.5)
+                ok.append(abs(j) <= 1 and abs(dd - j * w) <= tol)
+            if ok[0] and not ok[1]:
+                only0 += 1
+            elif ok[1] and not ok[0]:
+                onlyk += 1
+        if onlyk >= 1 and only0 == 0:
+            return self._ident_confirm(hyp, None, d, now, who,
+                                       '흰 점선 %s + 그 가정에서만 차선에 놓이는 LIMO %d대' % (seen_txt, onlyk))
+        if only0 >= 1 and onlyk == 0:
+            return self._ident_confirm(0, None, d, now, who,
+                                       '흰 점선은 한쪽만(%s) 보였지만 LIMO %d대가 처음 가정에서만 차선에 놓임' % (seen_txt, only0))
+        return False
+
+    def _true_lane_name(self, d, k):
+        """기준 좌표가 k 차선 어긋났다면 차가 실제로 있는 차선 이름."""
+        return self.name(self.lane_of(d - k * self.width()))
+
+    def _ident_confirm(self, k, fine, d, now, who, why):
+        cfg = self.node.white
+        log = self.node.get_logger()
+        w = self.width()
+        if fine is None or not cfg['use_offset'] or abs(fine) > cfg['max_fine']:
+            fine = 0.0
+        off = k * w + fine
+        was = self.name(self.lane_of(d))
+        moved = abs(off) > 0.02
+        if moved:
+            self._shift_frame(off, now)
+        self._ident_end()                   # 옮긴 뒤에 정리 (3차선 밖 LIMO 는 옮긴 좌표로 걸러야 함)
+        if k == 0:
+            log.info('[%s] 차선 확인: %s 차선 맞음 (%s)%s' % (who, was, why,
+                                                         ' - 옆 위치 %+.2fm 맞춤' % off if moved else ''))
+        else:
+            log.warn('[%s] 차선 확인: 실제로는 %s 차선 (가정은 %s) - 기준 좌표를 옆으로 %+.2fm 옮김 (%s)'
+                     % (who, self.name(self.lane_of(d - off)), was, off, why))
+        return moved
+
     def release(self, now):
         """AVOID_STATIC 이 끝남. 잠깐 동안은 LEFT_A_RIGHT_B 가 이어받을 수 있다."""
         self.released_at = now
@@ -277,6 +428,8 @@ class ThreeLanePlanner(object):
         s_, d, psi = self.frame.car(pose)
         cfg = self.cfg
         half = 1.5 * self.width() + 0.15
+        if self.ident is not None and self.ident['hyp'] is not None:
+            half += self.width()            # 차선이 한 칸 밀렸을 수도 있는 동안은 한 차선 더 바깥 LIMO 도 봄 (확인용)
 
         def accept(so, do):
             return abs(do) <= half and so > s_ - 1.0
@@ -404,8 +557,10 @@ class ThreeLanePlanner(object):
             hl, hw = 0.5 * cfg['wheel_box_length'], 0.5 * cfg['wheel_box_width']
         else:
             hl, hw = 0.5 * cfg['car_length'], 0.5 * cfg['car_width']
-        reach = abs(d) + hl * abs(math.sin(psi)) + hw * abs(math.cos(psi))
-        return reach > 1.5 * self.width() + cfg['edge_margin']
+        ext = hl * abs(math.sin(psi)) + hw * abs(math.cos(psi))
+        lim = 1.5 * self.width() + cfg['edge_margin']
+        cut_right, cut_left = self.edge_shrink
+        return d + ext > lim - cut_left or d - ext < -lim + cut_right
 
     def _las(self):
         cfg = self.cfg
@@ -484,6 +639,39 @@ class ThreeLanePlanner(object):
             self.relax_logged = bool(relaxed)
         return out
 
+    def _back_floor(self, maneuver=False):
+        """(11/16 사용자) 후진 한계 s = 첫 LIMO 가운데 (+ back_floor_offset). 이보다 뒤는 입구 사선 구간으로 봄 (_behind_floor).
+        3차선 입구는 0.55 m 동안 45도 사선으로 넓어지는데 바깥 선 검사(edge_check)는 전체 폭으로 봐서, 입구 쪽으로 후진하면
+        사선을 넘는다 (static_1116_1). 입구 선 위치를 모르므로 '첫 LIMO 가운데에서 다 넓어진다' 로 본다. 끄면 None."""
+        cfg = self.cfg
+        if not cfg['back_floor'] or (maneuver and not cfg['maneuver_back_floor']):
+            return None
+        items = self.map.confirmed(cfg['confirm_hits'])
+        if not items:
+            return None
+        return min(it['s'] for it in items) + cfg['back_floor_offset']
+
+    def _behind_floor(self, s_, d, psi, floor):
+        """후진 한계(첫 LIMO 가운데)보다 뒤에서 입구 사선 밖으로 나가는지. 한계 뒤로는 3차선 폭이 뒤로 1 m 갈 때마다
+        back_floor_slope m 씩 (1.0 = 45도) 좁아져 가운데 차선 폭까지 줄어든다고 보고, 차 네 모서리를 검사한다.
+        (가운데 차선은 들어온 차선과 곧게 이어져서 그 폭 안은 늘 괜찮음. slope 를 크게 하면 한계 뒤 = 가운데 차선 폭만.)"""
+        if floor is None:
+            return False
+        cfg = self.cfg
+        hl, hw = 0.5 * cfg['car_length'], 0.5 * cfg['car_width']
+        c, sn = math.cos(psi), math.sin(psi)
+        if s_ - (hl * abs(c) + hw * abs(sn)) >= floor:
+            return False
+        w = self.width()
+        for a, b in ((hl, hw), (hl, -hw), (-hl, -hw), (-hl, hw)):
+            cs = s_ + a * c - b * sn
+            if cs >= floor:
+                continue
+            cd = d + a * sn + b * c
+            if abs(cd) > max(0.5 * w, 1.5 * w - cfg['back_floor_slope'] * (floor - cs)) + cfg['edge_margin']:
+                return True
+        return False
+
     def back_steer(self, psi):
         """후진하면서 차 방향을 차선 방향(psi = 0)으로 펴는 조향각. 후진(v < 0)이면 psi 가 줄어든다."""
         return clamp(self.cfg['backup_k_heading'] * psi, -self.node.max_steer, self.node.max_steer)
@@ -498,13 +686,15 @@ class ThreeLanePlanner(object):
         traveled = 0.0
         got = []
         todo = sorted(m for m in marks if m > 0.0)
+        floor = self._back_floor()
         while traveled < dist - 1e-9:
             st = self.back_steer(psi) if steer is None else steer
             psi -= ds * math.tan(st) / wb
             s_ -= ds * math.cos(psi)
             d -= ds * math.sin(psi)
             traveled += ds
-            if self._car_hits(s_, d, psi, boxes, shapes) or self._off_edge(d, psi):
+            if (self._car_hits(s_, d, psi, boxes, shapes) or self._off_edge(d, psi)
+                    or self._behind_floor(s_, d, psi, floor)):
                 return traveled - ds, got
             while todo and traveled >= todo[0] - 1e-9:
                 got.append((todo.pop(0), s_, d, psi))
@@ -536,13 +726,15 @@ class ThreeLanePlanner(object):
         bxs = [b for b in boxes if s_min - 0.6 <= b[0] <= reach_s]
         prims = [(dr, st) for dr in (1, -1) for st in (-ms, 0.0, ms)]
         rs, rd, rp = 0.04, 0.04, math.radians(7.5)
+        floor = self._back_floor(maneuver=True)
 
         def move(s_, d, psi, dr, st):
             for _ in range(n_sub):
                 psi += dr * ds * math.tan(st) / wb
                 s_ += dr * ds * math.cos(psi)
                 d += dr * ds * math.sin(psi)
-                if (s_ < s_min or self._off_edge(d, psi) or self._car_hits(s_, d, psi, bxs, shapes)):
+                if (s_ < s_min or self._off_edge(d, psi) or self._car_hits(s_, d, psi, bxs, shapes)
+                        or (dr < 0 and self._behind_floor(s_, d, psi, floor))):
                     return None
             return s_, d, psi
 
@@ -760,6 +952,8 @@ class ThreeLanePlanner(object):
         if self.lat_snap_pending and self._snap_lateral(s_, who):
             self.lat_snap_pending = False
             s_, d, psi = self.frame.car(pose)
+        if self.ident is not None and self._ident_step(pose, s_, d, psi, now, who):
+            s_, d, psi = self.frame.car(pose)
         node.dbg('static/lat_offset', self.lat_offset)
 
         if self.changing and self.settled(d, psi):
@@ -823,6 +1017,8 @@ class ThreeLanePlanner(object):
             self.changing = True
 
         v = cfg['speed']
+        if self.ident is not None and self.ident['hyp'] is not None:
+            v = min(v, cfg['slow_speed'])       # 몇 번 차선인지 확인 중 - 천천히
         if free[self.target] < cfg['commit_distance']:
             if not self.logged_blocked:
                 log.warn('[%s] 갈 수 있는 거리가 짧음 (최대 %.2fm) - 감속, %.2fm 안이면 정지'
@@ -861,6 +1057,13 @@ class ThreeLanePlanner(object):
                     else:
                         st, how, extra = None, '차선 방향으로 펴며', ''
                         room = min(self.rollout_back(s_, d, psi, bxs, cfg['backup_distance']), cfg['backup_distance'])
+                    if room < 0.05 and not self.logged_floor:
+                        fl = self._back_floor()
+                        if fl is not None and self._behind_floor(s_ - 0.05 * math.cos(psi), d - 0.05 * math.sin(psi),
+                                                                 psi, fl):
+                            log.warn('[%s] %.1f초 막힘 - 첫 LIMO(s=%.2f) 뒤 입구 사선 구간이라 후진 안 함 (지금 s=%.2f d=%+.2f)'
+                                     % (who, now - self.blocked_since, fl, s_, d))
+                            self.logged_floor = True
                     if room >= 0.05:
                         self.backups += 1
                         self.last_backup_s = s_

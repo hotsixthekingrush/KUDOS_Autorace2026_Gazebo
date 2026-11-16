@@ -12,11 +12,19 @@ lane.corner_hold_sec 동안은 감속을 유지한다. 차선 팀원 시험: 0.4
   (11/15) 최저 비율로 줄이는 조건 = lane.slow_rule: 'quality'(기본) 확신도 < corner_min_confidence 또는
   |방향| > corner_heading_deg. 'single' = 예전처럼 한 선 추정이면 (실차는 한 선이 평소라 거의 항상 최저 속도였음).
   조향은 LaneDriver 의 omega_pd. 팀원 Gazebo: 원본(코너 평균 0.42 m/s) 첫 코너 이탈 -> 이 방식(0.18 m/s) 4/4 통과.
+(11/16 사용자) 3차선 입구 직진 (entry_hold): 우회전을 끝내 차 방향이 3차선 방향(avoid_static.three_lane_axis_deg) 에서
+  entry_hold.start_deg 안으로 들어오면, entry_hold.distance 만큼은 차선을 따라가지 않고 방향만 잡고 곧게 간다.
+  3차선 입구는 사선으로 넓어져서 차선 추종이 왼쪽 선을 따라 왼쪽 차선으로 들어가는 일이 있음 (차선 팀원) -> AVOID_STATIC 이
+  '지금 가운데 차선' 으로 가정하는 것과 어긋남. 들어오던 차선은 가운데 차선으로 곧게 이어지므로 곧게 가면 가운데 차선.
+  트랙이 시계 방향 한 바퀴라 3차선 방향으로 꺾이는 코너는 한 곳뿐. 한 번 하면 방향이 arm_deg 넘게 벗어났다 돌아올 때까지 다시 안 함.
+  판단을 켠 직후(차를 3차선 앞에 놓고 start_yaw_deg:=180)에도 바로 함. 미션 이벤트는 그대로 봄 (AVOID_STATIC 이 오면 거기서 끝).
 """
 
 import math
 
 from ar_mission_supervisor.base_state import SafeState
+from ar_mission_supervisor.controllers import clamp, steering_to_omega
+from ar_mission_supervisor.geometry import normalize_angle
 from ar_mission_supervisor.lane_driver import LaneDriver
 
 
@@ -34,9 +42,11 @@ class LaneFollowing(SafeState):
         self.slow = False
         self.v_cmd = None           # speed_by_lateral: 가속·감속 제한을 건 지금 속도
         self.v_time = None
+        self.hold = None            # (11/16) 3차선 입구 직진 중이면 (시작 x, 시작 y, 고정 방향)
 
     def on_enter(self):
         self.driver.reset()
+        self.hold = None
         self.slow_until = None
         self.slow = False
         self.v_cmd = None
@@ -98,6 +108,48 @@ class LaneFollowing(SafeState):
         node.dbg('lane/speed', self.v_cmd)
         return self.v_cmd
 
+    def _entry_hold(self, now, v):
+        """(11/16) 3차선 입구 직진. 이번 주기 명령을 여기서 보냈으면 True."""
+        node = self.node
+        cfg = getattr(node, 'entry_hold', None)
+        if cfg is None or not cfg['enable'] or not node.avoid_static['three_lane_axis_use']:
+            self.hold = None
+            return False
+        pose = node.odom_pose()
+        if pose is None:
+            self.hold = None
+            return False
+        axis = math.radians(node.avoid_static['three_lane_axis_deg'])
+        err = normalize_angle(axis - pose[2])
+        log = node.get_logger()
+        if self.hold is None:
+            if abs(err) > math.radians(cfg['arm_deg']):
+                node.entry_armed = True
+                return False
+            if not node.entry_armed or abs(err) > math.radians(cfg['start_deg']):
+                return False
+            node.entry_armed = False
+            self.hold = (pose[0], pose[1], axis)
+            log.info('[LANE] 3차선 입구 직진 시작: 방향 %.0f도로 %.1fm (지금 %.0f도, 차선은 안 따라감)'
+                     % (math.degrees(axis), cfg['distance'], math.degrees(pose[2])))
+        dist = math.hypot(pose[0] - self.hold[0], pose[1] - self.hold[1])
+        if dist >= cfg['distance'] or abs(err) > math.radians(cfg['abort_deg']):
+            log.info('[LANE] 3차선 입구 직진 끝 (%.2fm, 방향 오차 %+.0f도) - 차선 따라가기로'
+                     % (dist, math.degrees(err)))
+            self.hold = None
+            self.driver.reset()
+            return False
+        steer = cfg['k_yaw'] * err
+        lane = node.lane_error(now)
+        if lane is not None and cfg['lane_blend'] > 0.0:
+            steer += cfg['lane_blend'] * clamp(lane[2], 0.0, 1.0) * self.driver.lane_steer(lane, now)
+        steer = clamp(steer, -node.max_steer, node.max_steer)
+        v = min(v, cfg['max_speed'])
+        node.publish_cmd(v, steering_to_omega(v, steer, node.wheel_base))
+        node.dbg('lane/entry_hold', dist)
+        node.dbg('lane/entry_hold_err', err)
+        return True
+
     def run(self):
         node = self.node
         while node.ok():
@@ -108,6 +160,9 @@ class LaneFollowing(SafeState):
             if outcome is not None:
                 return outcome
 
-            self.driver.step(self._speed(node.clock_sec()))
+            now = node.clock_sec()
+            v = self._speed(now)
+            if not self._entry_hold(now, v):
+                self.driver.step(v)
             self.sleep()
         return 'aborted'

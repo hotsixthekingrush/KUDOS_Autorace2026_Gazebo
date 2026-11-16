@@ -31,6 +31,7 @@ from ar_msgs.msg import (ObstacleArray, LaneError,
 
 from ar_mission_supervisor.stopline import StopLineTracker
 from ar_mission_supervisor.three_lane import ThreeLanePlanner
+from ar_mission_supervisor.white_lines import WhiteLines
 from ar_mission_supervisor.states.lane_following import LaneFollowing
 from ar_mission_supervisor.states.stub import StubState
 from ar_mission_supervisor.states.traffic_light import TrafficLight
@@ -356,6 +357,10 @@ PARAM_DEFAULTS = {
         'maneuver_goal_ahead': 2.0,    # 지금 자리에서 이만큼 앞까지 [m]
         'maneuver_goal_heading_deg': 20.0,
         'maneuver_goal_lane_tol': 0.15,  # 끝 자리: 차선 가운데에서 이만큼 안 [m]
+        'back_floor': True,            # (11/16) 첫 LIMO 가운데보다 뒤는 입구 사선 구간으로 보고, 뒤로 갈 때 그 사선 밖으로 안 나감
+        'back_floor_offset': 0.10,     # 사선이 끝나는 곳을 첫 LIMO 가운데에서 이만큼 앞(+)/뒤(-)로 [m]
+        'back_floor_slope': 1.0,       # 한계 뒤로 1 m 갈 때 한쪽 폭이 줄어드는 양 [m] (1.0 = 45도, 99 = 한계 뒤는 가운데 차선 폭만)
+        'maneuver_back_floor': True,   # 앞뒤 움직임의 뒤로 가는 조각에도 같은 한계
         'maneuver_max_back': 0.35,     # 시작 자리보다 이만큼 넘게 뒤로는 안 감 (입구 사선 구간 보호) [m]
         'maneuver_margin': 0.02,       # 길 찾을 때 LIMO 박스를 이만큼 더 키움 (없으면 절반 -> 0 으로 다시 찾음) [m]
         'maneuver_check_slack': 0.005, # 움직이는 중 확인은 박스를 이만큼 줄여서 [m]
@@ -497,6 +502,45 @@ PARAM_DEFAULTS = {
     },
 }
 
+PARAM_DEFAULTS['white'] = {
+    # (11/16 사용자·차선 팀원) 흰 점선 노드 /perception/white_status (String JSON) 로 '실제로 몇 번 차선인지' 확인.
+    #   AVOID_STATIC 진입 때 가운데 차선이라는 건 가정일 뿐 (왼쪽 선을 따라 왼쪽 차선으로 들어와 있을 수 있음). white_lines.py, three_lane._ident_step
+    'use': True,               # false = 흰 점선 안 씀 (예전처럼 늘 가운데 차선에서 시작으로 봄)
+    'alive_sec': 1.0,
+    'max_age': 0.5,            # 영상 시각 t 가 이보다 오래됐으면 버림 [s]
+    'min_conf': 0.0,           # conf 가 이보다 낮은 쪽은 못 본 것으로 (팀원: 점수일 뿐 확률 아님 -> 실차 값 보고 정할 것)
+    'min_dash': 2,             # 점선 조각 수가 이보다 적은 쪽은 못 본 것으로
+    'min_offset': 0.03,        # 옆 거리가 이 범위 밖이면 버림 [m] (먼 쪽 점선 0.78 까지)
+    'max_offset': 0.95,
+    'axis_tol_deg': 30.0,      # 차 방향이 3차선 방향에서 이보다 벗어난 동안은 안 모음
+    'heading_tol_deg': 20.0,   # 점선 방향이 3차선 방향과 이보다 다르면 버림 (횡단보도·글씨)
+    'window_sec': 3.0,         # 이 시간 / 이 거리 안의 관측만
+    'window_dist': 1.0,
+    'pair_tol': 0.15,          # 양쪽 다 보일 때 왼쪽 + 오른쪽 = 차선 폭 +- 이 값 [m]
+    'lane_tol': 0.20,          # 차선 가운데에서 이만큼까지 어긋난 건 같은 차선으로 [m]
+    'min_votes': 3,            # 확정에 필요한 관측 수
+    'single_min_votes': 6,     # 한쪽만 보여서 '밀렸을 수도' 로 두는 데 필요한 관측 수
+    'ratio': 0.7,              # 전체 관측 중 이 비율 이상이 같은 말을 해야
+    'use_offset': True,        # 양쪽 다 봤으면 옆 위치도 그 값으로 맞춤
+    'max_fine': 0.15,          # 그렇게 맞추는 양의 한계 [m]
+    'pending_dist': 2.0,       # 진입 뒤 이 거리 / 시간 동안만 확인하고, 못 정하면 처음 가정 그대로 [m] [s]
+    'pending_sec': 10.0,
+    'limo_tol': 0.25,          # 라이다 LIMO 가 차선 가운데에서 이 안이면 그 차선에 놓인 것으로 [m]
+}
+PARAM_DEFAULTS['entry_hold'] = {
+    # (11/16 사용자) 3차선 입구 직진: 우회전을 끝내 차 방향이 3차선 방향(avoid_static.three_lane_axis_deg)에 들어오면,
+    #   넓어지는 구간에서 차선(왼쪽 선)을 따라가지 않고 방향만 잡고 곧게 간다 -> 들어오던 차선이 이어지는 가운데 차선으로.
+    #   차선 팀원: 넓어지면서 왼쪽 선을 따라 왼쪽 차선으로 들어가는 일이 있음. three_lane_axis_use 가 꺼져 있으면 안 함.
+    'enable': True,
+    'arm_deg': 45.0,           # 3차선 방향에서 이만큼 넘게 벗어나 있었어야 (= 코너 전) 다음에 한 번 함. 판단 켠 직후엔 바로 가능
+    'start_deg': 15.0,         # 3차선 방향에서 이 안으로 들어오면 시작
+    'distance': 2.0,           # 이만큼 곧게 간 뒤 차선 따라가기로 [m] (그 전에 AVOID_STATIC 등으로 넘어가면 거기서 끝)
+    'abort_deg': 40.0,         # 도중에 이만큼 넘게 틀어지면 그만
+    'k_yaw': 1.5,              # 조향 = k_yaw x 방향 오차
+    'lane_blend': 0.0,         # 차선 보정을 섞는 비율 (0 = 방향만)
+    'max_speed': 0.3,          # 이 동안 속도 상한 [m/s]
+}
+
 # 파라미터 그룹 -> 노드 속성 이름 (다른 경우만)
 GROUP_ATTR = {'lane': 'lane_gains'}
 
@@ -636,6 +680,8 @@ class MissionSupervisor(Node):
         self._yolo_streak = {}
         self.stopline = StopLineTracker(self)     # 정지선 거리 추정 (State 들이 공유)
         self.three_lane = ThreeLanePlanner(self)  # 3차선 좌표·차선 번호 (AVOID_STATIC -> LEFT_A_RIGHT_B)
+        self.white_lines = WhiteLines(self)       # (11/16) 흰 점선 관측 모음 (몇 번 차선인지 확인용)
+        self.entry_armed = True                   # (11/16) 3차선 입구 직진을 다음에 할 수 있는지
 
         # --- 구독 ---
         store = self._store
@@ -649,6 +695,7 @@ class MissionSupervisor(Node):
         sub(ObstacleArray, '/perception/obstacles',
             store('obstacles', lambda m: list(m.obstacles)), 10)
         sub(Odometry, '/odom', self._cb_odom, 10)
+        sub(String, '/perception/white_status', self._cb_white, 10)
         self._imu_yaw = None       # IMU 방향 (판단 켤 때 0) [rad]
         self._imu_yaw0 = None
         self._dr = None            # odom 속도 + IMU 방향 적분 [x, y, yaw, stamp]
@@ -863,11 +910,21 @@ class MissionSupervisor(Node):
         else:
             self.buf['lane'].value = None        # 차선 유실 -> 페일세이프
 
+    def _cb_white(self, msg):
+        """(11/16) 차선 팀원 흰 점선 노드. 관측만 모아 두고, 쓰는 건 3차선 진입 뒤 (three_lane._ident_step)."""
+        if not self.white['use']:
+            return
+        got = self.white_lines.on_message(msg.data, self.clock_sec(), self.odom_pose())
+        if got is not None:
+            self.dbg('white/left', -1.0 if got[0] is None else got[0])
+            self.dbg('white/right', -1.0 if got[1] is None else got[1])
+
     def _cb_reset(self, msg):
         if msg.data:
             with self._lock:
                 self._reset_flag = True
             self.lockout.clear()
+            self.entry_armed = True
             self.get_logger().warn('외부 리셋 요청 수신')
 
     def _cb_mission_objects(self, msg):

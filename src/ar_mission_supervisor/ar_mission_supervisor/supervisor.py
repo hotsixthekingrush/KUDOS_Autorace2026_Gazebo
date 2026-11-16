@@ -809,7 +809,8 @@ class MissionSupervisor(Node):
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         if self._imu_yaw0 is None:
             self._imu_yaw0 = yaw
-            self.get_logger().info('%s 들어옴 - 지금 방향을 0 으로 하고 위치 계산 시작' % self.imu_topic)
+            self.get_logger().info('%s 들어옴 - 지금 방향을 %.0f도(start_yaw_deg)로 하고 위치 계산 시작'
+                                   % (self.imu_topic, self.start_yaw_deg))   # (11/17) 예전 글은 늘 '0' 이라 헷갈림
         d = yaw - self._imu_yaw0 + math.radians(self.start_yaw_deg)   # (11/16) 켤 때 방향 = start_yaw_deg
         self._imu_yaw = math.atan2(math.sin(d), math.cos(d))
 
@@ -1097,7 +1098,7 @@ class MissionSupervisor(Node):
 
     def _publish_pose_dbg(self):
         """(11/13) 실차 확인용, 0.5 초마다. ros2 topic echo /supervisor/debug/pose
-        판단이 쓰는 차 위치(몸통 가운데, 판단 켤 때 방향 0)와 비교용 /odom 그대로(드라이버 켤 때 0)를 한 줄 글로.
+        판단이 쓰는 차 위치(몸통 가운데, 판단 켤 때 방향 = start_yaw_deg)와 비교용 /odom 그대로(드라이버 켤 때 0, start_yaw_deg 안 씀)를 한 줄 글로.
         숫자만은 pose/x, pose/y, pose/yaw_deg (rqt_plot 용)."""
         if not self.debug['enabled']:
             return
@@ -1113,7 +1114,7 @@ class MissionSupervisor(Node):
             self.dbg('pose', '위치가 오래됨 (/odom 끊김?)')
             return
         x, y, yaw = pose
-        self.dbg('pose', 'x %+.2f  y %+.2f  방향 %+.1f도 (%s) | /odom 그대로: x %+.2f  y %+.2f  방향 %+.1f도'
+        self.dbg('pose', 'x %+.2f  y %+.2f  방향 %+.1f도 (%s, 판단이 씀) | 참고 /odom 그대로 (드라이버 기준, 켤 때 0): x %+.2f  y %+.2f  방향 %+.1f도'
                  % (x, y, math.degrees(yaw), self.odom_heading_source,
                     raw[0], raw[1], math.degrees(raw[2])))
         self.dbg('pose/x', x)

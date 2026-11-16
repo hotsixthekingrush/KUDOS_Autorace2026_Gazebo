@@ -46,6 +46,22 @@ step(now, goal) 한 번 = 한 제어 주기:
   - (11/04 사용자 요청) 선 채로 backup_after 초가 지나면, 뒤가 비어 있을 때 backup_speed 로 backup_distance 만큼
     후진하고(차 방향을 차선 방향으로 펴면서) 다시 계산한다. 한 미션에 backup_max 번까지. LIMO 는 안 움직여서
     서서 기다리기만 하면 계속 막혀 있고, 규정상 진행 불가는 미션 처음부터 재출발이라서.
+  - (11/16 사용자) 한 번 후진으론 안 풀릴 때 앞뒤로 움직여 빠져나갈 길을 찾는다 (maneuver, 하이브리드 A*): 앞/뒤 x 조향
+    (왼쪽 끝/0/오른쪽 끝) 0.1 m 조각을 이어 붙여, LIMO 박스·바깥 선에 안 닿고 시작 자리보다 maneuver_max_back 넘게
+    뒤로 안 가면서 maneuver_goal_ahead 앞의 차선 가운데(방향 maneuver_goal_heading_deg 안)까지 가는 가장 싼 길
+    (뒤로 가기·앞뒤 바꾸기에 비용). 찾으면 조각대로 움직이고 (조향 바뀔 땐 서서 바퀴부터 돌림), 움직이며 지도로 계속
+    확인해 닿을 것 같거나 예상 자리에서 어긋나면 다시 찾음. 못 찾으면 아래 후진으로.
+    순서: 막히고 backup_after 뒤 아래 후진 고르기(search)를 먼저 해 보고, 고른 후진 뒤 앞 거리가 maneuver_if_reach_below
+    넘게 나오면 그 후진(빠름). 안 나오거나, 후진했던 자리 maneuver_after_backup_within 안에서 또 막히면 앞뒤 움직임.
+    길은 LIMO 박스를 maneuver_margin 키워서 찾고(안 나오면 0.01, 0), 움직일 땐 maneuver_check_slack 줄인 박스로 확인.
+    움직이다 보통 계획으로 끝까지 갈 차선이 생기고 방향이 maneuver_handback_deg 안이면 차선 따라가기로 돌아감.
+    static_1116_1 (실차): 두 줄 LIMO 가 1 m 사이로 열린 차선이 반대 -> 차선 가운데로만 가는 계획으론 못 지나가고
+    같은 자리를 오감. 녹화 지도로 찾으면 앞뒤 바꿈 3~7번, 3.5~4.7 m 로 지나감 (차 방향을 60~80도까지 틀어 비스듬히 건넘).
+    static_noise 실차 설정 40번 (후진 고르기만 -> 앞뒤 움직임 넣은 뒤): 간격 0.48 34 -> 39 (평균 36초), 0.46 7 -> 38 (43초),
+    0.55/0.50/0.75 40 -> 40 (24/25/31초), 0.55 유령 LIMO 31 -> 32, Gazebo 28 -> 31.
+    static_1116_1 배치 (LAYOUT="1.12:1,1.80:0,1.89:1,2.80:1,2.90:2" X0=9.09 Y0=0.03): 똑바로 진입 40/40 (22초),
+    20도 틀어 진입 39/40 (49초), 39도(녹화 때) 39/40 (46초). 예전 코드는 10번씩 10 / 0 / 0.
+    조심: 최소 회전 반경은 실측 조향 한계 0.33 rad 로 약 0.58 m (0.46 아님). 실차 odom 이 조각마다 어긋나면 다시 찾느라 더 걸림.
   - (11/16 사용자) 후진을 꼭 차선과 평행하게 펴지 않는다 (backup_mode 'search'). 막히면 backup_after 뒤,
     조향 6가지(차선 방향으로 펴기 + 고정 조향 -최대/-반/0/+반/+최대) x 후진 거리(backup_search_dists) 를 지도(LIMO 박스)로
     굴려 보고, LIMO 에 닿거나 3차선 바깥 선을 넘는(edge_check, 앞으로 굴릴 때와 같은 검사) 후진은 버린다.
@@ -61,7 +77,7 @@ step(now, goal) 한 번 = 한 제어 주기:
 import math
 
 from ar_mission_supervisor.controllers import clamp, steering_to_omega
-from ar_mission_supervisor.geometry import find_largest_gap
+from ar_mission_supervisor.geometry import find_largest_gap, normalize_angle
 from ar_mission_supervisor.lane_frame import LaneFrame, ObstacleMap, pursue
 
 
@@ -90,6 +106,9 @@ class ThreeLanePlanner(object):
         self.max_obstacle_s = None
         self.blocked_since = None
         self.backing = None         # 후진 중이면 (시작 x, 시작 y, 조향 또는 None, 거리)
+        self.maneuver = None        # (11/16) 앞뒤로 움직여 빠져나가는 중이면 그 계획
+        self.maneuvers = 0
+        self.last_backup_s = None   # 마지막으로 후진을 시작한 자리 s (그 근처에서 또 막히면 후진 말고 앞뒤 움직임)
         self.backups = 0
         self.target_since = -1e9
         self.lat_snap_pending = False   # 옆 위치를 LIMO 로 맞춰야 하는지 (차 위치 기준일 때, 11/12)
@@ -135,6 +154,9 @@ class ThreeLanePlanner(object):
         self.blocked_since = None
         self.backing = None
         self.backups = 0
+        self.maneuver = None
+        self.maneuvers = 0
+        self.last_backup_s = None
         self.target_since = -1e9
         self.active = True
         self.released_at = None
@@ -492,6 +514,200 @@ class ThreeLanePlanner(object):
         """후진하며 dist 만큼 굴려 보고, 닿기(또는 바깥 선 넘기) 전까지 간 거리 [m]."""
         return self._back_sim(s0, d0, psi0, boxes, dist, steer)[0]
 
+    # ---------------- (11/16 사용자) 앞뒤로 움직여 빠져나가기 (하이브리드 A*) ----------------
+    def _maneuver_plan(self, s0, d0, psi0, boxes, now):
+        """막힌 자리에서 앞/뒤 x 조향(왼쪽 끝/0/오른쪽 끝) 조각을 이어 붙여 앞으로 maneuver_goal_ahead 넘게 나가는 길.
+        LIMO 박스에 닿거나 바깥 선을 넘거나 시작 자리보다 maneuver_max_back 넘게 뒤로 가는 길은 버림.
+        반환: [{'dir', 'steer', 'len', 'end': (s, d, psi)}] (같은 조각은 합침) 또는 None."""
+        import heapq
+        import time as _time
+        cfg = self.cfg
+        wb = self.node.wheel_base
+        ms = self.node.max_steer
+        step = cfg['maneuver_step']
+        n_sub = max(2, int(round(step / 0.035)))
+        ds = step / n_sub
+        shapes = self._shapes()
+        s_min = s0 - cfg['maneuver_max_back']
+        goal_s = s0 + cfg['maneuver_goal_ahead']
+        goal_psi = math.radians(cfg['maneuver_goal_heading_deg'])
+        band = cfg['maneuver_goal_lane_tol']
+        reach_s = goal_s + 0.6
+        bxs = [b for b in boxes if s_min - 0.6 <= b[0] <= reach_s]
+        prims = [(dr, st) for dr in (1, -1) for st in (-ms, 0.0, ms)]
+        rs, rd, rp = 0.04, 0.04, math.radians(7.5)
+
+        def move(s_, d, psi, dr, st):
+            for _ in range(n_sub):
+                psi += dr * ds * math.tan(st) / wb
+                s_ += dr * ds * math.cos(psi)
+                d += dr * ds * math.sin(psi)
+                if (s_ < s_min or self._off_edge(d, psi) or self._car_hits(s_, d, psi, bxs, shapes)):
+                    return None
+            return s_, d, psi
+
+        def is_goal(s_, d, psi):
+            return (s_ >= goal_s and abs(psi) <= goal_psi
+                    and min(abs(d - self.center(ln)) for ln in self.LANES) <= band)
+
+        t_end = _time.time() + cfg['maneuver_time_budget']
+        nodes = [((s0, d0, psi0), -1, None)]
+        openq = [(max(0.0, goal_s - s0), 0.0, 0, 0, None)]
+        seen = {}
+        found = None
+        n = 0
+        while openq and n < cfg['maneuver_max_nodes']:
+            if (n & 255) == 0 and _time.time() > t_end:
+                break
+            _, g, idx, prev, prev_st = heapq.heappop(openq)
+            n += 1
+            st_ = nodes[idx][0]
+            if is_goal(*st_):
+                found = idx
+                break
+            k = (int(round(st_[0] / rs)), int(round(st_[1] / rd)), int(round(st_[2] / rp)))
+            if k in seen and seen[k] <= g:
+                continue
+            seen[k] = g
+            for dr, st in prims:
+                nx = move(st_[0], st_[1], st_[2], dr, st)
+                if nx is None or abs(nx[2]) > math.radians(100.0):
+                    continue
+                ng = (g + step * (1.0 if dr > 0 else cfg['maneuver_back_cost'])
+                      + (cfg['maneuver_switch_cost'] if prev != 0 and dr != prev else 0.0)
+                      + (cfg['maneuver_steer_cost'] if prev_st is not None and st != prev_st else 0.0))
+                nk = (int(round(nx[0] / rs)), int(round(nx[1] / rd)), int(round(nx[2] / rp)))
+                if nk in seen and seen[nk] <= ng:
+                    continue
+                nodes.append((nx, idx, (dr, st)))
+                heapq.heappush(openq, (ng + max(0.0, goal_s - nx[0]), ng, len(nodes) - 1, dr, st))
+        self.node.dbg('static/maneuver_nodes', float(n))
+        if found is None:
+            return None
+        seq = []
+        i = found
+        while i > 0:
+            st_, pi, prim = nodes[i]
+            seq.append((prim, st_))
+            i = pi
+        seq.reverse()
+        segs = []
+        for (dr, st), end in seq:
+            if segs and segs[-1]['dir'] == dr and segs[-1]['steer'] == st:
+                segs[-1]['len'] += step
+                segs[-1]['end'] = end
+            else:
+                segs.append({'dir': dr, 'steer': st, 'len': step, 'end': end})
+        return segs
+
+    def _start_maneuver(self, pose, s_, d, psi, now, who, why):
+        cfg = self.cfg
+        log = self.node.get_logger()
+        import time as _time
+        t0 = _time.time()
+        # 길은 박스를 maneuver_margin 만큼 키워서 찾음 (움직일 땐 원래 박스로 확인 -> 그만큼 어긋나도 됨).
+        #   그렇게는 길이 없으면 절반, 그래도 없으면 안 키우고 찾음 (촘촘한 배치)
+        segs = None
+        for mg in (cfg['maneuver_margin'], 0.5 * cfg['maneuver_margin'], 0.0):
+            big = [(bs, bd, hl + mg, hw + mg) for bs, bd, hl, hw in self._all_boxes()]
+            segs = self._maneuver_plan(s_, d, psi, self._relax(big, s_, d, psi), now)
+            if segs is not None or mg <= 0.0:
+                break
+        dt = _time.time() - t0
+        if segs is None:
+            log.warn('[%s] %s - 앞뒤로 움직여 빠져나갈 길도 못 찾음 (계산 %.1f초)' % (who, why, dt))
+            self.maneuver = None
+            return False
+        flips = sum(1 for a, b in zip(segs, segs[1:]) if a['dir'] != b['dir'])
+        log.warn('[%s] %s - 앞뒤로 움직여 빠져나감: 조각 %d개, 앞뒤 바꿈 %d번, 총 %.1fm (계산 %.1f초) [%s]'
+                 % (who, why, len(segs), flips, sum(g['len'] for g in segs), dt,
+                    ' '.join('%s%.1f%s' % ('앞' if g['dir'] > 0 else '뒤', g['len'],
+                                           'L' if g['steer'] > 0 else ('R' if g['steer'] < 0 else '0')) for g in segs)))
+        self.maneuver = {'segs': segs, 'i': 0, 'xy': (pose[0], pose[1]),
+                         'settle_until': now + cfg['maneuver_settle'], 'replans': 0}
+        return True
+
+    def _maneuver_step(self, pose, s_, d, psi, now, who):
+        """앞뒤 움직임 한 박자. 계속 움직이는 중이면 True (이번 박자 명령 냄), 끝났거나 그만두면 False."""
+        node = self.node
+        cfg = self.cfg
+        m = self.maneuver
+        seg = m['segs'][m['i']]
+        node.dbg('static/mode', 'maneuver')
+        node.dbg('static/maneuver_seg', float(m['i']))
+        if now < m['settle_until']:
+            node.publish_steer_hold(seg['steer'])           # 서서 바퀴부터 돌려 놓음
+            return True
+        done = math.hypot(pose[0] - m['xy'][0], pose[1] - m['xy'][1])
+        left = seg['len'] - done
+        bxs = self._relax(self._all_boxes(), s_, d, psi)
+        look = min(0.06, max(0.0, left) + 0.02)
+        sl = cfg['maneuver_check_slack']        # 움직일 때 확인은 이만큼 덜 깐깐하게 (계획과 몇 mm 차이로 멈추지 않게)
+        chk = [(bs, bd, hl - sl, hw - sl) for bs, bd, hl, hw in bxs]
+        if self._seg_hits(s_, d, psi, seg['dir'], seg['steer'], look, chk):
+            return self._replan_maneuver(pose, s_, d, psi, now, who, '움직이다 LIMO 에 닿을 것 같음')
+        if left <= 0.0:
+            es, ed, ep = seg['end']
+            off_d, off_p = abs(d - ed), abs(normalize_angle(psi - ep))
+            m['i'] += 1
+            m['xy'] = (pose[0], pose[1])
+            if m['i'] >= len(m['segs']):
+                node.get_logger().info('[%s] 앞뒤로 움직여 빠져나옴 (s=%.2f d=%+.2f %.0f도) - 다시 차선 따라감'
+                                       % (who, s_, d, math.degrees(psi)))
+                self.maneuver = None
+                self.blocked_since = None
+                self.logged_blocked = False
+                return False
+            if off_d > cfg['maneuver_tol_d'] or off_p > math.radians(cfg['maneuver_tol_deg']):
+                return self._replan_maneuver(pose, s_, d, psi, now, who,
+                                             '예상 자리와 어긋남 (옆 %.2fm, 방향 %.0f도)' % (off_d, math.degrees(off_p)))
+            nxt = m['segs'][m['i']]
+            if nxt['dir'] > 0 and seg['dir'] > 0 and abs(psi) <= math.radians(cfg['maneuver_handback_deg']):
+                # 좁은 데를 빠져나왔으면 (보통 계획으로 끝까지 갈 차선이 있으면) 남은 조각은 버리고 차선 따라가기로
+                info, horizon = self.plan(s_, d, psi, bxs)
+                if max(v_['reach'] for v_ in info.values()) >= horizon - 1e-6:
+                    node.get_logger().info('[%s] 좁은 데를 빠져나옴 (s=%.2f d=%+.2f %.0f도, 조각 %d/%d) - 다시 차선 따라감'
+                                           % (who, s_, d, math.degrees(psi), m['i'], len(m['segs'])))
+                    self.maneuver = None
+                    self.blocked_since = None
+                    self.logged_blocked = False
+                    return False
+            if nxt['dir'] != seg['dir'] or abs(nxt['steer'] - seg['steer']) >= cfg['maneuver_settle_steer']:
+                m['settle_until'] = now + cfg['maneuver_settle']
+                node.publish_stop()
+                return True
+            seg = nxt
+        v = cfg['maneuver_speed'] if seg['dir'] > 0 else -cfg['maneuver_back_speed']
+        node.publish_cmd(v, steering_to_omega(v, seg['steer'], node.wheel_base))
+        return True
+
+    def _seg_hits(self, s_, d, psi, dr, st, dist, boxes):
+        wb = self.node.wheel_base
+        shapes = self._shapes()
+        ds = 0.02
+        t = 0.0
+        while t < dist - 1e-9:
+            psi += dr * ds * math.tan(st) / wb
+            s_ += dr * ds * math.cos(psi)
+            d += dr * ds * math.sin(psi)
+            t += ds
+            if self._car_hits(s_, d, psi, boxes, shapes) or self._off_edge(d, psi):
+                return True
+        return False
+
+    def _replan_maneuver(self, pose, s_, d, psi, now, who, why):
+        self.node.publish_stop()
+        m = self.maneuver
+        if m['replans'] >= self.cfg['maneuver_max_replans']:
+            self.node.get_logger().warn('[%s] %s - 다시 찾기 %d번 넘음, 앞뒤 움직임 그만' % (who, why, m['replans']))
+            self.maneuver = None
+            return False
+        replans = m['replans'] + 1
+        if self._start_maneuver(pose, s_, d, psi, now, who, why + ' - 다시 찾음'):
+            self.maneuver['replans'] = replans
+            return True
+        return False
+
     def _choose_backup(self, s_, d, psi, boxes, now_reach):
         """(11/16) 후진 후보 중 앞으로 갈 거리가 가장 길어지는 것. (조향 또는 None, 거리, 그 뒤 앞 거리) 또는 None."""
         cfg = self.cfg
@@ -557,6 +773,8 @@ class ThreeLanePlanner(object):
 
         if self.backing is not None and self._back_step(pose, s_, d, psi, now, who):
             return StepResult(pose, s_, d, psi, blocked=True)
+        if self.maneuver is not None and self._maneuver_step(pose, s_, d, psi, now, who):
+            return StepResult(pose, s_, d, psi, blocked=True)
 
         boxes = self._relax(self._boxes(s_), s_, d, psi, who)
         # 차선마다 굴려 봄: 보통(lookahead) / 급하게(lookahead_short, 11/04) x 한 번 더 옆 차선으로 옮기기(11/05)
@@ -615,11 +833,26 @@ class ThreeLanePlanner(object):
                 node.dbg('static/mode', 'stop')
                 if self.blocked_since is None:
                     self.blocked_since = now
-                elif (now - self.blocked_since >= cfg['backup_after'] and self.backups < cfg['backup_max']):
+                elif now - self.blocked_since >= cfg['backup_after']:
                     bxs = self._relax(self._all_boxes(), s_, d, psi)
                     pick = None
-                    if cfg['backup_mode'] == 'search':
+                    if cfg['backup_mode'] == 'search' and self.backups < cfg['backup_max']:
                         pick = self._choose_backup(s_, d, psi, bxs, max(reach.values()))
+                    # (11/16) 한 번 후진으로 충분히 뚫리면 (앞 maneuver_if_reach_below 넘게) 그게 빠름.
+                    #   아니면 앞뒤로 움직여 빠져나갈 길을 찾고, 그것도 없으면 후진
+                    quick = (pick is not None and pick[2] >= cfg['maneuver_if_reach_below']
+                             and (self.last_backup_s is None
+                                  or abs(s_ - self.last_backup_s) > cfg['maneuver_after_backup_within']))
+                    if (not quick and cfg['maneuver'] and self.maneuvers < cfg['maneuver_max']
+                            and self._start_maneuver(pose, s_, d, psi, now, who,
+                                                     '%.1f초 막힘 (차선별 갈 거리 %s)' % (
+                                                         now - self.blocked_since,
+                                                         ' '.join('%s=%.2f' % (self.name(ln), free[ln])
+                                                                  for ln in self.LANES)))):
+                        self.maneuvers += 1
+                        return StepResult(pose, s_, d, psi, blocked=True)
+                    if self.backups >= cfg['backup_max']:
+                        return StepResult(pose, s_, d, psi, blocked=True)
                     if pick is not None:
                         st, dist, ahead = pick
                         how = '조향 %+.2f' % st if st is not None else '차선 방향으로 펴며'
@@ -630,6 +863,7 @@ class ThreeLanePlanner(object):
                         room = min(self.rollout_back(s_, d, psi, bxs, cfg['backup_distance']), cfg['backup_distance'])
                     if room >= 0.05:
                         self.backups += 1
+                        self.last_backup_s = s_
                         self.backing = (pose[0], pose[1], st, room)
                         log.warn('[%s] %.1f초 막힘 - %.2fm 후진 (%s)%s 후 다시 계산 (%d/%d번째, 차선별 갈 거리 %s)'
                                  % (who, now - self.blocked_since, room, how, extra,

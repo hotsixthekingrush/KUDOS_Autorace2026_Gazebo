@@ -349,6 +349,31 @@ PARAM_DEFAULTS = {
         'backup_mode': 'search',
         'backup_search_dists': [0.20, 0.30, 0.40],
         'backup_min_gain': 0.05,   # 지금보다 앞 거리가 이만큼 넘게 길어지는 후진이 없으면 예전처럼 펴며 후진 [m]
+        # (11/16 사용자) 막히면 앞뒤로 움직여 빠져나가기 (하이브리드 A*, three_lane.py 위 설명)
+        'maneuver': True,
+        'maneuver_max': 4,             # 한 미션에 몇 번까지
+        'maneuver_step': 0.10,         # 조각 길이 [m]
+        'maneuver_goal_ahead': 2.0,    # 지금 자리에서 이만큼 앞까지 [m]
+        'maneuver_goal_heading_deg': 20.0,
+        'maneuver_goal_lane_tol': 0.15,  # 끝 자리: 차선 가운데에서 이만큼 안 [m]
+        'maneuver_max_back': 0.35,     # 시작 자리보다 이만큼 넘게 뒤로는 안 감 (입구 사선 구간 보호) [m]
+        'maneuver_margin': 0.02,       # 길 찾을 때 LIMO 박스를 이만큼 더 키움 (없으면 절반 -> 0 으로 다시 찾음) [m]
+        'maneuver_check_slack': 0.005, # 움직이는 중 확인은 박스를 이만큼 줄여서 [m]
+        'maneuver_back_cost': 1.5,     # 뒤로 1 m = 앞으로 1.5 m 로 침
+        'maneuver_switch_cost': 0.4,   # 앞뒤 바꿀 때마다 더하는 값 [m]
+        'maneuver_steer_cost': 0.05,   # 조향 바꿀 때마다 더하는 값 [m]
+        'maneuver_if_reach_below': 1.2,  # 한 번 후진으로 앞 거리가 이만큼 안 나올 때만 앞뒤 움직임 (나오면 후진이 빠름) [m]
+        'maneuver_after_backup_within': 0.8,  # 후진했던 자리에서 이 거리 안에 또 막히면 후진 말고 앞뒤 움직임 [m]
+        'maneuver_handback_deg': 30.0, # 움직이는 중 방향이 이 안이고 보통 계획으로 끝까지 갈 차선이 생기면 차선 따라가기로
+        'maneuver_max_nodes': 30000,
+        'maneuver_time_budget': 3.0,   # 길 찾기 최대 계산 시간 [s] (그동안 차는 서 있음)
+        'maneuver_speed': 0.15,        # 앞으로 [m/s]
+        'maneuver_back_speed': 0.10,   # 뒤로 [m/s]
+        'maneuver_settle': 0.6,        # 앞뒤가 바뀌거나 조향이 크게 바뀔 때 서서 바퀴 돌리는 시간 [s]
+        'maneuver_settle_steer': 0.5,  # 조향이 이만큼 넘게 바뀌면 (왼쪽 끝 <-> 오른쪽 끝) 서서 돌림 [rad]
+        'maneuver_tol_d': 0.06,        # 조각 끝에서 예상 자리와 옆으로 이만큼 넘게 어긋나면 다시 찾음 [m]
+        'maneuver_tol_deg': 10.0,
+        'maneuver_max_replans': 4,
         'backup_k_heading': 1.5,   # 후진하며 차 방향을 차선 방향으로 펴는 게인 [rad/rad]
         'settle_tolerance': 0.08,  # 목표 차선 중앙 +- 이 안 + 방향 오차 settle_heading 이하면 변경 완료
         'settle_heading': 0.20,
@@ -359,7 +384,7 @@ PARAM_DEFAULTS = {
         'ghost_margin': 0.05,      # 겹침 판정 때 박스 길이·폭에 더하는 값 [m]
         'exit_clear_distance': 0.8,  # 마지막 장애물을 지나 이만큼 더 가면 종료 [m]
         'max_distance': 7.0,       # 진입 후 최대 주행거리 (3차선 직선 5.5 m) [m]
-        'max_duration': 40.0,
+        'max_duration': 90.0,      # (11/16 40 -> 90) 앞뒤로 움직여 빠져나가면 한 번에 30~60초 걸릴 수 있음
         'context_timeout': 5.0,    # 끝난 뒤 이 시간 안에 A/B 가 오면 차선 번호를 넘겨줌 [s]
         # (11/12 사용자 선택) 카메라 차선을 못 믿어 차 방향을 기준으로 쓸 때, 트랙 축(axis_ref_deg + 90도 단위)에서
         #   axis_snap_max_deg 안이면 그 축으로 맞춤. Gazebo pd_lane_run3: 코너 16도 덜 돈 채(-164도) 진입 -> 바깥 선 위.
@@ -1287,6 +1312,13 @@ class MissionSupervisor(Node):
         msg.steering_angle = float(self.ackermann_steer(v, omega))
         self.cmd_pub.publish(msg)
         self.last_v = float(v)
+
+    def publish_steer_hold(self, steer):
+        """(11/16) 서 있는 채로 바퀴 조향만 맞춰 둠 (자전거 모델 조향각 steer). 애커만 출력일 때만, Twist 면 그냥 정지."""
+        if self.ack_msg_type is not None:
+            lim = self.ackermann_max_steer
+            self.last_ack_steer = max(-lim, min(lim, float(steer) * self.ackermann_steer_scale))
+        self.publish_stop()
 
     def publish_stop(self):
         if self.ack_msg_type is not None:

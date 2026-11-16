@@ -315,12 +315,17 @@ class ThreeLanePlanner(object):
         n, supp, excl = v['n'], v['supp'], v['excl']
         node.dbg('static/white_n', float(n))
         cand = [k for k in (-1, 0, 1) if supp[k] >= cfg['min_votes'] and supp[k] >= cfg['ratio'] * n]
+        # 확정: 그 k 로만 설명되는 관측이 min_votes 번 넘고, 다른 k 로만 설명되는 관측은 거의 없을 때
+        #   (대표 점선이 늘 가까운 줄은 아님 - 왼쪽 차선에서 오른쪽 0.26 과 0.78 이 섞여 와도 0.78 쪽이 가려 줌)
+        strong = [k for k in (-1, 0, 1) if excl[k] >= cfg['min_votes']]
         both_n, left_n, right_n = v['kinds']
         seen_txt = '양쪽 %d번, 왼쪽만 %d번, 오른쪽만 %d번' % (both_n, left_n, right_n)
-        if len(cand) == 1 and excl[cand[0]] >= cfg['min_votes']:
-            return self._ident_confirm(cand[0], v['fine'][cand[0]], d, now, who, '흰 점선 ' + seen_txt)
+        node.dbg('static/white_kinds', seen_txt)
+        if (len(strong) == 1 and strong[0] in cand
+                and all(excl[k] <= (1.0 - cfg['ratio']) * n for k in (-1, 0, 1) if k != strong[0])):
+            return self._ident_confirm(strong[0], v['fine'][strong[0]], d, now, who, '흰 점선 ' + seen_txt)
         hyp = None
-        if len(cand) == 2 and 0 in cand and n >= cfg['single_min_votes']:
+        if not strong and len(cand) == 2 and 0 in cand and n >= cfg['single_min_votes']:
             hyp = cand[0] if cand[1] == 0 else cand[1]
         if hyp is None:
             return False

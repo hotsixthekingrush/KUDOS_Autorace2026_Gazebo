@@ -27,7 +27,9 @@ class WhiteLines(object):
         self.node = node
         self.hist = collections.deque(maxlen=400)   # (받은 시각, (x, y, yaw) 또는 None, 왼쪽 거리 또는 None, 오른쪽 거리 또는 None)
         self.last_rx = -1e9
-        self.dropped_old = 0
+        self.last_t = None          # 마지막으로 받은 영상 시각 (같은 영상을 두 번 세지 않게 - 차선 팀원 요청)
+        self.old_run = 0            # 연달아 '오래된 영상' 으로 버린 수
+        self.old_warned = False
 
     @property
     def cfg(self):
@@ -49,10 +51,18 @@ class WhiteLines(object):
         self.last_rx = now
         t = data.get('t')
         if isinstance(t, (int, float)) and not isinstance(t, bool):
+            if self.last_t is not None and float(t) == self.last_t:
+                return None                           # 같은 영상의 결과가 또 옴 - 한 번만 셈
+            self.last_t = float(t)
             age = now - float(t)
             if cfg['max_age'] < age < 60.0:          # 오래된 영상. (60초 넘게 다르면 시계가 다른 것 - 받은 시각만 믿음)
-                self.dropped_old += 1
+                self.old_run += 1
+                if self.old_run >= 20 and not self.old_warned:
+                    self.old_warned = True
+                    self.node.get_logger().warn('흰 점선 영상이 %.1f초씩 늦게 옴 - 전부 버리는 중 (white.max_age %.1f초)'
+                                                % (age, cfg['max_age']))
                 return None
+            self.old_run = 0
         expect = self._expected_heading(pose)
         if expect is False:
             return None                               # 3차선 방향이 아님 (코너 도는 중 등) - 안 모음

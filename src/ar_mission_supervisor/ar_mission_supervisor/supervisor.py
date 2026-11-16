@@ -286,6 +286,7 @@ PARAM_DEFAULTS = {
         'a_lane': 0,               # odom 모드에서 A(좌) 경로로 이어지는 차선 (0 왼쪽, 1 가운데, 2 오른쪽)
         'b_lane': 2,
         'odom_hold_distance': 0.6, # 목표 차선 도착 후 이만큼 더 간 뒤 종료 [m]
+        'odom_max_duration': 90.0, # (11/16) 3차선 이어받은 뒤 앞뒤 움직임을 했으면 이 시간까지 (max_duration 20 은 앞뒤 움직임보다 짧음)
         # (11/13) 카메라 방식: 옮기는 중 차선 노드가 '지금 들어간 차선' 기준으로 바뀌면 lateral 이 차선 폭만큼 튐 -> 목표 이동량에서 뺌
         'lane_jump': True,
         'jump_max_gap': 1.0,       # 이 시간 안의 연속 차선 값끼리만 비교 [s]
@@ -361,6 +362,9 @@ PARAM_DEFAULTS = {
         'back_floor_offset': 0.10,     # 사선이 끝나는 곳을 첫 LIMO 가운데에서 이만큼 앞(+)/뒤(-)로 [m]
         'back_floor_slope': 1.0,       # 한계 뒤로 1 m 갈 때 한쪽 폭이 줄어드는 양 [m] (1.0 = 45도, 99 = 한계 뒤는 가운데 차선 폭만)
         'maneuver_back_floor': True,   # 앞뒤 움직임의 뒤로 가는 조각에도 같은 한계
+        'maneuver_max_heading_deg': 100.0, # (11/16) 앞뒤 움직임 중 차 방향 한계 (3차선 방향 기준) [도]. 60/75 는 static_1116_1 배치를 못 지나감
+        'reenter_keep': True,          # (11/16) 3차선에서 끝난 뒤 reenter_sec 안에 다시 들어오면 전 기준 좌표·지도를 이어 씀
+        'reenter_sec': 10.0,
         'maneuver_max_back': 0.35,     # 시작 자리보다 이만큼 넘게 뒤로는 안 감 (입구 사선 구간 보호) [m]
         'maneuver_margin': 0.02,       # 길 찾을 때 LIMO 박스를 이만큼 더 키움 (없으면 절반 -> 0 으로 다시 찾음) [m]
         'maneuver_check_slack': 0.005, # 움직이는 중 확인은 박스를 이만큼 줄여서 [m]

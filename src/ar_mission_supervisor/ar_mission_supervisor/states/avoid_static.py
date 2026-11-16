@@ -20,6 +20,8 @@
 규정: 접촉 시 1점 감점, 15초 이내 미진입 시 실패, 체크포인트 거리 비례 부분점수.
 """
 
+import math
+
 from ar_mission_supervisor.base_state import SafeState
 
 
@@ -37,6 +39,19 @@ class AvoidStatic(SafeState):
     def on_enter(self):
         node = self.node
         self.entered_at = node.clock_sec()
+        cfg = node.avoid_static
+        # (11/16 static_1116_2) 3차선에서 끝난 지 얼마 안 됐으면 기준 좌표를 새로 잡지 않고 이어 씀.
+        #   실차: LEFT_A_RIGHT_B 시간 초과 뒤 차가 71도 틀어진 채 다시 들어와 '3차선 방향 안 씀' -> 트랙 축 -90 을 길로 잡고 반대로 감
+        if cfg['reenter_keep'] and self.plan.fresh_within(self.entered_at, cfg['reenter_sec']):
+            car = self.plan.reenter(self.entered_at)
+            if car is not None:
+                self.gap_mode = False
+                node.get_logger().warn('[AVOID_STATIC] 다시 진입 - 전 기준 좌표·LIMO 지도 이어 씀 (지금 %s 차선, d=%+.2fm, '
+                                       '차 방향이 3차선 방향과 %+.0f도%s)'
+                                       % (self.plan.name(self.plan.lane), car[2], math.degrees(car[3]),
+                                          '' if self.plan.ab_goal is None
+                                          else ', A/B 목표 %s 차선 이어 감' % self.plan.name(self.plan.ab_goal)))
+                return
         ok = self.plan.begin(node.avoid_static['start_lane'])
         self.gap_mode = not ok
         if ok:
@@ -73,7 +88,7 @@ class AvoidStatic(SafeState):
                 self.sleep()
                 continue
 
-            res = plan.step(now, goal=None, who='AVOID_STATIC')
+            res = plan.step(now, goal=plan.ab_goal, who='AVOID_STATIC')     # (11/16) A/B 를 이미 봤으면 그 차선으로
             if res is None:
                 node.get_logger().warn('[AVOID_STATIC] odom 끊김 - 빈 공간 따라가기로 전환')
                 self.gap_mode = True

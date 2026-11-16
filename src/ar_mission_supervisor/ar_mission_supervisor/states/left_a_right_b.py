@@ -86,9 +86,15 @@ class LeftARightB(SafeState):
                 return 'aborted'
 
             now = node.clock_sec()
-            if now - self.entered_at > cfg['max_duration']:
-                node.get_logger().warn('[LEFT_A_RIGHT_B] 제한시간 초과 - 복귀')
-                self.plan.finish()
+            limit = cfg['max_duration']
+            if self.odom_mode and self.plan.maneuvers > 0:
+                limit = max(limit, cfg['odom_max_duration'])     # (11/16) 앞뒤 움직임은 30~60초 걸림
+            if now - self.entered_at > limit:
+                node.get_logger().warn('[LEFT_A_RIGHT_B] 제한시간 초과 (%.0f초) - 복귀' % limit)
+                if self.odom_mode:
+                    self.plan.release(now)      # (11/16) 곧 AVOID_STATIC 에 다시 들어오면 기준 좌표 이어 씀
+                else:
+                    self.plan.finish()
                 return 'done'
 
             if self.odom_mode:
@@ -222,6 +228,7 @@ class LeftARightB(SafeState):
         marker = node.marker_type()
         if self.goal_lane is None and marker is not None:
             self.goal_lane = cfg['a_lane'] if marker == 'A' else cfg['b_lane']
+            plan.ab_goal = self.goal_lane       # (11/16) 시간 초과 뒤 AVOID_STATIC 에 다시 들어가도 이 차선으로
             node.get_logger().info('[LEFT_A_RIGHT_B] %s 표지판 - 목표 %s 차선 (지금 %s)'
                                    % ('A(좌)' if marker == 'A' else 'B(우)',
                                       plan.name(self.goal_lane), plan.name(plan.lane)))

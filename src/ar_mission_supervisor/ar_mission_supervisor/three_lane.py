@@ -122,6 +122,9 @@ class ThreeLanePlanner(object):
         self.blocked_since = None
         self.backing = None         # 후진 중이면 (시작 x, 시작 y, 조향 또는 None, 거리)
         self.maneuver = None        # (11/16) 앞뒤로 움직여 빠져나가는 중이면 그 계획
+        self.maneuver_failed = None     # 마지막으로 길을 못 찾은 자리 (s, d, psi)
+        self.ab_goal = None             # (11/16) A/B 표지판으로 정한 목표 차선 (다시 진입해도 이어 감)
+        self.maneuver_failed_n = 0
         self.maneuvers = 0
         self.logged_floor = False
         self.last_backup_s = None   # 마지막으로 후진을 시작한 자리 s (그 근처에서 또 막히면 후진 말고 앞뒤 움직임)
@@ -175,6 +178,8 @@ class ThreeLanePlanner(object):
         self.maneuver = None
         self.maneuvers = 0
         self.last_backup_s = None
+        self.maneuver_failed = None
+        self.ab_goal = None
         self.logged_floor = False
         self.target_since = -1e9
         self.active = True
@@ -399,6 +404,31 @@ class ThreeLanePlanner(object):
         if self.released_at is None:
             return True
         return (now - self.released_at) <= self.cfg['context_timeout']
+
+    def fresh_within(self, now, sec):
+        """(11/16) 끝난 지 sec 초 안이고 기준 좌표가 살아 있는지 (AVOID_STATIC 다시 진입 때 이어 쓰기)."""
+        if not self.active:
+            return False
+        return self.released_at is None or (now - self.released_at) <= sec
+
+    def reenter(self, now):
+        """(11/16 static_1116_2) 3차선 안에서 AVOID_STATIC 에 다시 들어옴: 기준 좌표·LIMO 지도·차선 확인은 그대로 두고
+        움직임 상태만 새로. 차가 많이 틀어져 있어도 기준 방향은 전과 같아서, 계획이 차를 3차선 방향으로 되돌린다.
+        반환: (pose, s, d, psi) 또는 None (odom 없음)."""
+        car = self.update(now)
+        if car is None:
+            return None
+        self.released_at = None
+        self.lane = self.target = self.lane_of(car[2])
+        self.changing = False
+        self.mismatch_since = None
+        self.blocked_since = None
+        self.logged_blocked = False
+        self.backing = None
+        self.maneuver = None
+        self.maneuver_failed = None
+        self.target_since = now
+        return car
 
     def finish(self):
         self.active = False
@@ -732,6 +762,8 @@ class ThreeLanePlanner(object):
         prims = [(dr, st) for dr in (1, -1) for st in (-ms, 0.0, ms)]
         rs, rd, rp = 0.04, 0.04, math.radians(7.5)
         floor = self._back_floor(maneuver=True)
+        # (11/16 static_1116_2) 차 방향 한계. 100도였을 때 실차가 71도 틀어진 자리에서 막혀, 시간 초과 뒤 그 방향으로 감
+        max_psi = math.radians(cfg['maneuver_max_heading_deg'])
 
         def move(s_, d, psi, dr, st):
             for _ in range(n_sub):
@@ -754,7 +786,7 @@ class ThreeLanePlanner(object):
         found = None
         n = 0
         while openq and n < cfg['maneuver_max_nodes']:
-            if (n & 255) == 0 and _time.time() > t_end:
+            if (n & 63) == 0 and _time.time() > t_end:     # (11/16) LIMO 는 256개에 0.1초 넘게 걸려서 더 자주 봄
                 break
             _, g, idx, prev, prev_st = heapq.heappop(openq)
             n += 1
@@ -768,7 +800,7 @@ class ThreeLanePlanner(object):
             seen[k] = g
             for dr, st in prims:
                 nx = move(st_[0], st_[1], st_[2], dr, st)
-                if nx is None or abs(nx[2]) > math.radians(100.0):
+                if nx is None or abs(nx[2]) > max_psi:
                     continue
                 ng = (g + step * (1.0 if dr > 0 else cfg['maneuver_back_cost'])
                       + (cfg['maneuver_switch_cost'] if prev != 0 and dr != prev else 0.0)
@@ -814,7 +846,10 @@ class ThreeLanePlanner(object):
         if segs is None:
             log.warn('[%s] %s - 앞뒤로 움직여 빠져나갈 길도 못 찾음 (계산 %.1f초)' % (who, why, dt))
             self.maneuver = None
+            self.maneuver_failed = (s_, d, psi)
+            self.maneuver_failed_n = len(self.map.confirmed(cfg['confirm_hits']))
             return False
+        self.maneuver_failed = None
         flips = sum(1 for a, b in zip(segs, segs[1:]) if a['dir'] != b['dir'])
         log.warn('[%s] %s - 앞뒤로 움직여 빠져나감: 조각 %d개, 앞뒤 바꿈 %d번, 총 %.1fm (계산 %.1f초) [%s]'
                  % (who, why, len(segs), flips, sum(g['len'] for g in segs), dt,
@@ -823,6 +858,17 @@ class ThreeLanePlanner(object):
         self.maneuver = {'segs': segs, 'i': 0, 'xy': (pose[0], pose[1]),
                          'settle_until': now + cfg['maneuver_settle'], 'replans': 0}
         return True
+
+    def _maneuver_retry_ok(self, s_, d, psi):
+        """(11/16 static_1116_2) 방금 못 찾은 자리에서 또 찾지 않음. LIMO 보드에서 한 번에 4초쯤 서서 계산해서
+        (실차: 같은 자리에서 두 번, 8초). 그 사이 움직였거나 지도가 바뀌었으면 다시 찾음."""
+        f = self.maneuver_failed
+        if f is None:
+            return True
+        if (abs(s_ - f[0]) > 0.05 or abs(d - f[1]) > 0.05 or abs(psi - f[2]) > math.radians(5.0)
+                or len(self.map.confirmed(self.cfg['confirm_hits'])) != self.maneuver_failed_n):
+            return True
+        return False
 
     def _maneuver_step(self, pose, s_, d, psi, now, who):
         """앞뒤 움직임 한 박자. 계속 움직이는 중이면 True (이번 박자 명령 냄), 끝났거나 그만두면 False."""
@@ -1045,6 +1091,7 @@ class ThreeLanePlanner(object):
                              and (self.last_backup_s is None
                                   or abs(s_ - self.last_backup_s) > cfg['maneuver_after_backup_within']))
                     if (not quick and cfg['maneuver'] and self.maneuvers < cfg['maneuver_max']
+                            and self._maneuver_retry_ok(s_, d, psi)
                             and self._start_maneuver(pose, s_, d, psi, now, who,
                                                      '%.1f초 막힘 (차선별 갈 거리 %s)' % (
                                                          now - self.blocked_since,

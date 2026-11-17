@@ -65,6 +65,8 @@ class AvoidStatic(SafeState):
         cfg = node.avoid_static
         plan = self.plan
 
+        last_s = None
+        self.center_logged = False
         while node.ok():
             if self.reset_requested():
                 plan.finish()
@@ -88,11 +90,23 @@ class AvoidStatic(SafeState):
                 self.sleep()
                 continue
 
-            res = plan.step(now, goal=plan.ab_goal, who='AVOID_STATIC')     # (11/16) A/B 를 이미 봤으면 그 차선으로
+            # (11/16) A/B 를 이미 봤으면 그 차선으로. (11/17 사용자) 아직 못 봤으면 마지막 LIMO 를 지난 뒤 가운데 차선으로:
+            #   3차선 끝 섬의 A/B 표지판을 정면에서 보게. 가운데로 옮기는 동안은 끝나지 않음 (위 '장애물 구간 통과' 는 차선 변경 중엔 안 함).
+            #   full_1117_1: 표지판을 끝내 못 봐 LEFT_A_RIGHT_B 가 안 켜짐. LIMO 사이에서부터 가운데를 고집하면
+            #   run.py STATIC 몇 개가 나빠져서 (차선을 더 자주 바꿈) 마지막 LIMO 뒤에서만
+            goal = plan.ab_goal
+            if (goal is None and cfg['center_when_no_ab'] and last_s is not None
+                    and plan.max_obstacle_s is not None and not plan.obstacles_ahead(last_s)):
+                goal = 1
+                if not self.center_logged and plan.lane != 1:
+                    self.center_logged = True
+                    node.get_logger().info('[AVOID_STATIC] 마지막 LIMO 지남, A/B 표지판 아직 못 봄 - 가운데 차선으로 (표지판 정면에서 보게)')
+            res = plan.step(now, goal=goal, who='AVOID_STATIC')
             if res is None:
                 node.get_logger().warn('[AVOID_STATIC] odom 끊김 - 빈 공간 따라가기로 전환')
                 self.gap_mode = True
                 continue
+            last_s = res.s
             if res.blocked:
                 self.sleep()                    # 길이 없음 - 정지한 채로 다시 계산
                 continue

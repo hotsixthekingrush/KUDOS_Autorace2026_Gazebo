@@ -564,6 +564,13 @@ class ThreeLanePlanner(object):
         next_mark = mark_step if mark_step > 0.0 else float('inf')
         if self._car_hits(s_, d, psi, boxes, shapes):
             return 0.0, marks
+        # (11/17 full_1117_1) 앞으로 갈 때도 입구 사선 안으로 (진입 직후 오른쪽 차선으로 바꾸다 오른쪽 사선을 밟음).
+        #   이미 사선 밖이면 이 굴림에선 안 봄 (그 자리에서 아무 데도 못 가는 것 막기)
+        fl = self._back_floor() if cfg['taper_forward'] else None
+        if fl is not None:
+            fl += cfg['taper_forward_shift']
+            if self._behind_floor(s_, d, psi, fl):
+                fl = None
         traveled = 0.0
         while traveled < horizon:
             c, sn = math.cos(psi), math.sin(psi)
@@ -576,7 +583,8 @@ class ThreeLanePlanner(object):
             s_ += ds * math.cos(psi)
             d += ds * math.sin(psi)
             traveled += ds
-            if self._car_hits(s_, d, psi, boxes, shapes) or self._off_edge(d, psi):
+            if (self._car_hits(s_, d, psi, boxes, shapes) or self._off_edge(d, psi)
+                    or (fl is not None and self._behind_floor(s_, d, psi, fl))):
                 return traveled, marks
             if traveled >= next_mark - 1e-9:
                 marks.append((traveled, s_, d, psi))
@@ -764,6 +772,9 @@ class ThreeLanePlanner(object):
         floor = self._back_floor(maneuver=True)
         # (11/16 static_1116_2) 차 방향 한계. 100도였을 때 실차가 71도 틀어진 자리에서 막혀, 시간 초과 뒤 그 방향으로 감
         max_psi = math.radians(cfg['maneuver_max_heading_deg'])
+        # (11/17) 앞으로 가는 조각도 입구 사선 안 (시작 자리가 이미 밖이면 앞으로는 안 봄)
+        fwd_floor = cfg['taper_forward'] and floor is not None and not self._behind_floor(
+            s0, d0, psi0, floor + cfg['taper_forward_shift'])
 
         def move(s_, d, psi, dr, st):
             for _ in range(n_sub):
@@ -771,7 +782,8 @@ class ThreeLanePlanner(object):
                 s_ += dr * ds * math.cos(psi)
                 d += dr * ds * math.sin(psi)
                 if (s_ < s_min or self._off_edge(d, psi) or self._car_hits(s_, d, psi, bxs, shapes)
-                        or (dr < 0 and self._behind_floor(s_, d, psi, floor))):
+                        or (dr < 0 and self._behind_floor(s_, d, psi, floor))
+                        or (dr > 0 and fwd_floor and self._behind_floor(s_, d, psi, floor + cfg['taper_forward_shift']))):
                     return None
             return s_, d, psi
 

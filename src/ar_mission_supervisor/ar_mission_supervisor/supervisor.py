@@ -147,6 +147,11 @@ PARAM_DEFAULTS = {
         # (11/16 사용자 A안) 판단 켤 때 차 방향을 몇 도로 볼지 [도]. 대회 출발선에 똑바로 놓고 켜면 0.
         #   트랙 중간에서 켜고 시험할 땐 출발 직선 기준 지금 방향 (시계방향 트랙: 첫 코너 뒤 -90, 3차선 직선 180)
         'start_yaw_deg': 0.0,
+        # (11/17 사용자) 출발 쪽 표지판 무시: 판단 켠 자리에서 신호등 traffic_light.ignore_start_distance, 주차 표지판
+        #   parking.ignore_start_distance 를 가기 전엔 그 미션으로 안 들어감. 재도전·시험(그 미션 앞에서 켤 때)은 false
+        #   (launch ignore_start:=false). odom 이 안 오면 켠 뒤 ignore_start_max_sec 지나면 끝
+        'ignore_start': True,
+        'ignore_start_max_sec': 30.0,
     },
     'lane': {
         # 차선 노드가 lateral 을 재는 지점 = 차 앞 몇 m (차선 노드 reference_distance_m 과 같아야 함, 11/04 0.5 로 정함)
@@ -239,15 +244,12 @@ PARAM_DEFAULTS = {
         'approach_speed': 0.2,
         'min_speed': 0.08,
         'slowdown_distance': 0.0,  # >0 이면 정지 직전 이 거리부터 감속 (0 = 끝까지 approach_speed)
-        'stop_gap': 0.03,          # 앞바퀴~정지선 남은 거리가 이 값 이하면 정지/통과 판정
+        'stop_gap': 0.08,          # (11/17 사용자) 0.03 -> 0.08: full_1117_1 신호등 횡단보도에서 아슬아슬, 5 cm 앞에서 서게
         'green_confirm_sec': 0.3,  # 정지 후 초록불이 이 시간 이상 유지되면 출발
         'approach_timeout': 25.0,  # 정지선 거리를 끝내 못 받으면 이 시간 뒤 현 위치에서 판정
         'max_wait_sec': 10.0,      # 정지 후 이 시간 안에 초록불을 못 보면 출발 (0 = 무한 대기)
-        # (11/17 사용자) 출발할 때 옆 신호등을 보고 TRAFFIC_LIGHT 로 들어감 -> 판단 켠 자리에서 이 거리를 가기 전엔 신호등 무시.
-        #   신호등 재도전·시험(신호등 앞에 놓고 켤 때)은 false 로 (launch tl_ignore_start:=false)
-        'ignore_at_start': True,
+        # (11/17 사용자) 출발할 때 옆 길 신호등을 보고 TRAFFIC_LIGHT 로 들어감 -> 켠 자리에서 이 거리 전엔 무시 (켜고 끄기: ignore_start)
         'ignore_start_distance': 3.0,  # [m] 켠 자리에서 직선거리
-        'ignore_start_max_sec': 30.0,  # odom 이 없으면 켠 뒤 이 시간 지나면 무시 끝 [s]
     },
     'slow': {
         # (11/17 사용자) 서행 표지판 -> SLOW: 차선 추종 그대로, 속도만. 신호등·지그재그·방지턱·보행자 표지판으로만 넘어감
@@ -258,7 +260,7 @@ PARAM_DEFAULTS = {
         'approach_speed': 0.2,
         'min_speed': 0.08,
         'slowdown_distance': 0.0,
-        'stop_gap': 0.03,
+        'stop_gap': 0.18,          # (11/17 사용자) 0.03 -> 0.18: full_1117_1 보행자 횡단보도에서 15 cm 더 가서 섬
         'wait_sec': 4.0,           # 규정: 완전정지 후 3초 이상, 15초 이내 출발
         'approach_timeout': 25.0,
         # (11/16 사용자) 횡단보도가 지그재그 바로 뒤라 접근 중에도 SLOW_ZONE 처럼 헤딩 고정 (k_yaw·lane_blend 는 slow_zone 값).
@@ -373,10 +375,16 @@ PARAM_DEFAULTS = {
         'maneuver_goal_heading_deg': 20.0,
         'maneuver_goal_lane_tol': 0.15,  # 끝 자리: 차선 가운데에서 이만큼 안 [m]
         'back_floor': True,            # (11/16) 첫 LIMO 가운데보다 뒤는 입구 사선 구간으로 보고, 뒤로 갈 때 그 사선 밖으로 안 나감
-        'back_floor_offset': 0.10,     # 사선이 끝나는 곳을 첫 LIMO 가운데에서 이만큼 앞(+)/뒤(-)로 [m]
+        'back_floor_offset': 0.12,     # 사선이 끝나는 곳을 첫 LIMO 가운데에서 이만큼 앞(+)/뒤(-)로 [m] (11/17 사용자 0.10 -> 0.12)
+        # (11/17) 앞으로 갈 때도 사선 안으로 (full_1117_1: 진입 직후 오른쪽 차선으로 바꾸다 오른쪽 사선 밟음). 기본 끔:
+        #   shift 0 이면 첫 LIMO 가 가까운 배치에서 아예 못 지나감 (run.py STATIC 40개 넘게 실패), -0.3 이면 시뮬 사선 밟기가
+        #   거의 안 줄고 간격 0.46 은 19 -> 15/20. 입구 선 위치를 모르는 한계 (차선 팀원 흰 가로선이 있어야 제대로)
+        'taper_forward': False,
+        'taper_forward_shift': -0.3,   # 앞으로 갈 땐 사선 끝을 이만큼 앞(+)/뒤(-)로 [m] (후진보다 덜 조이게)
         'back_floor_slope': 1.0,       # 한계 뒤로 1 m 갈 때 한쪽 폭이 줄어드는 양 [m] (1.0 = 45도, 99 = 한계 뒤는 가운데 차선 폭만)
         'maneuver_back_floor': True,   # 앞뒤 움직임의 뒤로 가는 조각에도 같은 한계
         'maneuver_max_heading_deg': 100.0, # (11/16) 앞뒤 움직임 중 차 방향 한계 (3차선 방향 기준) [도]. 60/75 는 static_1116_1 배치를 못 지나감
+        'center_when_no_ab': True,     # (11/17 사용자) A/B 표지판을 아직 못 봤으면 가운데 차선을 목표로 (끝까지 비면 늘 가운데)
         'reenter_keep': True,          # (11/16) 3차선에서 끝난 뒤 reenter_sec 안에 다시 들어오면 전 기준 좌표·지도를 이어 씀
         'reenter_sec': 10.0,
         'maneuver_max_back': 0.35,     # 시작 자리보다 이만큼 넘게 뒤로는 안 감 (입구 사선 구간 보호) [m]
@@ -479,6 +487,8 @@ PARAM_DEFAULTS = {
         'pass_margin': 0.10,       # 마지막 게이트 선을 앞바퀴가 이만큼 더 지날 때까지 구간을 안 끝냄 [m]
     },
     'parking': {
+        # (11/17 사용자) full_1117_1: 켜자마자 왼쪽 2 m 주차 표지판을 보고 PARKING -> 켠 자리에서 이 거리 전엔 무시 (켜고 끄기: ignore_start)
+        'ignore_start_distance': 4.5,
         'search_speed': 0.15,
         'final_speed': 0.08,
         'min_speed': 0.04,
@@ -557,6 +567,12 @@ PARAM_DEFAULTS['entry_hold'] = {
     'k_yaw': 1.5,              # 조향 = k_yaw x 방향 오차
     'lane_blend': 0.0,         # 차선 보정을 섞는 비율 (0 = 방향만)
     'max_speed': 0.3,          # 이 동안 속도 상한 [m/s]
+}
+
+# (11/17 사용자) 판단 켠 자리에서 몇 m 가기 전엔 무시하는 이벤트 -> (거리 파라미터 그룹, 로그 이름). 켜고 끄기는 ignore_start
+START_IGNORE = {
+    'traffic_light': ('traffic_light', '신호등'),
+    'parking_sign': ('parking', '주차 표지판'),
 }
 
 # 파라미터 그룹 -> 노드 속성 이름 (다른 경우만)
@@ -700,10 +716,10 @@ class MissionSupervisor(Node):
         self.three_lane = ThreeLanePlanner(self)  # 3차선 좌표·차선 번호 (AVOID_STATIC -> LEFT_A_RIGHT_B)
         self.white_lines = WhiteLines(self)       # (11/16) 흰 점선 관측 모음 (몇 번 차선인지 확인용)
         self.entry_armed = True                   # (11/16) 3차선 입구 직진을 다음에 할 수 있는지
-        self.tl_start_xy = None                   # (11/17) 판단 켠 자리 (출발 신호등 무시용)
-        self.tl_start_t = None
-        self.tl_start_done = False
-        self.tl_start_logged = False
+        self.start_xy = None                      # (11/17) 판단 켠 자리 (출발 쪽 신호등·주차 표지판 무시용)
+        self.start_t = None
+        self.start_ignore_done = set()            # 무시가 끝난 이벤트 (한 번 끝나면 판단을 다시 켤 때까지 그대로)
+        self.start_ignore_logged = set()
 
         # --- 구독 ---
         store = self._store
@@ -1181,9 +1197,10 @@ class MissionSupervisor(Node):
         path = self._path_event(now, quiet=allowed is not None)
         if path is not None and path not in found:
             found.append(path)
-        self._tl_note_start(now)
-        if 'traffic_light' in found and self._tl_start_ignored(now):
-            found.remove('traffic_light')
+        self._note_start(now)
+        for ev in START_IGNORE:
+            if ev in found and self._start_ignored(ev, now):
+                found.remove(ev)
         if allowed is not None:
             found = [n for n in found if EVENT_TO_OUTCOME.get(n) in allowed]
         if skip_locked:
@@ -1195,38 +1212,39 @@ class MissionSupervisor(Node):
                 return name
         return found[0]
 
-    def _tl_note_start(self, now):
-        """판단 켠 자리·시각을 기억 (신호등이 처음 보인 자리가 아니라). 매 주기 merged_event 에서 부름."""
-        if self.tl_start_t is None:
-            self.tl_start_t = now
-        if self.tl_start_xy is None:
+    def _note_start(self, now):
+        """판단 켠 자리·시각을 기억 (표지판이 처음 보인 자리가 아니라). 매 주기 merged_event 에서 부름."""
+        if self.start_t is None:
+            self.start_t = now
+        if self.start_xy is None:
             pose = self.odom_pose()
             if pose is not None:
-                self.tl_start_xy = (pose[0], pose[1])
+                self.start_xy = (pose[0], pose[1])
 
-    def _tl_start_ignored(self, now):
-        """(11/17 사용자) 판단 켠 자리에서 traffic_light.ignore_start_distance 를 가기 전이면 True (신호등 무시).
-        출발선 옆 신호등(신호등 미션은 출발 방향과 같은 곳)을 보고 TRAFFIC_LIGHT 로 들어가던 것 막기."""
-        cfg = self.traffic_light
-        if not cfg['ignore_at_start'] or self.tl_start_done:
+    def _start_ignored(self, ev, now):
+        """(11/17 사용자) 판단 켠 자리에서 그 미션의 ignore_start_distance 를 가기 전이면 True (그 이벤트 무시).
+        출발선 옆 길 신호등 (신호등 미션은 출발 방향과 같은 곳), 출발 쪽 주차 표지판 (full_1117_1: 켜자마자 PARKING)."""
+        if not self.ignore_start or ev in self.start_ignore_done:
             return False
+        group, name = START_IGNORE[ev]
+        dist = getattr(self, group)['ignore_start_distance']
         pose = self.odom_pose()
-        if pose is not None and self.tl_start_xy is not None:
-            gone = math.hypot(pose[0] - self.tl_start_xy[0], pose[1] - self.tl_start_xy[1])
-            if gone >= cfg['ignore_start_distance']:
-                self.tl_start_done = True
+        if pose is not None and self.start_xy is not None:
+            gone = math.hypot(pose[0] - self.start_xy[0], pose[1] - self.start_xy[1])
+            if gone >= dist:
+                self.start_ignore_done.add(ev)
                 return False
             what = '켠 자리에서 %.1fm' % gone
         else:
-            if now - self.tl_start_t >= cfg['ignore_start_max_sec']:
-                self.tl_start_done = True
+            if now - self.start_t >= self.ignore_start_max_sec:
+                self.start_ignore_done.add(ev)
                 return False
-            what = 'odom 없음, 켠 뒤 %.0f초' % (now - self.tl_start_t)
-        if not self.tl_start_logged:
-            self.tl_start_logged = True
-            self.get_logger().info('[신호등] 출발 쪽 신호등 무시 (%s, %.1fm 가기 전까지. 끄려면 traffic_light.ignore_at_start false)'
-                                   % (what, cfg['ignore_start_distance']))
-        self.dbg('traffic_light/start_ignored', 1.0)
+            what = 'odom 없음, 켠 뒤 %.0f초' % (now - self.start_t)
+        if ev not in self.start_ignore_logged:
+            self.start_ignore_logged.add(ev)
+            self.get_logger().info('[출발] 출발 쪽 %s 무시 (%s, %.1fm 가기 전까지. 끄려면 ignore_start false)'
+                                   % (name, what, dist))
+        self.dbg('start_ignored/' + ev, 1.0)
         return True
 
     def _path_event(self, now, quiet=False):

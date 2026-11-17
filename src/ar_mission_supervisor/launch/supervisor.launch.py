@@ -36,6 +36,10 @@ def _launch_setup(context, *args, **kwargs):
     ig = LaunchConfiguration('ignore_start').perform(context).strip().lower()
     if ig:
         params.append({'ignore_start': ig in ('true', '1', 'yes')})
+    # (11/18) 연습 배치(LIMO 2대 등)에서 예전 주차 방식: grid_use:=false (6칸 격자 대신 'LIMO 두 대 사이 빈칸')
+    gu = LaunchConfiguration('grid_use').perform(context).strip().lower()
+    if gu:
+        params.append({'parking.grid_use': gu in ('true', '1', 'yes')})
 
     return [Node(package='ar_mission_supervisor',
                  executable='supervisor',
@@ -56,6 +60,8 @@ def generate_launch_description():
                               description='비우면 params 값 (0). 판단 켤 때 차 방향 [도], 출발 직선 기준 (3차선 직선 = 180)'),
         DeclareLaunchArgument('ignore_start', default_value='',
                               description='비우면 params 값 (true). false = 출발 쪽 신호등(3 m)·주차 표지판(4.5 m) 무시를 끔 (재도전·시험)'),
+        DeclareLaunchArgument('grid_use', default_value='',
+                              description='비우면 params 값 (true). false = 주차를 예전 방식(LIMO 두 대 사이 빈칸)으로 - 연습 배치용'),
         DeclareLaunchArgument('odom_offset', default_value='',
                               description='비우면 params 값 (실차 0.10, sim 0). odom 점에서 몸통 가운데까지 앞쪽 거리 [m]'),
         OpaqueFunction(function=_launch_setup),

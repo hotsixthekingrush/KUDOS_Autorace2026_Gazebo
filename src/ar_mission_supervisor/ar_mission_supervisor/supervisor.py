@@ -485,6 +485,15 @@ PARAM_DEFAULTS = {
         'side_max_step': 0.62,     # 같은 줄 다음 콘으로 볼 최대 거리 [m]
         'side_max_turn_deg': 60.0, # 같은 줄 다음 콘은 지금 줄 방향에서 이 각도 안 (건너편 콘은 거의 90도)
         'pass_margin': 0.10,       # 마지막 게이트 선을 앞바퀴가 이만큼 더 지날 때까지 구간을 안 끝냄 [m]
+        # (11/18 사용자) 콘 끝내기: 차 앞(x > end_ahead_x)에 남은 콘(보이는 것 + 기억)이 end_ahead_min 개 미만이
+        #   end_ahead_count 번 연속이면 끝. 콘을 end_min_cones 개 넘게 본 뒤부터. false = 예전 규칙만
+        'end_ahead_use': True,
+        'end_ahead_x': 0.15,       # 차 가운데 기준 [m] (앞바퀴 0.10 보다 5 cm 앞)
+        'end_ahead_min': 2,
+        'end_ahead_count': 3,
+        'end_one_x': 0.30,         # 남은 콘이 있으면 그 콘도 이 거리 안이어야 끝 (한쪽 줄을 못 볼 때 한 줄 일찍 끝나지 않게) [m]
+        'end_min_cones': 4,
+        'hold_steer_zero': True,   # 콘이 안 보이는데 아직 안 끝낼 때 조향 0 (false = 예전처럼 마지막 조향 유지)
     },
     'parking': {
         # (11/17 사용자) full_1117_1: 켜자마자 왼쪽 2 m 주차 표지판을 보고 PARKING -> 켠 자리에서 이 거리 전엔 무시 (켜고 끄기: ignore_start)
@@ -524,6 +533,21 @@ PARAM_DEFAULTS = {
         'search_distance': 6.0,
         'turn_timeout': 15.0,
         'align_timeout': 15.0,
+        # (11/18 사용자) 주최측 안내: 6칸 중 1칸만 빔, 위치 바뀔 수 있음 -> 라이다 원본으로 6칸 격자에서 빈칸 찾기
+        'grid_use': True,
+        'grid_lidar_x': 0.1025,     # 몸통 가운데 -> 라이다 [m] (LIMO laser_link)
+        'grid_lidar_yaw_deg': 0.0,
+        'grid_max_range': 2.6,      # 이 거리 안에서 맞은 점만 쌓음 [m]
+        'grid_near_range': 1.0,     # 확정 뒤 위치 다듬기는 이 거리 안에서 본 점만 (odom 거리 배율 오차가 본 거리만큼 커짐) [m]
+        'grid_decide_margin': 1.0,  # 가장 좋은 가설과 다른 칸 가설의 점수 차
+        'grid_target_free': 0.7,    # 목표 칸 가운데 넓은 곳 중 빔이 지나간 비율
+        'grid_align_tol': 0.13,     # 보이는 LIMO 가 다 칸 가운데에서 이 안 [m]
+        'grid_stable': 3,           # 같은 판단이 이만큼 연속이면 확정 (스캔 수)
+        'grid_limo_width': 0.22,
+        'grid_limo_length': 0.322,
+        'grid_end_score': 4.0,      # 격자를 이 점수 넘게 찾았는데
+        'grid_end_margin': 0.20,
+        'grid_depth_max_diff': 0.25,  # 칸 깊이: 1행 LIMO 앞면으로 잰 옆 어긋남을 이만큼까지 그대로 믿음 (넘으면 차선 기준과 중간) [m]
     },
     'debug': {
         'enabled': True,
@@ -1394,6 +1418,10 @@ class MissionSupervisor(Node):
     def odom_yaw(self):
         pose = self._latest('odom')
         return None if pose is None else pose[2]
+
+    def latest_scan(self):
+        """(11/18) 최근 /scan (LaserScan) 또는 None. 주차 격자 찾기용."""
+        return self._latest('scan')
 
     def forward_scan_points(self, max_range):
         """전방 스캔을 (각도, 거리) 목록으로. Follow the Gap 용."""

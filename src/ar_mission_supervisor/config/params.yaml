@@ -435,6 +435,16 @@ mission_supervisor:
       side_max_step: 0.62        # 같은 줄 다음 콘으로 볼 최대 거리 [m]
       side_max_turn_deg: 60.0    # 같은 줄 다음 콘은 지금 줄 방향에서 이 각도 안 (건너편 콘은 거의 90도라 빠짐)
       pass_margin: 0.10          # 라이다에서 콘이 다 빠져도, 마지막 게이트 선을 앞바퀴가 이만큼 더 지날 때까지 구간 유지 [m]
+      # (11/18 사용자) full_1117_3: 콘 끝에서 오른쪽 콘을 끼고 85도 돌아 안쪽 차선을 잡음 ->
+      #   차 앞(x > end_ahead_x)에 남은 콘(지금 보이는 것 + 기억한 것)이 end_ahead_min 개 미만이 end_ahead_count 번 연속이면 끝.
+      #   보이는 콘 수만 세면 구간 중간에서도 0~1개가 0.7초 이어져 일찍 끝남. 콘을 end_min_cones 개 넘게 본 뒤부터. false = 예전 규칙만
+      end_ahead_use: true
+      end_ahead_x: 0.15          # 차 가운데 기준 [m] (앞바퀴 0.10 보다 5 cm 앞)
+      end_ahead_min: 2
+      end_ahead_count: 3
+      end_one_x: 0.30            # 남은 콘이 있으면 그 콘도 이 거리 안이어야 끝 (라이다가 한쪽 줄을 못 보면 한 줄 일찍 끝났음) [m]
+      end_min_cones: 4
+      hold_steer_zero: true      # 콘이 안 보이는데 아직 안 끝낼 때 조향 0 (예전: 마지막 조향 유지 -> 최대 조향 1.7초 유지해 43도 더 돎)
 
     # 미션 4 - T자 주차 (2026: 진행방향 오른쪽 칸, 양옆 LIMO, 전면 진입)
     parking:
@@ -479,6 +489,23 @@ mission_supervisor:
       search_distance: 6.0
       turn_timeout: 15.0
       align_timeout: 15.0
+      # (11/18 사용자) 주최측 안내 (11/17): 6칸(2행 x 3열) 중 한 칸만 비우고 나머지는 LIMO, 빈칸 위치는 바뀔 수 있음.
+      #   예전 'LIMO 두 대 사이' 는 1·3열 빈칸을 못 찾음 -> 라이다 원본(/scan)을 쌓아 '6칸 중 1칸만 빈 격자' 로 빈칸 찾기.
+      #   1행이 다 찬 것으로 나오면(빈칸 2행) 정지 + 경고. false = 예전 방식. 시뮬 1,740번: 잘못 고른 칸 0, 위치 오차 최대 12 cm
+      grid_use: true
+      grid_lidar_x: 0.1025       # 몸통 가운데 -> 라이다 [m]
+      grid_lidar_yaw_deg: 0.0
+      grid_max_range: 2.6        # 이 거리 안에서 맞은 점만 쌓음 [m]
+      grid_near_range: 1.0       # 확정 뒤 위치 다듬기는 이 거리 안에서 본 점만 (odom 거리 배율이 틀리면 본 거리만큼 위치가 틀어짐) [m]
+      grid_decide_margin: 1.0    # 가장 좋은 가설과 '다른 칸' 가설의 점수 차
+      grid_target_free: 0.7      # 목표 칸 가운데 넓은 곳(±0.15 x ±0.22 m) 중 빔이 지나간 비율
+      grid_align_tol: 0.13       # 보이는 LIMO 가 다 칸 가운데에서 이 안이어야 확정 [m]
+      grid_stable: 3             # 같은 판단이 스캔 이만큼 연속이면 확정
+      grid_limo_width: 0.22
+      grid_limo_length: 0.322
+      grid_end_score: 4.0        # 격자를 이 점수 넘게 찾았는데
+      grid_end_margin: 0.20
+      grid_depth_max_diff: 0.25  # 칸 깊이: 1행 LIMO 앞면으로 잰 옆 어긋남을 이만큼까지 그대로 믿음 (예전 한도 0.15 면 기울어진 진입 -3.6도에서 11 cm 깊게 섬) [m]
 
     # (11/16 사용자·차선 팀원) 흰 점선으로 '실제로 몇 번 차선인지' 확인. 차선 팀원 흰색 노드 /perception/white_status
     #   (std_msgs/String JSON: t, left/right 의 seen, offset_m(둘 다 양수), heading_rad, conf, n_dash).

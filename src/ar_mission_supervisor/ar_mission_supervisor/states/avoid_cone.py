@@ -20,8 +20,15 @@
                          (콘에 안 닿는지 차 몸통으로 검사됨).
                    false 차선 따라가기처럼 조향 = side_kp_heading x 선과 틀어진 각도 + side_kp_lateral x 옆 오차.
   통로 반폭은 마지막으로 본 게이트 폭의 절반 (없으면 side_half_width).
-끝내는 때: 라이다에서 콘이 다 빠져도, 마지막으로 본 게이트(또는 콘 줄 끝) 선을 앞바퀴가 pass_margin 넘게
-  지날 때까지는 계속 간다 (한쪽 콘만 있으면 마지막 콘이 일찍 시야에서 빠지기 때문).
+끝내는 때 (11/18 사용자, full_1117_3: 콘 끝에서 오른쪽 콘을 끼고 85도 돌아 안쪽 차선을 잡음):
+  (1) end_ahead_use: 지금 보이는 콘 + 기억한 콘 중 차 앞(차 가운데 기준 x > end_ahead_x, 앞바퀴보다 5 cm 앞)에
+      있는 콘이 end_ahead_min(2) 개 미만인 게 end_ahead_count(3) 번 연속이면 끝 -> 차선 따라가기.
+      (보이는 콘 수만 세면 콘 구간 중간(116초)에도 0~1개가 0.7초 이어져 1초 만에 끝났음.
+       기억까지 세면 그 녹화에서 124.37초 - 마지막 게이트 옆, 오른쪽으로 10도 돈 때 - 에 끝남. 예전 규칙은 126.58초)
+      콘을 end_min_cones 개 넘게 본 뒤부터만 (들어오자마자 끝나지 않게).
+  (2) 예전 규칙도 그대로: 라이다에서 콘이 다 빠져도, 마지막으로 본 게이트(또는 콘 줄 끝) 선을 앞바퀴가 pass_margin 넘게
+      지날 때까지는 계속 간다 (한쪽 콘만 있으면 마지막 콘이 일찍 시야에서 빠지기 때문). 그 동안과 끝나기 전 유예 동안
+      hold_steer_zero(true) 면 조향 0 (예전엔 마지막 조향 그대로 - full_1117_3 에서 최대 조향 1.7초 유지해 43도 더 돎).
 그 쪽 콘이 1개뿐이면 그 콘에서 옆으로 고정 거리, 콘이 아예 없으면 Follow the Gap.
 odom 이 없으면 예전 방식(게이트 Pure Pursuit)으로 간다.
 """
@@ -51,6 +58,8 @@ class AvoidCone(SafeState):
         self.side = None          # 한쪽 선 따라가기에서 따라가는 쪽 (+1 왼쪽, -1 오른쪽)
         self.last_pair = None     # 가장 먼 게이트의 (왼쪽 콘, 오른쪽 콘) base_link
         self.final_gate = None    # 지금까지 본 가장 먼 게이트 선 (odom 점 x, y, 앞쪽 방향 nx, ny)
+        self.few = 0              # 차 앞 콘이 end_ahead_min 개 미만인 연속 횟수
+        self.n_seen = 0           # 지금까지 기억에 새로 들어간 콘 수
 
     def on_enter(self):
         self.miss = 0
@@ -64,6 +73,8 @@ class AvoidCone(SafeState):
         self.side = None
         self.last_pair = None
         self.final_gate = None
+        self.few = 0
+        self.n_seen = 0
 
     def run(self):
         node = self.node
@@ -80,12 +91,20 @@ class AvoidCone(SafeState):
 
             cones = self._collect_cones()
             node.dbg('cone/count', len(cones))
+            pose = node.odom_pose()
+            if cones and pose is not None:
+                self._remember(pose, cfg)
+            if self._few_ahead(cones, pose, cfg):
+                node.get_logger().info('[CONE] 차 앞에 남은 콘이 %d개 미만 (%d번 연속) - 라바콘 구간 종료'
+                                       % (cfg['end_ahead_min'], cfg['end_ahead_count']))
+                return 'done'
+            hold = 0.0 if cfg['hold_steer_zero'] else self.last_steer
 
             if not cones:
                 if self._gate_not_passed(cfg):
                     # 라이다 시야(앞쪽)에선 빠졌지만 마지막 게이트 선을 앞바퀴가 아직 안 넘음 - 넘을 때까지 계속
                     # (한쪽 콘만 있으면 마지막 콘이 일찍 시야에서 빠져, 앞바퀴가 마지막 줄 전에 끝나던 문제)
-                    self._publish(cfg['speed'], self.last_steer, now)
+                    self._publish(cfg['speed'], hold, now)
                     self.sleep()
                     continue
                 # 라바콘이 안 보임 - 구간 종료로 판단 (몇 회 유예)
@@ -93,16 +112,13 @@ class AvoidCone(SafeState):
                 if self.miss >= node.perception['exit_miss_count']:
                     node.get_logger().info('[CONE] 라바콘 구간 종료')
                     return 'done'
-                self._publish(cfg['speed'], self.last_steer, now)
+                self._publish(cfg['speed'], hold, now)
                 self.sleep()
                 continue
 
             self.miss = 0
 
             gates = self._gates(cones, cfg)
-            pose = node.odom_pose()
-            if pose is not None:
-                self._remember(pose, cfg)
             if gates:
                 self.side = None                     # 게이트가 다시 보이면 따라갈 쪽은 다음에 새로 정함
                 if pose is not None:
@@ -187,6 +203,33 @@ class AvoidCone(SafeState):
         g = self.final_gate
         if g is None or (mx - g[0]) * g[2] + (my - g[1]) * g[3] > 0.05:
             self.final_gate = (mx, my, nx, ny)
+
+    def _few_ahead(self, cones, pose, cfg):
+        """(11/18) 차 앞(x > end_ahead_x)에 남은 콘(기억 + 지금 보이는 것)이 end_ahead_min 개 미만이 end_ahead_count 번 연속이면 True."""
+        if not cfg['end_ahead_use']:
+            return False
+        lim = cfg['end_ahead_x']
+        if pose is not None:
+            x, y, yaw = pose
+            c, s = math.cos(yaw), math.sin(yaw)
+            xs = []
+            for m in self.memory:
+                bx = c * (m[0] - x) + s * (m[1] - y)
+                by = -s * (m[0] - x) + c * (m[1] - y)
+                if bx > lim and abs(by) <= cfg['roi_max_y']:
+                    xs.append(bx)
+        else:
+            xs = [o.x for o in cones if o.x > lim]
+        n = len(xs)
+        self.node.dbg('cone/ahead', n)
+        if self.n_seen < cfg['end_min_cones']:
+            self.few = 0
+            return False
+        # 남은 게 있으면 그것도 가까워야 (end_one_x 안) 끝: 라이다가 한쪽 줄을 통째로 못 보면 마지막 콘 하나가
+        # 0.35 m 앞에 남았을 때 '2개 미만' 이 돼서 마지막 게이트 한 줄 전에 끝났음 (run.py 17-4)
+        few = n < cfg['end_ahead_min'] and (n == 0 or max(xs) < cfg['end_one_x'])
+        self.few = self.few + 1 if few else 0
+        return self.few >= cfg['end_ahead_count']
 
     def _gate_not_passed(self, cfg):
         """마지막 게이트 선을 앞바퀴가 아직 pass_margin 넘게 안 지났나 (그 선에서 0.8 m 안일 때만)."""
@@ -416,6 +459,7 @@ class AvoidCone(SafeState):
                     best, best_d = m, d
             if best is None:
                 self.memory.append([ox, oy, float(o.radius)])
+                self.n_seen += 1
             else:
                 best[0] += 0.3 * (ox - best[0])
                 best[1] += 0.3 * (oy - best[1])

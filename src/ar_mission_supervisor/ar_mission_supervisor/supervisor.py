@@ -249,7 +249,7 @@ PARAM_DEFAULTS = {
         'approach_timeout': 25.0,  # 정지선 거리를 끝내 못 받으면 이 시간 뒤 현 위치에서 판정
         'max_wait_sec': 10.0,      # 정지 후 이 시간 안에 초록불을 못 보면 출발 (0 = 무한 대기)
         # (11/17 사용자) 출발할 때 옆 길 신호등을 보고 TRAFFIC_LIGHT 로 들어감 -> 켠 자리에서 이 거리 전엔 무시 (켜고 끄기: ignore_start)
-        'ignore_start_distance': 3.0,  # [m] 켠 자리에서 직선거리
+        'ignore_start_distance': 3.0,  # [m] 켠 뒤 실제로 간 거리 (11/17 full_1117_2 전엔 직선거리)
     },
     'slow': {
         # (11/17 사용자) 서행 표지판 -> SLOW: 차선 추종 그대로, 속도만. 신호등·지그재그·방지턱·보행자 표지판으로만 넘어감
@@ -716,8 +716,10 @@ class MissionSupervisor(Node):
         self.three_lane = ThreeLanePlanner(self)  # 3차선 좌표·차선 번호 (AVOID_STATIC -> LEFT_A_RIGHT_B)
         self.white_lines = WhiteLines(self)       # (11/16) 흰 점선 관측 모음 (몇 번 차선인지 확인용)
         self.entry_armed = True                   # (11/16) 3차선 입구 직진을 다음에 할 수 있는지
-        self.start_xy = None                      # (11/17) 판단 켠 자리 (출발 쪽 신호등·주차 표지판 무시용)
+        self.start_xy = None                      # (11/17) 판단 켠 자리 (출발 쪽 신호등·주차 표지판 무시용, 지금은 기록만)
         self.start_t = None
+        self.travelled_total = 0.0                # (11/17 full_1117_2) 켠 뒤 /odom 으로 실제 간 거리 [m]
+        self._travel_last = None
         self.start_ignore_done = set()            # 무시가 끝난 이벤트 (한 번 끝나면 판단을 다시 켤 때까지 그대로)
         self.start_ignore_logged = set()
 
@@ -854,6 +856,14 @@ class MissionSupervisor(Node):
 
     def _cb_odom(self, msg):
         self._odom_raw = _pose_from_odom(msg)
+        # (11/17 full_1117_2) 켠 뒤 실제로 간 거리 (출발 쪽 무시용). 직선거리로 재면 한 바퀴 돌아 켠 자리 근처에 오면
+        #   다시 '출발 직후' 가 돼서 마지막 주차 표지판을 무시했음
+        raw = self._odom_raw
+        if self._travel_last is not None:
+            step = math.hypot(raw[0] - self._travel_last[0], raw[1] - self._travel_last[1])
+            if step < 0.5:                          # odom 리셋·튐은 안 셈
+                self.travelled_total += step
+        self._travel_last = (raw[0], raw[1])
         if self.odom_heading_source == 'imu':
             pose = self._dead_reckon(msg)
             if pose is None:
@@ -1228,13 +1238,13 @@ class MissionSupervisor(Node):
             return False
         group, name = START_IGNORE[ev]
         dist = getattr(self, group)['ignore_start_distance']
-        pose = self.odom_pose()
-        if pose is not None and self.start_xy is not None:
-            gone = math.hypot(pose[0] - self.start_xy[0], pose[1] - self.start_xy[1])
+        if self._travel_last is not None:
+            # (11/17 full_1117_2) 켠 자리에서 직선거리가 아니라 실제로 간 거리. 한 바퀴 돌아 켠 자리 근처에 와도 다시 안 켜짐
+            gone = self.travelled_total
             if gone >= dist:
                 self.start_ignore_done.add(ev)
                 return False
-            what = '켠 자리에서 %.1fm' % gone
+            what = '켠 뒤 %.1fm 감' % gone
         else:
             if now - self.start_t >= self.ignore_start_max_sec:
                 self.start_ignore_done.add(ev)

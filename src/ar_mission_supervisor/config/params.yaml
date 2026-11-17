@@ -33,7 +33,9 @@ mission_supervisor:
     #   런치: supervisor.launch.py start_yaw_deg:=180
     start_yaw_deg: 0.0
     # (11/17 사용자) 출발 쪽 표지판 무시 (켜고 끄기 하나): 판단 켠 자리에서 신호등은 traffic_light.ignore_start_distance,
-    #   주차 표지판은 parking.ignore_start_distance 를 가기 전엔 그 미션으로 안 들어감. 한 번 그 거리를 넘으면 판단을 다시 켤 때까지 끝.
+    #   주차 표지판은 parking.ignore_start_distance 를 가기 전엔 그 미션으로 안 들어감. 거리는 켠 뒤 /odom 으로 실제 간 거리 (앞뒤 다 셈)
+    #   - 넘으면 판단을 다시 켤 때까지 끝. (11/17 full_1117_2: 켠 자리에서 직선거리로 쟀더니 한 바퀴 돌아 켠 자리 2.4 m 에 오자
+    #   다시 '출발 직후' 로 봐서 마지막 주차 표지판을 무시하고 지나감)
     #   재도전·시험 (그 미션 앞에 놓고 켤 때): launch ignore_start:=false 또는 ros2 param set /mission_supervisor ignore_start false
     #   로그 '[출발] 출발 쪽 신호등 무시 ...' / '[출발] 출발 쪽 주차 표지판 무시 ...'
     ignore_start: true
@@ -146,7 +148,7 @@ mission_supervisor:
       approach_timeout: 25.0   # 정지선 거리를 끝내 못 받으면 이 시간 뒤 현 위치에서 판정
       max_wait_sec: 10.0       # 정지 후 초록불을 이 시간 못 보면 출발 (0 = 무한 대기). 미션 Time-out 15초 안에 들도록
       # (11/17 사용자) 출발할 때 옆 길 신호등을 보고 TRAFFIC_LIGHT 로 들어감 -> 켠 자리에서 이 거리 전엔 무시 (켜고 끄기: 위 ignore_start)
-      ignore_start_distance: 3.0   # 켠 자리에서 직선거리 [m]
+      ignore_start_distance: 3.0   # 켠 뒤 실제로 간 거리 [m] (11/17 full_1117_2: 직선거리였을 땐 한 바퀴 뒤 켠 자리 근처에서 다시 무시)
 
     # (11/17 사용자) 서행 표지판(원형, SLOW_SIGN) -> SLOW: 차선 추종 그대로 속도만 speed. 신호등·지그재그(SLOW_ZONE)·방지턱 표지판(BUMP)·
     #   보행자 표지판(CROSSWALK_STOP)으로만 넘어감. 방지턱 표지판은 예전처럼 BUMP (예전엔 서행 표지판도 BUMP 였음)

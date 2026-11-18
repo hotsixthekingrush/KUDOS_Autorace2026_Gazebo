@@ -552,5 +552,22 @@ mission_supervisor:
       lane_blend: 0.0          # 0 = 방향만. 올리면 차선 보정을 섞음 (입구에선 그게 왼쪽으로 끄는 원인)
       max_speed: 0.3
 
+    # (11/18 사용자) 트랙 방향 자동 보정. 대회장 comp_lap1: 카메라 차선 방향이 판단 트랙 축(start_yaw_deg 기준 0/-90/180)과
+    #   한 바퀴 내내 +7~8도 차이 (켤 때 차가 출발 직선과 비뚤게 놓임) -> 3차선 기준 좌표가 틀어져 바깥 노란선 위로 감, 6.8초 막힘.
+    #   차선 따라가기 중 직선에서 '차 방향 + 카메라 차선 각도' 를 모아 중간값만큼 트랙 축을 돌림 (start_yaw_deg 에 더하는 셈).
+    #   차 위치 방향은 그대로, 3차선·흰 점선·횡단보도 헤딩 고정·3차선 입구 직진이 쓰는 축만 바뀜. 로그 '[축 보정]'
+    axis_auto:
+      use: true
+      states: LANE_FOLLOWING,SLOW,BUMP   # 이 상태에서만 모음 (BUMP 넣으면 comp_lap1 에서 15초에 정해짐, 빼면 65초)
+      min_confidence: 0.3
+      two_lines_only: true     # 양쪽 선을 다 본 값만
+      max_heading_deg: 15.0    # 카메라 차선 각도가 이 안일 때만
+      max_curvature: 0.5       # [1/m] 곡선 빼기
+      max_rate_dps: 10.0       # 차가 이보다 빨리 돌면 안 모음 [도/s]
+      max_deg: 15.0            # 보정 한계 [도]
+      window: 400              # 최근 관측 수 (30 Hz 면 약 13초)
+      min_samples: 60          # 이만큼 모여야 씀
+      max_spread_deg: 4.0      # 관측 사분위 폭이 이 안일 때만 바꿈
+
     debug:
       enabled: true            # 대회 때는 false

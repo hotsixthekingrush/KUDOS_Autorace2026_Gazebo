@@ -209,7 +209,7 @@ class ThreeLanePlanner(object):
         if not cfg['axis_snap']:
             return ''
         x, y, yaw = pose
-        ref = math.radians(cfg['axis_ref_deg'])
+        ref = self.node.axis_rad(cfg['axis_ref_deg'])      # (11/18) 트랙 방향 자동 보정 포함
         rel = math.atan2(math.sin(yaw - ref), math.cos(yaw - ref))
         axis = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
         err = math.atan2(math.sin(yaw - axis), math.cos(yaw - axis))

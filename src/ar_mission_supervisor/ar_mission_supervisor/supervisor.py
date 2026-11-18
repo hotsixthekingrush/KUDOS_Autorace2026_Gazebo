@@ -593,6 +593,24 @@ PARAM_DEFAULTS['entry_hold'] = {
     'max_speed': 0.3,          # 이 동안 속도 상한 [m/s]
 }
 
+PARAM_DEFAULTS['axis_auto'] = {
+    # (11/18 사용자) 트랙 방향 자동 보정. 대회장 comp_lap1: 카메라 차선 방향이 판단의 트랙 축(start_yaw_deg 기준 0/-90/180)과
+    #   한 바퀴 내내 +7~8도 차이 (판단 켤 때 차가 출발 직선과 비뚤게 놓임) -> 3차선 기준 좌표가 틀어져 바깥 노란선 위로 감.
+    #   차선 따라가기 중 직선에서 '차 방향 + 카메라 차선 각도' 를 모아 그 중간값만큼 트랙 축을 돌림 (start_yaw_deg 에 더하는 셈).
+    #   차 위치(odom_pose) 방향은 안 바꿈 -> 3차선·흰 점선·횡단보도·입구 직진이 쓰는 축만 바뀜.
+    'use': True,
+    'states': 'LANE_FOLLOWING,SLOW,BUMP',  # 이 상태에서만 모음 (미션 중엔 차선 노드가 다른 선을 볼 수 있음). BUMP 넣으면 comp_lap1 15초에 정해짐 (빼면 65초)
+    'min_confidence': 0.3,     # 카메라 차선 확신도
+    'two_lines_only': True,    # 양쪽 선을 다 본 값만 (한 선 추정은 안 씀)
+    'max_heading_deg': 15.0,   # 카메라 차선 각도가 이 안일 때만 (차가 차선과 거의 나란할 때)
+    'max_curvature': 0.5,      # [1/m] 곡선 구간 빼기
+    'max_rate_dps': 10.0,      # 차가 이보다 빨리 돌고 있으면 안 모음 [도/s]
+    'max_deg': 15.0,           # 보정 한계 (트랙 축에서 이만큼 넘게 다른 값은 버림) [도]
+    'window': 400,             # 최근 관측 수 (카메라 30 Hz 면 약 13초 분량)
+    'min_samples': 60,         # 이만큼 모여야 씀
+    'max_spread_deg': 4.0,     # 관측 사분위 폭(IQR)이 이 안일 때만 바꿈
+}
+
 # (11/17 사용자) 판단 켠 자리에서 몇 m 가기 전엔 무시하는 이벤트 -> (거리 파라미터 그룹, 로그 이름). 켜고 끄기는 ignore_start
 START_IGNORE = {
     'traffic_light': ('traffic_light', '신호등'),
@@ -610,6 +628,7 @@ INIT_ONLY_PARAMS = {
     'odom_heading_source', 'imu_topic',       # /imu 구독 여부·토픽
     'perception.stale_sec', 'yolo.hold_sec',  # 인지 버퍼 만들 때 씀
     'perception.debounce_count',              # Debouncer 만들 때 씀
+    'axis_auto.window',                       # (11/18) 관측 모음 크기
 }
 
 
@@ -731,6 +750,9 @@ class MissionSupervisor(Node):
         stale = self.perception['stale_sec']
         self.buf = dict((k, Buffer(stale)) for k in self.BUFFER_KEYS)
         self.yaw_hist = collections.deque(maxlen=80)   # (수신 시각, yaw) - 회전 속도 계산용 (11/12)
+        self.axis_offset = 0.0                    # (11/18) 트랙 방향 자동 보정 [rad] (트랙 축 = 설정 축 + 이 값)
+        self.axis_samples = collections.deque(maxlen=int(self.axis_auto['window']))
+        self.axis_logged = None
         self._defer_log = None
         self.heading_handoff = None     # (11/16) SLOW_ZONE -> CROSSWALK_STOP 으로 넘기는 고정 헤딩 (yaw, 시각)
         for k in self.YOLO_KEYS:
@@ -908,21 +930,68 @@ class MissionSupervisor(Node):
         self.buf['odom'].set(pose, now)
         self.yaw_hist.append((now, pose[2]))
 
+    def _axis_learn(self, msg, now):
+        """(11/18) 트랙 방향 자동 보정: 직선에서 '차 방향 + 카메라 차선 각도' 와 가장 가까운 설정 축의 차이를 모아 중간값을 axis_offset 으로."""
+        cfg = self.axis_auto
+        if not cfg['use']:
+            return
+        states = [x.strip() for x in str(cfg['states']).split(',') if x.strip()]
+        if self.current_label not in states:
+            return
+        if cfg['two_lines_only'] and bool(msg.single_lane_estimated):
+            return
+        if float(msg.confidence) < cfg['min_confidence']:
+            return
+        hd = float(msg.heading_error_rad)
+        if abs(hd) > math.radians(cfg['max_heading_deg']) or abs(float(msg.curvature)) > cfg['max_curvature']:
+            return
+        pose = self._latest('odom')
+        rate = self.turn_rate(now)
+        if pose is None or rate is None or abs(rate) > math.radians(cfg['max_rate_dps']):
+            return
+        lane = pose[2] + hd
+        ref = math.radians(self.avoid_static['axis_ref_deg'])
+        rel = math.atan2(math.sin(lane - ref), math.cos(lane - ref))
+        base = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
+        dev = math.atan2(math.sin(lane - base), math.cos(lane - base))
+        if abs(dev) > math.radians(cfg['max_deg']):
+            return
+        self.axis_samples.append(dev)
+        n = len(self.axis_samples)
+        if n < cfg['min_samples']:
+            return
+        vals = sorted(self.axis_samples)
+        med = vals[n // 2]
+        iqr = vals[(3 * n) // 4] - vals[n // 4]
+        self.dbg('axis/spread_deg', math.degrees(iqr))
+        if iqr > math.radians(cfg['max_spread_deg']):
+            return
+        self.axis_offset = med
+        self.dbg('axis/offset_deg', math.degrees(med))
+        if self.axis_logged is None or abs(med - self.axis_logged) >= math.radians(1.0):
+            self.get_logger().info('[축 보정] 카메라 차선 방향이 트랙 축에서 %+.1f도 (관측 %d개, 폭 %.1f도) - 트랙 축을 그만큼 돌려 씀'
+                                   % (math.degrees(med), n, math.degrees(iqr)))
+            self.axis_logged = med
+
+    def axis_rad(self, deg):
+        """(11/18) 설정 축 [도] + 자동 보정 -> [rad] (-pi~pi)."""
+        a = math.radians(deg) + self.axis_offset
+        return math.atan2(math.sin(a), math.cos(a))
+
     def known_lane_axis(self, yaw):
         """(11/16 A안) 3차선 직선 방향을 쓸 수 있으면 (방향, 차 방향 - 그 방향) [rad], 아니면 None."""
         cfg = self.avoid_static
         if not cfg['three_lane_axis_use']:
             return None
-        axis = math.radians(cfg['three_lane_axis_deg'])
-        axis = math.atan2(math.sin(axis), math.cos(axis))
+        axis = self.axis_rad(cfg['three_lane_axis_deg'])
         err = math.atan2(math.sin(yaw - axis), math.cos(yaw - axis))
         if abs(err) > math.radians(cfg['three_lane_axis_max_deg']):
             return None
         return axis, err
 
     def track_axis(self, yaw):
-        """(11/16) yaw 에서 가장 가까운 트랙 축(avoid_static.axis_ref_deg + 90도 단위)과 그 차이 (축, 차이) [rad]."""
-        ref = math.radians(self.avoid_static['axis_ref_deg'])
+        """(11/16) yaw 에서 가장 가까운 트랙 축(avoid_static.axis_ref_deg + 90도 단위, + 자동 보정)과 그 차이 (축, 차이) [rad]."""
+        ref = self.axis_rad(self.avoid_static['axis_ref_deg'])
         rel = math.atan2(math.sin(yaw - ref), math.cos(yaw - ref))
         axis = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
         axis = math.atan2(math.sin(axis), math.cos(axis))
@@ -980,6 +1049,7 @@ class MissionSupervisor(Node):
                                   float(msg.heading_error_rad),
                                   float(msg.confidence), stamp,
                                   bool(msg.single_lane_estimated)), now)
+            self._axis_learn(msg, now)
         else:
             self.buf['lane'].value = None        # 차선 유실 -> 페일세이프
 
@@ -1333,7 +1403,7 @@ class MissionSupervisor(Node):
         if known is not None:
             err = known[1]
         else:
-            ref = math.radians(cfg['axis_ref_deg'])
+            ref = self.axis_rad(cfg['axis_ref_deg'])
             rel = math.atan2(math.sin(pose[2] - ref), math.cos(pose[2] - ref))
             axis = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
             err = math.atan2(math.sin(pose[2] - axis), math.cos(pose[2] - axis))

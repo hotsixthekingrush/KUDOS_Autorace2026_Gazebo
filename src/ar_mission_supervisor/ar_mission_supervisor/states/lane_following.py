@@ -119,7 +119,7 @@ class LaneFollowing(SafeState):
         if pose is None:
             self.hold = None
             return False
-        axis = math.radians(node.avoid_static['three_lane_axis_deg'])
+        axis = node.axis_rad(node.avoid_static['three_lane_axis_deg'])   # (11/18) 트랙 방향 자동 보정 포함
         err = normalize_angle(axis - pose[2])
         log = node.get_logger()
         if self.hold is None:

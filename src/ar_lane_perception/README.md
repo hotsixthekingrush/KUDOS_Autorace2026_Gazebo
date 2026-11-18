@@ -138,6 +138,10 @@ ros2 launch ar_lane_perception camera_perception.launch.py image_topic:=/my/imag
   차선 폭 하나(실측 기억 + `guard_width_tol_m`) 안에 `row_max_runs`(3)개 이상이면 그 줄을 뺀다.
   방지턱 줄무늬는 진행 방향과 나란해서 (a)로는 안 빠지고 (b)로 빠진다.
   "한 줄에 3구간 이상"을 그대로 쓰면 옆 도로 선(약 0.2 m 바깥)이 보이는 정상 줄도 빠져서, 차선 폭 하나 안에 든 구간만 센다.
+- **두꺼운 노란 구간 (`max_seg_w_m`, 기본 0.0 = 끔):** 노란 마스크 추적 줄의 구간마다 가로 폭(양 끝 열의 지면 Y 차이, (b)와 같은 잣대)이
+  이 값보다 넓으면 그 구간만 버린다 (줄은 남김). `clean_enable` 과 무관하게 동작한다 (실차 safe3 은 `clean_enable: false`).
+  실행 중 `ros2 param set /camera_perception_node max_seg_w_m 0.08` 로 켜고 `0.0` 으로 끈다. 버린 개수는 lane_status `thick_dropped`.
+  가로 폭이라 영상에서 눕는 선(지그재그, 차가 크게 틀어졌을 때)은 실제보다 넓게 재진다 (실차 real_1114_e 에서 진짜 차선 구간 99% 0.11 m).
 - **줄을 뺀 뒤의 추적:** 원래 -19°의 직접 원인은 빠진 줄 다음 줄에서 멀리 떨어진 아래 줄 위치로 선을 찾다가 옆 도로 선을 잡은 것이다.
   한 선을 바로 아래 줄에서 못 찾았으면 이번 프레임 점들을 이은 직선으로 연장해(점 1개면 소실점 쪽으로 원근 축소) 찾는다.
   점선 끊김에도 같은 처리가 쓰인다.
@@ -246,6 +250,7 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 | `clean_enable` | true | 가로선/줄무늬 제거 |
 | `blob_angle_max_deg`, `blob_min_len_m`, `blob_max_width_m` | 30, 0.08, 0.08 | (a) 덩어리 제거 |
 | `row_width_ratio`, `row_max_runs` | 0.6, 3 | (b) 행 제외 |
+| `max_seg_w_m` | 0.0 | 노란 구간 가로 폭이 이보다 넓으면 그 구간만 버림 (0 = 끔) |
 | `guard_need_pair` | true | 한 선 프레임은 최근 실측 폭이 있을 때만 valid |
 | `min_confidence` | 0.05 | 이보다 낮으면 valid=false. 0이면 끔 |
 | `single_tol_m`, `single_conflict` | 0.05, invalid | 흰 선 프레임의 쌍/한쪽 선 충돌 → valid=false |

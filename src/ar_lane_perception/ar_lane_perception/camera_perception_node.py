@@ -307,7 +307,7 @@ class CameraPerceptionNode(Node):
                   'head': out.heading_error_rad, 'conf': out.confidence,
                   'n_one': int(r['n_one']), 'n_good': int(r['n_good']),
                   'proc_ms': round(proc_ms, 1), 'cs': self.core.p['color_space']}
-            for k in ('blobs_removed', 'rows_dropped', 'white_rows', 'fork_rows', 'single_rejected'):
+            for k in ('blobs_removed', 'rows_dropped', 'white_rows', 'fork_rows', 'single_rejected', 'thick_dropped'):
                 st[k] = int(r.get(k, 0))
             # 차선 폭 실측: 프레임 종류(pair/single), 이번 폭, 기억 폭, 쓴 폭, 고정 폭 경우(a=가, b=나), 속도 제한 여부
             st.update(kind=r['kind'], lat_raw=float(r['lat_raw']), width_meas=r['width_meas'],

@@ -34,6 +34,9 @@ DEFAULTS = {
     'row_width_ratio': 0.6,      # (b) 한 행의 한 구간 지면 폭 >= 차선 폭(실측 기억) * 이 값이면 그 행 제외
     'row_max_runs': 3,           # (b) 한 행에서 같은 색 구간이 차선 폭 하나(실측 기억 + guard_width_tol_m)
                                  #     안에 이 개수 이상 들어 있으면 그 행 제외. 옆 도로 선(0.2 m 바깥)은 세지 않음
+    # 두꺼운 노란 구간 거르기 (방지턱 노랑/검정 줄무늬). 노란 마스크 스캔 줄의 구간마다 가로 폭을 지면 m 로 바꿔
+    # 이 값보다 넓으면 그 구간만 버린다 (줄 전체는 남김). clean_enable 과 무관. 0.0 = 끔.
+    'max_seg_w_m': 0.0,
     # 선 추적 (영상 px)
     'center_x': 320,          # 처음 시작할 때만 좌/우 선을 가르는 기준
     'y_top': 320,
@@ -117,7 +120,7 @@ class LaneCore:
         self.invalid_run = 0
         self.prev_raw, self.last_ok = None, False
         self.fork_active, self.fork_t, self.fork_ref = False, None, 0.0
-        self.stats = dict(blobs_removed=0, rows_dropped=0, fork_rows=0, white_rows=0, single_rejected=0)
+        self.stats = dict(blobs_removed=0, rows_dropped=0, fork_rows=0, white_rows=0, single_rejected=0, thick_dropped=0)
         self._gmap_key = None
         self._gmap = None
         self.prev_raw_t = None
@@ -284,13 +287,34 @@ class LaneCore:
                 removed += 1
         return out, removed
 
-    def row_groups(self, mask, y, w, h):
-        """한 추적 줄의 구간 중심 목록. (b) 넓은 구간이나 구간 수 초과면 None (그 줄 제외)."""
+    def seg_groups(self, mask, y):
+        """한 추적 줄(위아래 2줄 포함 띠)의 같은 색 가로 구간 (열 번호 배열 목록). 8 px 이하 틈은 이어 봄."""
         band = mask[max(y - 2, 0):y + 3, :]
         cols = np.nonzero(band.any(axis=0))[0]
         if len(cols) == 0:
             return []
-        groups = np.split(cols, np.where(np.diff(cols) > 8)[0] + 1)
+        return np.split(cols, np.where(np.diff(cols) > 8)[0] + 1)
+
+    def seg_width_m(self, gp, y, w, h):
+        """구간 가로 폭 [m]: 양 끝 열의 지면 Y 차이 (row_groups (b) 와 같은 잣대)."""
+        _, Y, _ = self.ground_maps(w, h)
+        return float(abs(Y[y, gp[0]] - Y[y, gp[-1]]))
+
+    def row_groups(self, mask, y, w, h, thick=False):
+        """한 추적 줄의 구간 중심 목록. (b) 넓은 구간이나 구간 수 초과면 None (그 줄 제외).
+
+        thick=True(노란 마스크): max_seg_w_m > 0 이면 지면 폭이 그보다 넓은 구간을 먼저 버린다.
+        """
+        groups = self.seg_groups(mask, y)
+        if len(groups) == 0:
+            return []
+        mw = float(self.p.get('max_seg_w_m', 0.0) or 0.0)
+        if thick and mw > 0.0:
+            keep = [gp for gp in groups if self.seg_width_m(gp, y, w, h) <= mw]
+            self.stats['thick_dropped'] += len(groups) - len(keep)
+            groups = keep
+            if len(groups) == 0:
+                return []
         if self.p['clean_enable']:
             _, Y, _ = self.ground_maps(w, h)
             lim = self.p['row_width_ratio'] * self.cur_width()
@@ -364,7 +388,7 @@ class LaneCore:
         self._dropped_rows = set()
         self._wrow_new = {}      # 이번 프레임 줄별 픽셀 폭 후보 (process가 폭 검사 통과 때만 wrow에 반영)
         wmask = self.white_mask(img) if g('white_enable') else None
-        self.stats = dict(blobs_removed=0, rows_dropped=0, fork_rows=0, white_rows=0, single_rejected=0)
+        self.stats = dict(blobs_removed=0, rows_dropped=0, fork_rows=0, white_rows=0, single_rejected=0, thick_dropped=0)
         if g('clean_enable'):
             mask, k = self.clean_mask(mask, y0, y1)
             self.stats['blobs_removed'] += k
@@ -393,7 +417,7 @@ class LaneCore:
         vh = h / 2.0 - g('focal_px') * np.tan(g('cam_pitch_rad'))   # 지평선 줄
         for idx, y in enumerate(ys):
             y = int(y)
-            means = self.row_groups(mask, y, w, h)
+            means = self.row_groups(mask, y, w, h, thick=True)
             dropped = means is None
             wset = set()
             if wmask is not None and not (means and self._has_pair(means, y, w, h)):

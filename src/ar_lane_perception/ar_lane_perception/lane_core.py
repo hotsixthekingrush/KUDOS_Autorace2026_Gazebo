@@ -37,6 +37,14 @@ DEFAULTS = {
     # 두꺼운 노란 구간 거르기 (방지턱 노랑/검정 줄무늬). 노란 마스크 스캔 줄의 구간마다 가로 폭을 지면 m 로 바꿔
     # 이 값보다 넓으면 그 구간만 버린다 (줄 전체는 남김). clean_enable 과 무관. 0.0 = 끔.
     'max_seg_w_m': 0.0,
+    # 한 선 프레임 좌우 착각 막기. 0.0 = 끔. 한 선 프레임의 새 lateral 이 예측 lateral(마지막 내보낸 값을 odom 으로
+    # 옮긴 값, LaneCore.motion)과 이 값보다 다르면: (a) 선의 좌우를 바꿔 다시 계산한 값이 예측과 이 안이면 바꾼 쪽을 쓰고,
+    # (b) 둘 다 아니면 예측값을 낸다 (valid 유지). (a)/(b)가 side_hold_max_sec 넘게 이어지면 새 측정을 그대로 받는다.
+    'side_guard_m': 0.0,
+    'side_hold_max_sec': 0.5,
+    # 연속 추적 기준점 보정. true 면 이번 프레임 선을 직전 왼쪽/오른쪽 선에 이어 붙일 때 기준이 되는 직전 선 위치를
+    # 차가 움직인 만큼(LaneCore.pose_at: odom 거리 + imu 방향) 옮긴 뒤 가장 가까운 선을 고른다. 한 선/두 선 모두.
+    'track_motion_comp': False,
     # 선 추적 (영상 px)
     'center_x': 320,          # 처음 시작할 때만 좌/우 선을 가르는 기준
     'y_top': 320,
@@ -127,6 +135,10 @@ class LaneCore:
         # motion(lat, head, t_from, t_to) -> (lat, head) 또는 None: t_from에 잰 차선 중심선을 t_to의 차 자세 기준으로 옮김.
         # 노드가 odom으로 설정한다. None이면 예전처럼 옮기지 않고 비교한다.
         self.motion = None
+        # pose_at(t) -> (x, y, yaw) 또는 None: track_motion_comp 용 차 자세. 노드가 odom 으로 설정한다.
+        self.pose_at = None
+        self._lr_t = None                    # prevL / prevR 를 잰 프레임 시각
+        self._refL, self._refR = self.prevL, self.prevR   # 이번 프레임 연속 추적 기준 (보정 끄면 prevL/prevR 그대로)
         # 차선 폭 실측 기억
         self.w_mem, self.w_t = None, None    # 기억한 미터 폭, 마지막 실측 시각
         self.half = self.p['lane_width_default_m'] / 2.0   # 이번 프레임에 쓰는 반폭 (process가 정함)
@@ -137,7 +149,9 @@ class LaneCore:
         self.last_kind = None                # 마지막 valid 프레임 종류 'pair' | 'single'
         self.out_lat = self.out_head = self.out_t = None
         self.slew_on = False
-        self.counts = dict(frames=0, pair=0, single=0, fixed_a=0, fixed_b=0, width_reject=0, slew=0)
+        self.counts = dict(frames=0, pair=0, single=0, fixed_a=0, fixed_b=0, width_reject=0, slew=0,
+                           side_flip=0, side_hold=0, side_accept=0)
+        self.side_hold_t = None             # side_guard_m (a)/(b) 가 이어지기 시작한 시각
 
     def width_fresh(self, t):
         return (self.w_mem is not None and self.w_t is not None
@@ -438,8 +452,8 @@ class LaneCore:
 
             exp = self.exp_px(y, w, h)
             known = y in self.wrow or self.w_mem is not None
-            pl = lastL if lastL is not None else self.prevL.get(y)
-            pr = lastR if lastR is not None else self.prevR.get(y)
+            pl = lastL if lastL is not None else self._refL.get(y)
+            pr = lastR if lastR is not None else self._refR.get(y)
             if ptsL and idx - ptsL[-1][0] >= 2:
                 pl = self._predict(ptsL, ptsR, y, cx0, vh)
             if ptsR and idx - ptsR[-1][0] >= 2:
@@ -690,6 +704,36 @@ class LaneCore:
                 ws.append(abs(a[1] - b[1]) * c)
         return float(np.median(ws)) if ws else None
 
+    def _comp_rows(self, rows, a, b, w, h):
+        """track_motion_comp: 직전 선 점 {줄: u}(자세 a 에서 잰 것)를 지면으로 바꿔 자세 b 기준으로 옮긴 뒤 영상으로 되돌려
+        같은 줄들의 u 를 다시 읽는다 (옮긴 점 사이 보간, 범위 밖은 끝 두 점 직선 연장). 점이 2개 미만이면 그대로."""
+        pts = []
+        ca, sa = np.cos(a[2]), np.sin(a[2])
+        cb, sb = np.cos(b[2]), np.sin(b[2])
+        for y, u in rows.items():
+            q = self.pix_to_base(u, y, w, h)
+            if q is None:
+                continue
+            X, Y = a[0] + ca * q[0] - sa * q[1], a[1] + sa * q[0] + ca * q[1]
+            dx, dy = X - b[0], Y - b[1]
+            r = self.base_to_pix(cb * dx + sb * dy, -sb * dx + cb * dy, w, h)
+            if r is not None:
+                pts.append((float(r[1]), float(r[0])))
+        if len(pts) < 2:
+            return dict(rows)
+        pts.sort()
+        V = np.array([p[0] for p in pts])
+        U = np.array([p[1] for p in pts])
+        out = {}
+        for y in rows:
+            if V[0] <= y <= V[-1]:
+                out[y] = float(np.interp(y, V, U))
+            else:
+                i, j = (0, 1) if y < V[0] else (-2, -1)
+                dv = V[j] - V[i]
+                out[y] = float(U[i] if abs(dv) < 1e-6 else U[i] + (U[j] - U[i]) * (y - V[i]) / dv)
+        return out
+
     def _history_side(self, newL, newR, oldL, oldR):
         """추적 기록(직전 프레임 선 위치)과 더 잘 이어지는 쪽 'L' | 'R'. 기록이 없으면 None."""
         def dist(new, old):
@@ -784,9 +828,17 @@ class LaneCore:
         self.last_t = t
         if self.w_mem is not None and not self.width_fresh(t):
             self.w_mem, self.w_t, self.wrow = None, None, {}     # 오래된 실측은 버림 -> 경우 (가)
-        oldL, oldR = dict(self.prevL), dict(self.prevR)
+        self._refL, self._refR = self.prevL, self.prevR
+        if g('track_motion_comp') and self.pose_at is not None and self._lr_t is not None and (self.prevL or self.prevR):
+            a, b = self.pose_at(self._lr_t), self.pose_at(t)
+            if a is not None and b is not None:
+                self._refL = self._comp_rows(self.prevL, a, b, w, h)
+                self._refR = self._comp_rows(self.prevR, a, b, w, h)
+        oldL, oldR = dict(self._refL), dict(self._refR)
         newL, newR, pairs, dbg = self.track(img, want_debug)
         tracked = bool(newL or newR)
+        if tracked:
+            self._lr_t = t
         self.half = self.cur_width() / 2.0
         lat, head, valid, conf, n_both, n_one = self.lane_error(newL, newR, w, h)
         # --- 차선 폭 실측과 범위 검사
@@ -841,6 +893,42 @@ class LaneCore:
             self.half = W / 2.0
             lat, head, valid, conf, n_both, n_one = self.lane_error(newL, newR, w, h)
         single = single and valid
+        side_act = ''
+        sg = float(g('side_guard_m') or 0.0)
+        if sg > 0.0 and single and self.out_t is not None and 0.0 <= t - self.out_t <= g('guard_memory_sec'):
+            p_lat, p_head = self._moved(self.out_lat, self.out_head, self.out_t, t)
+            if abs(lat - p_lat) <= sg:
+                self.side_hold_t = None
+            else:
+                if self.side_hold_t is None:
+                    self.side_hold_t = t
+                if t - self.side_hold_t >= g('side_hold_max_sec'):
+                    # (a)/(b) 가 side_hold_max_sec 넘게 이어짐: 진짜로 옮겨갔거나 예측 기준 자체가 틀린 것으로 보고
+                    # 새 측정을 그대로 받는다 (틀린 값이 기준이 되어 맞는 측정을 계속 뒤집는 것을 막음)
+                    side_act = 'accept'
+                    self.counts['side_accept'] += 1
+                    self.side_hold_t = None
+                else:
+                    fL, fR = newR, newL
+                    r_f = self.lane_error(fL, fR, w, h)
+                    if r_f[2] and abs(r_f[0] - p_lat) <= sg:
+                        # (a) 좌우를 바꾼 쪽이 예측과 맞음: 바꾼 값을 쓰고 추적 기록도 바꾼다
+                        newL, newR = fL, fR
+                        lat, head, valid, conf, n_both, n_one = r_f
+                        if tracked:
+                            self.prevL, self.prevR = newL, newR
+                        side_act = 'flip'
+                        self.counts['side_flip'] += 1
+                    else:
+                        # (b) 예측값을 낸다 (valid 유지). 경로 점은 측정과 맞지 않으므로 비움
+                        self.lane_error(newL, newR, w, h)     # path_info 를 원래 측정으로 되돌림
+                        lat, head = float(p_lat), float(p_head)
+                        self.path_pts = None
+                        side_act = 'hold'
+                        self.counts['side_hold'] += 1
+        elif sg > 0.0:
+            self.side_hold_t = None
+        self.stats['side_act'] = side_act
         if single:
             conf = float(g('single_confidence'))
         n_good = n_both
@@ -927,4 +1015,5 @@ class LaneCore:
                     width_meas=wf, width_mem=self.w_mem, width_used=2.0 * self.half, fixed=fixed if ok else '',
                     width_note=note, slew=lat != lat_raw, corner_b=self.corner_b,
                     outer_off=('o' in fixed), path=self.path_pts if ok else None,
-                    path_info=self.path_info if valid else None, **self.stats)
+                    path_info=self.path_info if valid else None,
+                    side_flip=self.counts['side_flip'], side_hold=self.counts['side_hold'], **self.stats)

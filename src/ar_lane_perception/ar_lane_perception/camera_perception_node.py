@@ -90,6 +90,7 @@ class CameraPerceptionNode(Node):
                 else '/odom pose 그대로'))
             self.create_subscription(Odometry, self.get_parameter('odom_topic').value, self.odom_callback, 50)
             self.core.motion = self.motion
+            self.core.pose_at = self.pose_at        # track_motion_comp (연속 추적 기준점 보정)
             self.create_timer(1.0 / float(self.get_parameter('predict_rate_hz').value), self.predict_tick)
         p = self.core.p
         self.get_logger().info(
@@ -309,6 +310,9 @@ class CameraPerceptionNode(Node):
                   'proc_ms': round(proc_ms, 1), 'cs': self.core.p['color_space']}
             for k in ('blobs_removed', 'rows_dropped', 'white_rows', 'fork_rows', 'single_rejected', 'thick_dropped'):
                 st[k] = int(r.get(k, 0))
+            # 한 선 좌우 착각 막기 (side_guard_m): 누적 횟수와 이번 프레임 처리 ('' | flip | hold | accept)
+            st.update(side_flip=int(r.get('side_flip', 0)), side_hold=int(r.get('side_hold', 0)),
+                      side_act=r.get('side_act', ''))
             # 차선 폭 실측: 프레임 종류(pair/single), 이번 폭, 기억 폭, 쓴 폭, 고정 폭 경우(a=가, b=나), 속도 제한 여부
             st.update(kind=r['kind'], lat_raw=float(r['lat_raw']), width_meas=r['width_meas'],
                       width_mem=r['width_mem'], width_used=float(r['width_used']), fixed=r['fixed'],

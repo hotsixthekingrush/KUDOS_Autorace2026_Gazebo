@@ -142,6 +142,13 @@ ros2 launch ar_lane_perception camera_perception.launch.py image_topic:=/my/imag
   이 값보다 넓으면 그 구간만 버린다 (줄은 남김). `clean_enable` 과 무관하게 동작한다 (실차 safe3 은 `clean_enable: false`).
   실행 중 `ros2 param set /camera_perception_node max_seg_w_m 0.08` 로 켜고 `0.0` 으로 끈다. 버린 개수는 lane_status `thick_dropped`.
   가로 폭이라 영상에서 눕는 선(지그재그, 차가 크게 틀어졌을 때)은 실제보다 넓게 재진다 (실차 real_1114_e 에서 진짜 차선 구간 99% 0.11 m).
+- **한 선 좌우 착각 막기 (`side_guard_m`, 기본 0.0 = 끔):** 한 선 프레임의 새 lateral 이 예측 lateral(마지막으로 내보낸 값을 odom 거리 + imu 방향으로
+  옮긴 값)과 `side_guard_m` 넘게 다르면 (a) 선의 좌우를 바꿔 다시 계산한 값이 예측과 그 안이면 바꾼 쪽을 쓰고 추적 기록도 바꾼다,
+  (b) 둘 다 아니면 예측값을 낸다 (valid 유지). (a)/(b)가 `side_hold_max_sec`(0.5 s) 넘게 이어지면 새 측정을 그대로 받는다
+  (틀린 값이 기준이 되어 맞는 측정을 계속 뒤집지 않게). 마지막 valid 뒤 `guard_memory_sec`(1 s)가 지났으면 보지 않는다.
+  예측은 노드가 odom 을 받을 때(`predict_enable`)만 차 움직임을 반영한다. lane_status: `side_flip`, `side_hold` (누적), `side_act`.
+- **연속 추적 기준점 보정 (`track_motion_comp`, 기본 false):** 이번 프레임 선을 직전 왼쪽/오른쪽 선에 이어 붙일 때 기준이 되는 직전 선 점을
+  지면으로 바꿔 차가 움직인 만큼 옮긴 뒤 영상으로 되돌려 쓴다 (가장 가까운 선 고르기는 그대로). 노드가 odom 을 받을 때만 동작.
 - **줄을 뺀 뒤의 추적:** 원래 -19°의 직접 원인은 빠진 줄 다음 줄에서 멀리 떨어진 아래 줄 위치로 선을 찾다가 옆 도로 선을 잡은 것이다.
   한 선을 바로 아래 줄에서 못 찾았으면 이번 프레임 점들을 이은 직선으로 연장해(점 1개면 소실점 쪽으로 원근 축소) 찾는다.
   점선 끊김에도 같은 처리가 쓰인다.
@@ -251,6 +258,8 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 | `blob_angle_max_deg`, `blob_min_len_m`, `blob_max_width_m` | 30, 0.08, 0.08 | (a) 덩어리 제거 |
 | `row_width_ratio`, `row_max_runs` | 0.6, 3 | (b) 행 제외 |
 | `max_seg_w_m` | 0.0 | 노란 구간 가로 폭이 이보다 넓으면 그 구간만 버림 (0 = 끔) |
+| `side_guard_m`, `side_hold_max_sec` | 0.0, 0.5 | 한 선 프레임 좌우 착각 막기 (0 = 끔). 아래 '한 선 좌우 착각 막기' |
+| `track_motion_comp` | false | 연속 추적 기준점(직전 선 위치)을 차가 움직인 만큼 옮겨서 비교 |
 | `guard_need_pair` | true | 한 선 프레임은 최근 실측 폭이 있을 때만 valid |
 | `min_confidence` | 0.05 | 이보다 낮으면 valid=false. 0이면 끔 |
 | `single_tol_m`, `single_conflict` | 0.05, invalid | 흰 선 프레임의 쌍/한쪽 선 충돌 → valid=false |

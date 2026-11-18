@@ -42,6 +42,9 @@ DEFAULTS = {
     # (b) 둘 다 아니면 예측값을 낸다 (valid 유지). (a)/(b)가 side_hold_max_sec 넘게 이어지면 새 측정을 그대로 받는다.
     'side_guard_m': 0.0,
     'side_hold_max_sec': 0.5,
+    # 섰다가 출발: 마지막 출력 뒤 차가 움직인 거리(odom, pose_at)가 이 값 이하이고 방향 변화가 5° 이하면 guard_memory_sec 이 지나도
+    # 예측 기준을 그대로 쓴다 (서 있는 동안 차선과의 위치는 그대로). 0 = 끔 (기존: 1 s 지나면 side_guard 안 봄).
+    'side_guard_stop_m': 0.0,
     # 연속 추적 기준점 보정. true 면 이번 프레임 선을 직전 왼쪽/오른쪽 선에 이어 붙일 때 기준이 되는 직전 선 위치를
     # 차가 움직인 만큼(LaneCore.pose_at: odom 거리 + imu 방향) 옮긴 뒤 가장 가까운 선을 고른다. 한 선/두 선 모두.
     'track_motion_comp': False,
@@ -61,6 +64,7 @@ DEFAULTS = {
     'corner_line_max_dist_m': 1.0,    # 이 거리 안(영상 줄)에서만 찾음. heading 섞는 비율도 이 거리에서 0
     'corner_line_near_m': 0.4,        # 이 거리 이하면 heading 을 경계선 방향으로 다 바꿈
     'corner_line_attach_m': 0.15,     # 옆선 연장선이 경계선 끝에서 이 안이면 '붙음'
+    'corner_line_box_m': 0.25,        # 왼쪽 선이 왼쪽 끝, 오른쪽 선이 오른쪽 끝 둘 다 이 안이면 = 닫힌 상자(건너가는 가로선) -> 방향 안 정함
     'corner_line_end_early_m': 0.15,  # (보조) 두 옆선 꼭대기 거리 차가 이보다 크면 먼저 끝난 쪽이 열린 쪽
     'corner_line_mem_sec': 1.0,       # 열린 쪽 기억 시간 (방향을 못 정한 프레임, opposite_guard 용)
     'corner_line_confidence': 0.25,   # 차선은 invalid 인데 경계선으로 낸 프레임의 confidence
@@ -68,6 +72,11 @@ DEFAULTS = {
     # 반대 부호(|lat| > opposite_min_lat_m)면 그 값을 내지 않고 예측값(마지막 출력을 odom 으로 옮긴 값, 없으면 0)을 낸다.
     # 열린 쪽은 경계선 검출로만 정한다 (이 파라미터만 켜도 검출은 돌지만 마스크·출력은 바꾸지 않음).
     'opposite_guard_enable': False,
+    # 한 선 프레임 최소 줄 수. 보이는 선이 잡힌 스캔 줄이 이보다 적으면 그 프레임은 invalid (노드는 예측값으로 이어 감).
+    # 지그재그·코너에서 2~4줄짜리 한 선 프레임이 lat 을 0.1~0.2 m 튀게 하는 것을 막는다. 0 = 끔 (기존: 2줄).
+    'single_min_rows': 0,
+    # 색 변환·마스크를 쓰는 행만 (y_top-5 ~ y_bot+5, 경계선 검출이 켜졌으면 그 범위까지). 나머지 행은 0. 출력은 기존과 같다.
+    'crop_rows': False,
     'opposite_far_m': 0.55,
     'opposite_min_lat_m': 0.08,
     # 선 추적 (영상 px)
@@ -241,9 +250,40 @@ class LaneCore:
                 R = None
         return L, R
 
+    def _crop_range(self, h, w):
+        """crop_rows: 마스크를 쓰는 행 범위 [r0, r1). 추적 띠·clean_mask·fork_rows 는 y_top-2 ~ y_bot+2, 경계선 검출은 화면 아래까지."""
+        g = self.p.get
+        r0 = int(min(g('y_top'), g('y_bot'))) - 5
+        r1 = int(max(g('y_top'), g('y_bot'))) + 6
+        if g('corner_line_enable') or g('opposite_guard_enable'):
+            X, _, _ = self.ground_maps(w, h)
+            col = X[:, w // 2]
+            ok = np.isfinite(col) & (col <= g('corner_line_max_dist_m'))
+            if ok.any():
+                r0 = min(r0, int(np.argmax(ok)))
+            r1 = h
+        return max(r0, 0), min(r1, h)
+
+    def _masked(self, img, conv, lo, hi):
+        """conv 색 공간으로 바꿔 inRange. crop_rows 면 쓰는 행만 바꾸고 나머지는 0 (화소별 변환이라 그 행 값은 같다)."""
+        if not self.p.get('crop_rows'):
+            return cv2.inRange(cv2.cvtColor(img, conv), lo, hi)
+        h, w = img.shape[:2]
+        r0, r1 = self._crop_range(h, w)
+        out = np.zeros((h, w), np.uint8)
+        if r1 > r0:
+            out[r0:r1] = cv2.inRange(cv2.cvtColor(img[r0:r1], conv), lo, hi)
+        return out
+
     def lane_mask(self, img):
         """노란 선 마스크 (uint8, 0/255). color_space 파라미터로 HLS / LAB 선택."""
         g = self.p.get
+        if g('crop_rows'):
+            if g('color_space') == 'lab':
+                return self._masked(img, cv2.COLOR_BGR2LAB, np.array([g('lab_l_min'), g('lab_a_min'), g('lab_b_min')]),
+                                    np.array([g('lab_l_max'), g('lab_a_max'), g('lab_b_max')]))
+            return self._masked(img, cv2.COLOR_BGR2HLS, np.array([g('lane_h_l'), g('lane_l_l'), g('lane_s_l')]),
+                                np.array([g('lane_h_h'), g('lane_l_h'), g('lane_s_h')]))
         if g('color_space') == 'lab':
             lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
             return cv2.inRange(lab,
@@ -257,6 +297,13 @@ class LaneCore:
     def white_mask(self, img):
         """흰 선 마스크 (uint8, 0/255). color_space를 따른다."""
         g = self.p.get
+        if g('crop_rows'):
+            if g('color_space') == 'lab':
+                lo = np.array([g('white_lab_l_min'), g('white_lab_a_min'), g('white_lab_b_min')])
+                return self._masked(img, cv2.COLOR_BGR2LAB, lo,
+                                    np.array([g('white_lab_l_max'), g('white_lab_a_max'), g('white_lab_b_max')]))
+            return self._masked(img, cv2.COLOR_BGR2HLS, np.array([g('white_h_l'), g('white_l_l'), g('white_s_l')]),
+                                np.array([g('white_h_h'), g('white_l_h'), g('white_s_h')]))
         if g('color_space') == 'lab':
             lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
             return cv2.inRange(lab,
@@ -631,7 +678,7 @@ class LaneCore:
             side = 'L' if G['L'] else 'R'
             P = np.array([G[side][y] for y in sorted(G[side], reverse=True)])
             n_one = len(P)
-            if n_one < 2 or np.ptp(P[:, 0]) < 0.10:
+            if n_one < max(2, int(self.p.get('single_min_rows', 0) or 0)) or np.ptp(P[:, 0]) < 0.10:
                 return 0.0, 0.0, False, 0.0, 0, n_one
             A = np.c_[np.ones(n_one), P[:, 0]]
             coef = np.linalg.lstsq(A, P[:, 1], rcond=None)[0]
@@ -820,6 +867,15 @@ class LaneCore:
             q = np.array([x for x in q if x is not None])
             if len(q) >= 2 and np.ptp(q[:, 0]) > 0.05:
                 P[side] = q
+        near = {}
+        for side, pts in (('L', newL), ('R', newR)):       # 상자 검사는 점 개수와 상관없이 (점 1개만 보여도)
+            q = [self.pix_to_base(u, y, w, h) for y, u in pts.items()]
+            q = np.array([x for x in q if x is not None])
+            if len(q):
+                e = cor['end_l'] if side == 'L' else cor['end_r']
+                near[side] = float(np.min(np.hypot(q[:, 0] - e[0], q[:, 1] - e[1])))
+        if len(near) == 2 and max(near.values()) <= g('corner_line_box_m'):
+            return 0, 'box'          # 두 옆선이 양 끝에 다 붙음: 코너 바깥 경계가 아니라 건너가는 가로선일 수 있어 방향을 못 정함
         att = {}
         for side, q in P.items():
             # 옆선 점 중 경계선 끝에 가장 가까운 점까지 거리 (옆선이 그 끝까지 와서 붙음)
@@ -1068,7 +1124,13 @@ class LaneCore:
         single = single and valid
         side_act = ''
         sg = float(g('side_guard_m') or 0.0)
-        if sg > 0.0 and single and self.out_t is not None and 0.0 <= t - self.out_t <= g('guard_memory_sec'):
+        sg_fresh = self.out_t is not None and 0.0 <= t - self.out_t <= g('guard_memory_sec')
+        if sg > 0.0 and not sg_fresh and self.out_t is not None and g('side_guard_stop_m') > 0.0 and self.pose_at is not None:
+            a, b = self.pose_at(self.out_t), self.pose_at(t)
+            if a is not None and b is not None and np.hypot(b[0] - a[0], b[1] - a[1]) <= g('side_guard_stop_m') \
+                    and abs(np.arctan2(np.sin(b[2] - a[2]), np.cos(b[2] - a[2]))) <= np.radians(5.0):
+                sg_fresh = True                      # 서 있었음: 마지막 출력 기준이 그대로 유효
+        if sg > 0.0 and single and sg_fresh:
             p_lat, p_head = self._moved(self.out_lat, self.out_head, self.out_t, t)
             if abs(lat - p_lat) <= sg:
                 self.side_hold_t = None
@@ -1130,6 +1192,8 @@ class LaneCore:
             sdir, why_d = self._corner_dir(cor, newL, newR, w, h)
             if sdir:
                 self.corner_dir_mem = (sdir, t)
+            elif why_d == 'box':
+                self.corner_dir_mem = (None, None)           # 상자면 기억값도 버림
             elif self.corner_dir_mem[0] is not None and 0.0 <= t - self.corner_dir_mem[1] <= g('corner_line_mem_sec'):
                 sdir, why_d = self.corner_dir_mem[0], 'mem'
             cs.update(corner_line=1, corner_dir=sdir, corner_why=why_d, corner_dist=round(cor['dist'], 3),

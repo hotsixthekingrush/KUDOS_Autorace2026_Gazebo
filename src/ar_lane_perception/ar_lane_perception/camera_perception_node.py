@@ -18,7 +18,10 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor, ExternalShutdownException
+import threading
 from rcl_interfaces.msg import SetParametersResult
 from cv_bridge import CvBridge
 from sensor_msgs.msg import Image, Imu
@@ -67,7 +70,20 @@ class CameraPerceptionNode(Node):
         self.debug_pub = self.create_publisher(Image, 'debug_image', 10)
         self.status_pub = self.create_publisher(String, '/perception/lane_status', 10)
         topic = self.get_parameter('image_topic').value
-        self.create_subscription(Image, topic, self.image_callback, qos_profile_sensor_data)
+        # 영상 입력 (시작할 때만 읽음): executor_threads >= 2 면 영상 콜백을 전용 콜백 그룹에 두고 멀티스레드 실행기로 돌린다
+        # (imu 100 Hz / odom / 예측 타이머는 다른 그룹). image_qos_depth >= 1 이면 best effort, KEEP_LAST depth 그 값
+        # (0 = 예전 qos_profile_sensor_data: best effort depth 5). 공유 상태(odom 자세, 마지막 중심선)는 self._lock 으로 보호.
+        self.declare_parameter('executor_threads', 1)
+        self.declare_parameter('image_qos_depth', 0)
+        self._lock = threading.RLock()
+        mt = int(self.get_parameter('executor_threads').value) >= 2
+        self.cb_img = MutuallyExclusiveCallbackGroup() if mt else None
+        self.cb_other = MutuallyExclusiveCallbackGroup() if mt else None
+        qd = int(self.get_parameter('image_qos_depth').value)
+        qos = qos_profile_sensor_data if qd <= 0 else QoSProfile(
+            depth=qd, reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.VOLATILE)
+        self.create_subscription(Image, topic, self.image_callback, qos, callback_group=self.cb_img)
 
         self.predict = bool(self.get_parameter('predict_enable').value)
         self.poses = collections.deque(maxlen=400)   # (t, x, y, yaw) odom
@@ -82,16 +98,19 @@ class CameraPerceptionNode(Node):
             src = str(self.get_parameter('odom_yaw_source').value).lower()
             if src == 'imu':
                 self.dr = OdomImuPose()
-                self.create_subscription(Imu, self.get_parameter('imu_topic').value, self.imu_callback, 50)
+                self.create_subscription(Imu, self.get_parameter('imu_topic').value, self.imu_callback, 50,
+                                         callback_group=self.cb_other)
             elif src != 'odom':
                 self.get_logger().warn('odom_yaw_source=%s 는 모름 - odom 으로 씀 (odom | imu)' % src)
             self.get_logger().info('예측 차 방향: %s' % (
                 '/odom 속도 + %s 방향' % self.get_parameter('imu_topic').value if self.dr is not None
                 else '/odom pose 그대로'))
-            self.create_subscription(Odometry, self.get_parameter('odom_topic').value, self.odom_callback, 50)
+            self.create_subscription(Odometry, self.get_parameter('odom_topic').value, self.odom_callback, 50,
+                                     callback_group=self.cb_other)
             self.core.motion = self.motion
             self.core.pose_at = self.pose_at        # track_motion_comp (연속 추적 기준점 보정)
-            self.create_timer(1.0 / float(self.get_parameter('predict_rate_hz').value), self.predict_tick)
+            self.create_timer(1.0 / float(self.get_parameter('predict_rate_hz').value), self.predict_tick,
+                              callback_group=self.cb_other)
         p = self.core.p
         self.get_logger().info(
             '구독 %s -> /perception/lane_error (reference_distance_m=%.2f, 차선 폭 실측 %.2f~%.2f m, '
@@ -105,51 +124,54 @@ class CameraPerceptionNode(Node):
     # odom 예측
     # ------------------------------------------------------------------
     def imu_callback(self, m):
-        q = m.orientation
-        self.dr.set_imu(q.x, q.y, q.z, q.w)
+        with self._lock:
+            q = m.orientation
+            self.dr.set_imu(q.x, q.y, q.z, q.w)
 
     def odom_callback(self, m):
-        t = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
-        if self.poses and t <= self.poses[-1][0]:
-            if t < self.poses[-1][0] - 1.0:      # 시간이 뒤로 감 (시뮬 리셋)
-                self.poses.clear()
-                self.line = None
-                if self.dr is not None:
-                    self.dr.reset()
-            return
-        if self.dr is not None:
-            pose = self.dr.update(t, m.twist.twist.linear.x)
-            if pose is None:                     # IMU 가 아직 안 옴 -> 예측 안 함 (카메라 값만 나감)
-                if self._imu_wait_t0 is None:
-                    self._imu_wait_t0 = t
-                elif t - self._imu_wait_t0 > 2.0 and not self._imu_warned:
-                    self._imu_warned = True
-                    self.get_logger().warn('/odom 은 오는데 %s 가 2초 넘게 안 옴 - 예측 꺼진 상태 (odom_yaw_source=imu)'
-                                           % self.get_parameter('imu_topic').value)
+        with self._lock:
+            t = m.header.stamp.sec + m.header.stamp.nanosec * 1e-9
+            if self.poses and t <= self.poses[-1][0]:
+                if t < self.poses[-1][0] - 1.0:      # 시간이 뒤로 감 (시뮬 리셋)
+                    self.poses.clear()
+                    self.line = None
+                    if self.dr is not None:
+                        self.dr.reset()
                 return
-            x, y, yaw = pose
-        else:
-            q, pp = m.pose.pose.orientation, m.pose.pose.position
-            yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-            x, y = pp.x, pp.y
-        if not all(math.isfinite(v) for v in (x, y, yaw)):
-            return
-        self.poses.append((t, x, y, yaw))
+            if self.dr is not None:
+                pose = self.dr.update(t, m.twist.twist.linear.x)
+                if pose is None:                     # IMU 가 아직 안 옴 -> 예측 안 함 (카메라 값만 나감)
+                    if self._imu_wait_t0 is None:
+                        self._imu_wait_t0 = t
+                    elif t - self._imu_wait_t0 > 2.0 and not self._imu_warned:
+                        self._imu_warned = True
+                        self.get_logger().warn('/odom 은 오는데 %s 가 2초 넘게 안 옴 - 예측 꺼진 상태 (odom_yaw_source=imu)'
+                                               % self.get_parameter('imu_topic').value)
+                    return
+                x, y, yaw = pose
+            else:
+                q, pp = m.pose.pose.orientation, m.pose.pose.position
+                yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+                x, y = pp.x, pp.y
+            if not all(math.isfinite(v) for v in (x, y, yaw)):
+                return
+            self.poses.append((t, x, y, yaw))
 
     def pose_at(self, t):
         """t의 odom 자세 (선형 보간). 기록 범위 밖이면 가장 가까운 끝 (0.3 s 넘게 벗어나면 None)."""
-        P = self.poses
-        if not P:
-            return None
-        if t <= P[0][0]:
-            return P[0][1:] if P[0][0] - t <= 0.3 else None
-        if t >= P[-1][0]:
-            return P[-1][1:] if t - P[-1][0] <= 0.3 else None
-        i = bisect.bisect_left([a[0] for a in P], t)
-        a, b = P[i - 1], P[i]
-        k = (t - a[0]) / max(b[0] - a[0], 1e-9)
-        dyaw = math.atan2(math.sin(b[3] - a[3]), math.cos(b[3] - a[3]))
-        return (a[1] + k * (b[1] - a[1]), a[2] + k * (b[2] - a[2]), a[3] + k * dyaw)
+        with self._lock:
+            P = self.poses
+            if not P:
+                return None
+            if t <= P[0][0]:
+                return P[0][1:] if P[0][0] - t <= 0.3 else None
+            if t >= P[-1][0]:
+                return P[-1][1:] if t - P[-1][0] <= 0.3 else None
+            i = bisect.bisect_left([a[0] for a in P], t)
+            a, b = P[i - 1], P[i]
+            k = (t - a[0]) / max(b[0] - a[0], 1e-9)
+            dyaw = math.atan2(math.sin(b[3] - a[3]), math.cos(b[3] - a[3]))
+            return (a[1] + k * (b[1] - a[1]), a[2] + k * (b[2] - a[2]), a[3] + k * dyaw)
 
     def _to_odom(self, lat, head, pose):
         """base_link 기준 중심선 (lat, head) -> odom 좌표 (점 A, 단위 방향 d)."""
@@ -212,49 +234,50 @@ class CameraPerceptionNode(Node):
         return float(yr * math.cos(hd)), float(hd), float(abs(k) * math.hypot(dx, dy))
 
     def predict_tick(self):
-        if not self.poses:
-            return
-        t_now, x, y, yaw = self.poses[-1]
-        L = self.line
-        out = LaneError()
-        out.header.stamp.sec = int(t_now)
-        out.header.stamp.nanosec = int((t_now - int(t_now)) * 1e9)
-        out.header.frame_id = 'base_link'
-        r = None
-        ext = 0.0
-        predicting = not self.frame_valid
-        tol = float(self.get_parameter('predict_stamp_tol_sec').value)
-        if L is not None and -tol <= t_now - L[2] <= float(self.get_parameter('predict_max_sec').value):
-            if predicting and self.get_parameter('predict_path').value and self.path_odom is not None:
-                pr = self._path_lateral(self.path_odom, (x, y, yaw))
-                if pr is not None:
-                    r, ext = pr[:2], pr[2]
+        with self._lock:
+            if not self.poses:
+                return
+            t_now, x, y, yaw = self.poses[-1]
+            L = self.line
+            out = LaneError()
+            out.header.stamp.sec = int(t_now)
+            out.header.stamp.nanosec = int((t_now - int(t_now)) * 1e9)
+            out.header.frame_id = 'base_link'
+            r = None
+            ext = 0.0
+            predicting = not self.frame_valid
+            tol = float(self.get_parameter('predict_stamp_tol_sec').value)
+            if L is not None and -tol <= t_now - L[2] <= float(self.get_parameter('predict_max_sec').value):
+                if predicting and self.get_parameter('predict_path').value and self.path_odom is not None:
+                    pr = self._path_lateral(self.path_odom, (x, y, yaw))
+                    if pr is not None:
+                        r, ext = pr[:2], pr[2]
+                else:
+                    r = self._from_odom(L[0], L[1], (x, y, yaw))
+            if r is None:
+                if self.pred_invalid_sent:
+                    return                # invalid는 한 번만 (카메라 프레임 쪽에서도 invalid가 나감)
+                self.pred_invalid_sent = True
+                out.valid = False
             else:
-                r = self._from_odom(L[0], L[1], (x, y, yaw))
-        if r is None:
-            if self.pred_invalid_sent:
-                return                # invalid는 한 번만 (카메라 프레임 쪽에서도 invalid가 나감)
-            self.pred_invalid_sent = True
-            out.valid = False
-        else:
-            self.pred_invalid_sent = False
-            out.valid = True
-            out.lateral_offset_m, out.heading_error_rad = float(r[0]), float(r[1])
-            conf = float(L[3])
-            if predicting:
-                conf = float(self.get_parameter('predict_confidence').value)
-                if ext > float(self.get_parameter('predict_ext_max_m').value):
-                    conf *= float(self.get_parameter('predict_ext_conf_scale').value)
-            out.confidence = conf
-            out.single_lane_estimated = bool(L[4])
-            if predicting and self.get_parameter('publish_status').value:
-                # 예측으로 낸 값도 lane_status 에 남긴다 (src=predict). predict_sec = 마지막 valid 카메라 프레임 뒤 지난 시간,
-                # pred_beyond = 저장한 경로 점 범위를 넘어 연장했는지, pred_ext_m = 연장 길이
-                self.status_pub.publish(String(data=json.dumps(dict(
-                    src='predict', t=t_now, valid=True, predicting=True, predict_sec=round(t_now - L[2], 3),
-                    pred_beyond=bool(ext > 0.0), pred_ext_m=round(float(ext), 3),
-                    lat=float(out.lateral_offset_m), head=float(out.heading_error_rad), conf=float(out.confidence)))))
-        self.lane_pub.publish(out)
+                self.pred_invalid_sent = False
+                out.valid = True
+                out.lateral_offset_m, out.heading_error_rad = float(r[0]), float(r[1])
+                conf = float(L[3])
+                if predicting:
+                    conf = float(self.get_parameter('predict_confidence').value)
+                    if ext > float(self.get_parameter('predict_ext_max_m').value):
+                        conf *= float(self.get_parameter('predict_ext_conf_scale').value)
+                out.confidence = conf
+                out.single_lane_estimated = bool(L[4])
+                if predicting and self.get_parameter('publish_status').value:
+                    # 예측으로 낸 값도 lane_status 에 남긴다 (src=predict). predict_sec = 마지막 valid 카메라 프레임 뒤 지난 시간,
+                    # pred_beyond = 저장한 경로 점 범위를 넘어 연장했는지, pred_ext_m = 연장 길이
+                    self.status_pub.publish(String(data=json.dumps(dict(
+                        src='predict', t=t_now, valid=True, predicting=True, predict_sec=round(t_now - L[2], 3),
+                        pred_beyond=bool(ext > 0.0), pred_ext_m=round(float(ext), 3),
+                        lat=float(out.lateral_offset_m), head=float(out.heading_error_rad), conf=float(out.confidence)))))
+            self.lane_pub.publish(out)
 
     def _on_params(self, params):
         for prm in params:
@@ -274,96 +297,102 @@ class CameraPerceptionNode(Node):
         t0 = time.perf_counter()
         r = self.core.process(img, t, want_debug=want_dbg)
         proc_ms = (time.perf_counter() - t0) * 1e3
+        with self._lock:          # 공유 상태(마지막 중심선, 예측 발행)는 odom/예측 콜백과 같이 쓰므로
+            out = LaneError()
+            out.header.stamp = msg.header.stamp          # 영상 촬영 시각
+            out.header.frame_id = 'base_link'
+            out.valid = bool(r['valid'])
+            # valid=false여도 계산값은 그대로 실어 둔다 (디버그용, 판단팀은 무시)
+            out.lateral_offset_m = float(r['lateral'])
+            out.heading_error_rad = float(r['heading'])
+            out.curvature = 0.0                          # 아직 추정하지 않음
+            out.confidence = float(r['confidence'])
+            out.single_lane_estimated = bool(r['single'])
+            pose = self.pose_at(t) if self.predict else None
+            if pose is None:
+                self.lane_pub.publish(out)               # 예전 동작 (예측 끔, 또는 odom 없음)
+            else:
+                self.frame_valid = bool(out.valid)
+                if out.valid:
+                    A, d = self._to_odom(out.lateral_offset_m, out.heading_error_rad, pose)
+                    self.line = (A, d, t, out.confidence, out.single_lane_estimated)
+                    P = r.get('path')
+                    if P is not None and len(P) >= 2:
+                        px, py, pyaw = pose
+                        c, s_ = math.cos(pyaw), math.sin(pyaw)
+                        self.path_odom = [(float(px + c * a - s_ * b), float(py + s_ * a + c * b)) for a, b in P]
+                    else:
+                        self.path_odom = None
+                # 발행은 predict_tick이 한다 (valid면 곧바로 새 값으로, invalid면 predict_max_sec까지 옮긴 값, 그 뒤 invalid)
+                self.predict_tick()
+            if self.get_parameter('publish_status').value:
+                st = {'t': t, 'valid': out.valid, 'raw_valid': bool(r['raw_valid']),
+                      'reason': r['guard'] or '', 'lat': out.lateral_offset_m,
+                      'head': out.heading_error_rad, 'conf': out.confidence,
+                      'n_one': int(r['n_one']), 'n_good': int(r['n_good']),
+                      'proc_ms': round(proc_ms, 1), 'cs': self.core.p['color_space']}
+                for k in ('blobs_removed', 'rows_dropped', 'white_rows', 'fork_rows', 'single_rejected', 'thick_dropped'):
+                    st[k] = int(r.get(k, 0))
+                # 한 선 좌우 착각 막기 (side_guard_m): 누적 횟수와 이번 프레임 처리 ('' | flip | hold | accept)
+                st.update(side_flip=int(r.get('side_flip', 0)), side_hold=int(r.get('side_hold', 0)),
+                          side_act=r.get('side_act', ''))
+                if 'corner_line' in r:
+                    # 앞을 가로지르는 경계선 (corner_line_enable / opposite_guard_enable 일 때만): 표시, 열린 쪽(+1 왼쪽 -1 오른쪽),
+                    # 근거, 거리 m, 방향 도, 길이 m, 낸 heading 도, 반대쪽 lat 막음
+                    st.update({k: (None if r.get(k) is None else (r[k] if isinstance(r[k], str) else float(r[k])))
+                               for k in ('corner_line', 'corner_dir', 'corner_why', 'corner_dist', 'corner_ang', 'corner_len',
+                                         'corner_head', 'opp_block')})
+                # 차선 폭 실측: 프레임 종류(pair/single), 이번 폭, 기억 폭, 쓴 폭, 고정 폭 경우(a=가, b=나), 속도 제한 여부
+                st.update(kind=r['kind'], lat_raw=float(r['lat_raw']), width_meas=r['width_meas'],
+                          width_mem=r['width_mem'], width_used=float(r['width_used']), fixed=r['fixed'],
+                          width_note=r['width_note'], slew=bool(r['slew']), single=bool(r['single']))
+                # 예측: 이 카메라 프레임이 invalid 이고 마지막 valid 뒤 predict_max_sec 안이면 옮긴 값이 나가는 중
+                L = self.line
+                age = None if L is None else t - L[2]
+                pred = (self.predict and not out.valid and age is not None
+                        and -float(self.get_parameter('predict_stamp_tol_sec').value) <= age
+                        <= float(self.get_parameter('predict_max_sec').value))
+                st.update(src='camera', predicting=bool(pred), predict_sec=round(age, 3) if pred else 0.0,
+                          corner_b=float(r['corner_b']), outer_off=bool(r.get('outer_off')))
+                # 선 각도(도): 한 선이면 보이는 선, 두 선이면 가운데 점에 맞춘 직선
+                pi = r.get('path_info') or {}
+                st.update(line_angle_deg=None if not pi else round(pi['ang'], 1))
+                self.status_pub.publish(String(data=json.dumps(st)))
+            wl = float(self.get_parameter('width_log_sec').value)
+            if wl > 0 and time.monotonic() - self._wlog_t >= wl:
+                self._wlog_t = time.monotonic()
+                c = self.core.counts
+                self.get_logger().info(
+                    '차선 폭: 프레임 %d (두 선 %d, 한 선 %d) | 고정 폭 사용 (가) 실측 없음 %d, (나) 휜 선 %d | '
+                    '폭 범위 밖 %d, 속도 제한 %d | 기억 폭 %s'
+                    % (c['frames'], c['pair'], c['single'], c['fixed_a'], c['fixed_b'], c['width_reject'], c['slew'],
+                       'none' if self.core.w_mem is None else '%.3f' % self.core.w_mem))
+            if r['guard']:
+                self.get_logger().warn('lane guard: %s (width_err=%s) -> valid=false'
+                                       % (r['guard'], None if r['width_err'] is None
+                                          else '%.2f' % r['width_err']),
+                                       throttle_duration_sec=1.0)
 
-        out = LaneError()
-        out.header.stamp = msg.header.stamp          # 영상 촬영 시각
-        out.header.frame_id = 'base_link'
-        out.valid = bool(r['valid'])
-        # valid=false여도 계산값은 그대로 실어 둔다 (디버그용, 판단팀은 무시)
-        out.lateral_offset_m = float(r['lateral'])
-        out.heading_error_rad = float(r['heading'])
-        out.curvature = 0.0                          # 아직 추정하지 않음
-        out.confidence = float(r['confidence'])
-        out.single_lane_estimated = bool(r['single'])
-        pose = self.pose_at(t) if self.predict else None
-        if pose is None:
-            self.lane_pub.publish(out)               # 예전 동작 (예측 끔, 또는 odom 없음)
-        else:
-            self.frame_valid = bool(out.valid)
-            if out.valid:
-                A, d = self._to_odom(out.lateral_offset_m, out.heading_error_rad, pose)
-                self.line = (A, d, t, out.confidence, out.single_lane_estimated)
-                P = r.get('path')
-                if P is not None and len(P) >= 2:
-                    px, py, pyaw = pose
-                    c, s_ = math.cos(pyaw), math.sin(pyaw)
-                    self.path_odom = [(float(px + c * a - s_ * b), float(py + s_ * a + c * b)) for a, b in P]
-                else:
-                    self.path_odom = None
-            # 발행은 predict_tick이 한다 (valid면 곧바로 새 값으로, invalid면 predict_max_sec까지 옮긴 값, 그 뒤 invalid)
-            self.predict_tick()
-        if self.get_parameter('publish_status').value:
-            st = {'t': t, 'valid': out.valid, 'raw_valid': bool(r['raw_valid']),
-                  'reason': r['guard'] or '', 'lat': out.lateral_offset_m,
-                  'head': out.heading_error_rad, 'conf': out.confidence,
-                  'n_one': int(r['n_one']), 'n_good': int(r['n_good']),
-                  'proc_ms': round(proc_ms, 1), 'cs': self.core.p['color_space']}
-            for k in ('blobs_removed', 'rows_dropped', 'white_rows', 'fork_rows', 'single_rejected', 'thick_dropped'):
-                st[k] = int(r.get(k, 0))
-            # 한 선 좌우 착각 막기 (side_guard_m): 누적 횟수와 이번 프레임 처리 ('' | flip | hold | accept)
-            st.update(side_flip=int(r.get('side_flip', 0)), side_hold=int(r.get('side_hold', 0)),
-                      side_act=r.get('side_act', ''))
-            if 'corner_line' in r:
-                # 앞을 가로지르는 경계선 (corner_line_enable / opposite_guard_enable 일 때만): 표시, 열린 쪽(+1 왼쪽 -1 오른쪽),
-                # 근거, 거리 m, 방향 도, 길이 m, 낸 heading 도, 반대쪽 lat 막음
-                st.update({k: (None if r.get(k) is None else (r[k] if isinstance(r[k], str) else float(r[k])))
-                           for k in ('corner_line', 'corner_dir', 'corner_why', 'corner_dist', 'corner_ang', 'corner_len',
-                                     'corner_head', 'opp_block')})
-            # 차선 폭 실측: 프레임 종류(pair/single), 이번 폭, 기억 폭, 쓴 폭, 고정 폭 경우(a=가, b=나), 속도 제한 여부
-            st.update(kind=r['kind'], lat_raw=float(r['lat_raw']), width_meas=r['width_meas'],
-                      width_mem=r['width_mem'], width_used=float(r['width_used']), fixed=r['fixed'],
-                      width_note=r['width_note'], slew=bool(r['slew']), single=bool(r['single']))
-            # 예측: 이 카메라 프레임이 invalid 이고 마지막 valid 뒤 predict_max_sec 안이면 옮긴 값이 나가는 중
-            L = self.line
-            age = None if L is None else t - L[2]
-            pred = (self.predict and not out.valid and age is not None
-                    and -float(self.get_parameter('predict_stamp_tol_sec').value) <= age
-                    <= float(self.get_parameter('predict_max_sec').value))
-            st.update(src='camera', predicting=bool(pred), predict_sec=round(age, 3) if pred else 0.0,
-                      corner_b=float(r['corner_b']), outer_off=bool(r.get('outer_off')))
-            # 선 각도(도): 한 선이면 보이는 선, 두 선이면 가운데 점에 맞춘 직선
-            pi = r.get('path_info') or {}
-            st.update(line_angle_deg=None if not pi else round(pi['ang'], 1))
-            self.status_pub.publish(String(data=json.dumps(st)))
-        wl = float(self.get_parameter('width_log_sec').value)
-        if wl > 0 and time.monotonic() - self._wlog_t >= wl:
-            self._wlog_t = time.monotonic()
-            c = self.core.counts
-            self.get_logger().info(
-                '차선 폭: 프레임 %d (두 선 %d, 한 선 %d) | 고정 폭 사용 (가) 실측 없음 %d, (나) 휜 선 %d | '
-                '폭 범위 밖 %d, 속도 제한 %d | 기억 폭 %s'
-                % (c['frames'], c['pair'], c['single'], c['fixed_a'], c['fixed_b'], c['width_reject'], c['slew'],
-                   'none' if self.core.w_mem is None else '%.3f' % self.core.w_mem))
-        if r['guard']:
-            self.get_logger().warn('lane guard: %s (width_err=%s) -> valid=false'
-                                   % (r['guard'], None if r['width_err'] is None
-                                      else '%.2f' % r['width_err']),
-                                   throttle_duration_sec=1.0)
-
-        if self.get_parameter('publish_debug_image').value:
-            if self.get_parameter('debug_image_num').value == 0:
-                mask = self.core.lane_mask(img)   # color_space에 따라 HLS / LAB
-                self.debug_pub.publish(self.br.cv2_to_imgmsg(mask, 'mono8'))
-            elif r['debug'] is not None:
-                self.debug_pub.publish(self.br.cv2_to_imgmsg(r['debug'], 'bgr8'))
+            if self.get_parameter('publish_debug_image').value:
+                if self.get_parameter('debug_image_num').value == 0:
+                    mask = self.core.lane_mask(img)   # color_space에 따라 HLS / LAB
+                    self.debug_pub.publish(self.br.cv2_to_imgmsg(mask, 'mono8'))
+                elif r['debug'] is not None:
+                    self.debug_pub.publish(self.br.cv2_to_imgmsg(r['debug'], 'bgr8'))
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = CameraPerceptionNode()
+    n = int(node.get_parameter('executor_threads').value)
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
+        if n >= 2:
+            ex = MultiThreadedExecutor(num_threads=n)   # 영상 콜백 그룹과 나머지(imu/odom/예측) 그룹이 따로 돈다
+            ex.add_node(node)
+            ex.spin()
+        else:
+            rclpy.spin(node)                            # 예전: 단일 스레드, 콜백이 차례로
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     node.destroy_node()
     rclpy.try_shutdown()

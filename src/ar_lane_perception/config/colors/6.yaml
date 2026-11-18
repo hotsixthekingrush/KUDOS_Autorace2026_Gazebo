@@ -1,0 +1,28 @@
+# 차선 색 프리셋 6: 대회용 추천 (11/19, report_final_lane). 5번(= 4번에서 lane_l_h 252 -> 240, 흰 페인트 빼기) 기반.
+# corner_line_enable 은 끔: C3 앞 가로선은 건너가는 선이라 열린 쪽을 못 정하고(효과 거의 없음), 직선의 가로선에서 오른쪽으로 잘못 내는 프레임이 있음.
+# crop_rows 는 출력이 같고 더 빠름. executor_threads / image_qos_depth 는 노드 시작 때만 읽음 (Gazebo 통과, 실차는 ros2 topic hz 로 확인 후).
+# LAB 로 쓰려면 color_space 만 lab 으로 바꾼다.
+camera_perception_node:
+  ros__parameters:
+    color_space: hls
+    lane_h_l: 17
+    lane_h_h: 35
+    lane_l_l: 50
+    lane_l_h: 240
+    lane_s_l: 35
+    lane_s_h: 255
+    lab_l_min: 110
+    lab_l_max: 255
+    lab_a_min: 105
+    lab_a_max: 135
+    lab_b_min: 140
+    lab_b_max: 255
+    max_seg_w_m: 0.08
+    side_guard_m: 0.25
+    side_guard_stop_m: 0.0
+    corner_line_enable: false
+    opposite_guard_enable: false
+    single_min_rows: 0
+    crop_rows: true
+    executor_threads: 2
+    image_qos_depth: 1

@@ -165,6 +165,12 @@ ros2 launch ar_lane_perception camera_perception.launch.py image_topic:=/my/imag
 - **반대쪽 lat 막기 (`opposite_guard_enable`, 기본 false):** 한 선 또는 경계선 프레임에서 가장 가까운 점이 `opposite_far_m`(0.55 m)보다 멀고,
   lat 이 열린 쪽(경계선 검출로만 정함)과 반대 부호(> `opposite_min_lat_m`)면 그 값 대신 예측값(없으면 0)을 낸다.
   side_guard 가 예측값을 낸(hold) 프레임은 건드리지 않는다. 이것만 켜도 검출은 돌지만 마스크와 다른 출력은 바꾸지 않는다. lane_status `opp_block`.
+- **경계선 상자 (corner_line):** 왼쪽 선이 경계선 왼쪽 끝, 오른쪽 선이 오른쪽 끝에 둘 다 `corner_line_box_m`(0.25 m) 안이면 닫힌 상자다.
+  대회장 C3 앞처럼 건너가는 가로선일 수 있어 열린 쪽을 정하지 않는다(corner_why=box). 그래서 C3 효과는 거의 없다(report_final_lane).
+- **영상 입력 (노드):** 실행기는 기본 단일 스레드 `rclpy.spin`(영상·imu·odom·예측 타이머가 한 줄로)이고, 영상 QoS 는 sensor_data(best effort, depth 5)다.
+  `executor_threads` 2 이상이면 영상 콜백은 전용 콜백 그룹, imu/odom/예측은 다른 그룹에서 MultiThreadedExecutor 로 돈다.
+  공유 상태는 `_lock` 으로 보호한다. `image_qos_depth` 1 이면 최신 프레임만 받는다.
+  `crop_rows` 는 y_top-5 ~ y_bot+5(경계선 검출이 켜졌으면 그 범위까지)만 색 변환한다.
 - **줄을 뺀 뒤의 추적:** 원래 -19°의 직접 원인은 빠진 줄 다음 줄에서 멀리 떨어진 아래 줄 위치로 선을 찾다가 옆 도로 선을 잡은 것이다.
   한 선을 바로 아래 줄에서 못 찾았으면 이번 프레임 점들을 이은 직선으로 연장해(점 1개면 소실점 쪽으로 원근 축소) 찾는다.
   점선 끊김에도 같은 처리가 쓰인다.
@@ -278,6 +284,10 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 | `track_motion_comp` | false | 연속 추적 기준점(직전 선 위치)을 차가 움직인 만큼 옮겨서 비교 |
 | `corner_line_enable` (+ `corner_line_*`) | false | 앞을 가로지르는 경계선(각진 코너 입구)으로 코너 경로 lateral/heading 을 냄 |
 | `opposite_guard_enable` (+ `opposite_far_m`, `opposite_min_lat_m`) | false | 먼 점만으로 만든 lat 이 코너 열린 쪽과 반대면 예측값을 냄 |
+| `side_guard_stop_m` | 0.0 | 마지막 출력 뒤 odom 이동이 이 값 이하(서 있었음)면 1 s 지나도 side_guard 예측 기준 유지 |
+| `single_min_rows` | 0 | 한 선 프레임의 줄 수가 이보다 적으면 invalid (0 = 기존 2줄) |
+| `crop_rows` | false | 쓰는 행만 색 변환·마스크 (출력 같음, 빠름) |
+| `executor_threads`, `image_qos_depth` | 1, 0 | (노드, 시작 때만) 2 이상이면 영상 콜백 전용 그룹 + 멀티스레드 실행기 / 1 이상이면 영상 QoS best effort depth 그 값 |
 | `guard_need_pair` | true | 한 선 프레임은 최근 실측 폭이 있을 때만 valid |
 | `min_confidence` | 0.05 | 이보다 낮으면 valid=false. 0이면 끔 |
 | `single_tol_m`, `single_conflict` | 0.05, invalid | 흰 선 프레임의 쌍/한쪽 선 충돌 → valid=false |

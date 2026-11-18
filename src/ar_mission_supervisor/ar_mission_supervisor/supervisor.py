@@ -453,7 +453,7 @@ PARAM_DEFAULTS = {
         'robot_width': 0.30,
     },
     'cone': {
-        'speed': 0.25,
+        'speed': 0.45,             # (11/18 사용자) 0.25 -> 0.45. 대회장 콘 배치가 쉬움, 규정 미션 Time-out 15초 (comp_lap1 14.8초)
         'creep_speed': 0.10,
         'lookahead': 0.45,         # 게이트 중점을 이은 선 위 목표점 거리 [m]
         'curve_gain': 0.35,
@@ -478,7 +478,7 @@ PARAM_DEFAULTS = {
         'lookahead_short': 0.25,   # 후보: 짧게 보고 꽉 꺾어 도는 길 [m] (11/04, 0 = 안 씀)
         'lookahead_long': 0.60,    # 후보: 길게 보고 부드럽게 가는 길 [m] (0 = 안 씀)
         'w_lookahead': 0.1,        # 기본 lookahead 와 다른 만큼 벌점
-        'tight_speed': 0.15,       # 안 닿는 길이 없을 때 속도 [m/s] (멈추지 않고 덜 닿는 쪽으로. 0.05 는 기어가다 40초 넘김 - 11/04 녹화)
+        'tight_speed': 0.45,       # (11/18 사용자) 0.15 -> 0.45 = 감속 안 함 (comp_lap1: 안 닿았는데 절반을 이걸로 감). 안 닿는 길이 없을 때 속도 [m/s] (멈추지 않고 덜 닿는 쪽으로. 0.05 는 기어가다 40초 넘김 - 11/04 녹화)
         'w_offset': 1.0,           # 길을 옆으로 옮긴 만큼 벌점 (가운데 선호)
         'w_margin': 1.0,           # 콘과 여유 보너스 (margin_cap 까지만)
         'margin_cap': 0.10,
@@ -507,7 +507,7 @@ PARAM_DEFAULTS = {
     'parking': {
         # (11/17 사용자) full_1117_1: 켜자마자 왼쪽 2 m 주차 표지판을 보고 PARKING -> 켠 자리에서 이 거리 전엔 무시 (켜고 끄기: ignore_start)
         'ignore_start_distance': 4.5,
-        'search_speed': 0.15,
+        'search_speed': 0.4,       # (11/18 사용자) 0.15 -> 0.4. 시뮬: 회전 시작점 0.35 m 전에 칸 정함 (0.8 은 거의 0 이라 지나침)
         'final_speed': 0.08,
         'min_speed': 0.04,
         'turn_speed': 0.10,
@@ -532,7 +532,7 @@ PARAM_DEFAULTS = {
         # (11/14) 모든 두 LIMO 쌍에서 칸 찾기 (빈칸 너머 아랫줄 LIMO·같은 LIMO 의 다른 조각이 끼어도 됨). false = 예전 바로 옆끼리만
         'any_pair': True,
         'slot_block_d': 0.15,      # (11/14) any_pair: 쌍 깊이에서 이 안에 칸 안쪽 물체가 있으면 그 칸은 찬 것 [m]
-        'slow_distance': 0.15,     # 회전 시작점 이 거리 앞부터 final_speed 로 [m]
+        'slow_distance': 0.3,      # 회전 시작점 이 거리 앞부터 final_speed 로 [m] (11/18: search 0.4 라 0.15 -> 0.3)
         'overshoot_tolerance': 0.04,
         'heading_tolerance': 0.05, # -90도 에서 이 안이면 회전 끝 [rad]
         'k_heading': 1.5,

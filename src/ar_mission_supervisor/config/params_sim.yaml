@@ -26,6 +26,10 @@ mission_supervisor:
       car_width: 0.31
       # Gazebo 조향은 초당 약 55도 (11/03 녹화). 굴려볼 때 이걸 흉내 내면 콘 놓칠 때 더 나음 (11/04 계산)
       steer_rate_deg: 55.0
+      # (11/18) 실차 기본은 speed 0.45 / tight_speed 0.45 (사용자). Gazebo 는 조향이 55도/s 로 느려서 0.45 면 가장 어려운
+      #   지그재그(0.50 마다 0.25)에서 콘에 7 cm 닿음 -> Gazebo 는 예전 값 그대로
+      speed: 0.25
+      tight_speed: 0.15
 
     bump:
       # (11/05) Gazebo 방지턱은 0.2 m/s 로 넘으면 차가 오르막에서 0.03 m/s 로 기다가 꼭대기에서 튕겨 나감

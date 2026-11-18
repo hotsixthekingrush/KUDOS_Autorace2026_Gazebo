@@ -39,7 +39,7 @@ def setup(context):
 def generate_launch_description():
     share = get_package_share_directory('kudos_yolo_tools')
     return LaunchDescription([
-        DeclareLaunchArgument('weights', default_value=os.path.join(share, 'models', 'best_sim_full_1111.pt'),
+        DeclareLaunchArgument('weights', default_value=os.path.join(share, 'models', 'best_real_1118.pt'),
                               description='.pt 또는 Jetson 에서 export 한 .engine'),
         DeclareLaunchArgument('device', default_value='0', description='0 = Jetson GPU, cpu = CPU'),
         DeclareLaunchArgument('depth_topic', default_value='',

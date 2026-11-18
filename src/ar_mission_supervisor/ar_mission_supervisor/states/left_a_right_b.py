@@ -117,6 +117,7 @@ class LeftARightB(SafeState):
                 self._shift(now, cfg)
             else:
                 if self._settle(now, cfg):
+                    self._ab_done()
                     return 'done'
 
             self.sleep()
@@ -157,6 +158,14 @@ class LeftARightB(SafeState):
             v = min(v, node.ab_vote['undecided_speed'])      # (11/19) 아직 못 정함 - 천천히 더 봄
         self.driver.step(v)
         return False
+
+    def _ab_done(self):
+        """(11/19) 갈림길을 끝까지 했으면 다음 AVOID_STATIC 전까지 A/B 표지판을 다시 안 받음 (ab_vote.after_static).
+        1118 comp_lap11 142~145초: 신호등 근처에서 A 오인식. 시간 초과·종류 불명으로 끝난 건 그대로 둠 (다시 들어올 수 있게)."""
+        node = self.node
+        if node.ab_vote['after_static'] and node.static_started:
+            node.static_started = False
+            node.get_logger().info('[LEFT_A_RIGHT_B] 갈림길 끝 - 다음 AVOID_STATIC 전까지 A/B 표지판 안 받음')
 
     def _ab_marker(self, now, fallback=True):
         """(11/19 사용자·YOLO 팀원) 'A' / 'B' / None. 다수결로 정해지면 그쪽, 못 정한 채 표지판이 fallback_distance 안이거나
@@ -297,6 +306,7 @@ class LeftARightB(SafeState):
             if res.s - self.reached_s >= cfg['odom_hold_distance'] and self._end_clear(plan, res.s, cfg):
                 node.get_logger().info('[LEFT_A_RIGHT_B] %s 경로 진입 완료 - 복귀'
                                        % ('A(좌)' if self.goal_lane == cfg['a_lane'] else 'B(우)'))
+                self._ab_done()
                 return True
         else:
             self.reached_s = None

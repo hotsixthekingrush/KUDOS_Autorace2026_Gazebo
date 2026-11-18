@@ -156,7 +156,7 @@ mission_supervisor:
       approach_speed: 0.2
       min_speed: 0.08
       slowdown_distance: 0.0   # >0 이면 정지 직전 이 거리부터 감속 (0 = 끝까지 approach_speed)
-      stop_gap: 0.08           # 앞바퀴~정지선 이 거리 이하에서 정지/통과 판정 [m]. (11/17 사용자) 0.03 -> 0.08: full_1117_1 아슬아슬, 5 cm 앞에서
+      stop_gap: 0.13           # 앞바퀴~정지선 이 거리 이하에서 정지/통과 판정 [m]. (11/17 사용자) 0.03 -> 0.08: full_1117_1 아슬아슬. (11/19 사용자) 0.13: 1118 comp_lap11 0.074 정지에서 5 cm 뒤로
       green_confirm_sec: 0.3   # 정지 후 초록불이 이 시간 유지되면 출발
       approach_timeout: 25.0   # 정지선 거리를 끝내 못 받으면 이 시간 뒤 현 위치에서 판정
       max_wait_sec: 10.0       # 정지 후 초록불을 이 시간 못 보면 출발 (0 = 무한 대기). 미션 Time-out 15초 안에 들도록
@@ -609,6 +609,9 @@ mission_supervisor:
       undecided_speed: 0.15    # [m/s]
       fallback_distance: 0.8   # [m]
       fallback_sec: 4.0        # [s]
+      # (11/19 사용자·YOLO 팀원) A/B 표지판은 판단 켠 뒤 AVOID_STATIC 이 한 번 시작된 뒤에만 (1119 모델이 37초 서행·보행자 표지판을
+      #   B 0.88 로 봄). 중간(3차선 뒤)부터 켜서 갈림길만 시험할 땐 false
+      after_static: true
 
     # (11/18 사용자) 트랙 방향 자동 보정. 대회장 comp_lap1: 카메라 차선 방향이 판단 트랙 축(start_yaw_deg 기준 0/-90/180)과
     #   한 바퀴 내내 +7~8도 차이 (켤 때 차가 출발 직선과 비뚤게 놓임) -> 3차선 기준 좌표가 틀어져 바깥 노란선 위로 감, 6.8초 막힘.

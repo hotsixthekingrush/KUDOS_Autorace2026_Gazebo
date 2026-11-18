@@ -255,7 +255,7 @@ PARAM_DEFAULTS = {
         'approach_speed': 0.2,
         'min_speed': 0.08,
         'slowdown_distance': 0.0,  # >0 이면 정지 직전 이 거리부터 감속 (0 = 끝까지 approach_speed)
-        'stop_gap': 0.08,          # (11/17 사용자) 0.03 -> 0.08: full_1117_1 신호등 횡단보도에서 아슬아슬, 5 cm 앞에서 서게
+        'stop_gap': 0.13,          # (11/17 사용자) 0.03 -> 0.08: full_1117_1 아슬아슬. (11/19 사용자) 0.13: 1118 comp_lap11 0.074 에서 5 cm 뒤로
         'green_confirm_sec': 0.3,  # 정지 후 초록불이 이 시간 이상 유지되면 출발
         'approach_timeout': 25.0,  # 정지선 거리를 끝내 못 받으면 이 시간 뒤 현 위치에서 판정
         'max_wait_sec': 10.0,      # 정지 후 이 시간 안에 초록불을 못 보면 출발 (0 = 무한 대기)
@@ -638,6 +638,9 @@ PARAM_DEFAULTS['ab_vote'] = {
     'undecided_speed': 0.15,   # [m/s]
     'fallback_distance': 0.8,  # [m] 표지판이 이 안이면 그때까지 표로 정함 (= left_a_right_b.trigger_distance)
     'fallback_sec': 4.0,       # [s] LEFT_A_RIGHT_B 안에서 이만큼 못 정하면 그때까지 표로 정함
+    # (11/19 사용자·YOLO 팀원) A/B 표지판은 판단을 켠 뒤 AVOID_STATIC 이 한 번 시작된 뒤에만 받음 (1119 모델: 37초 서행·보행자 표지판을
+    #   B 0.88 로 봄). 중간(3차선 뒤)부터 켜서 시험할 땐 false. 판단 다시 켜면 처음부터
+    'after_static': True,
 }
 
 PARAM_DEFAULTS['axis_auto'] = {
@@ -807,6 +810,8 @@ class MissionSupervisor(Node):
             self.buf[k].stale_sec = max(stale, self.yolo['hold_sec'])
         self._yolo_streak = {}
         self.ab_votes = collections.deque(maxlen=200)       # (11/19) (시각, 'A'/'B') 다수결용
+        self.static_started = False     # (11/19) 판단 켠 뒤 AVOID_STATIC 이 시작된 적 있는지 (A/B 는 그 뒤에만)
+        self._ab_before_logged = False
         self.ab_votes_all = collections.deque(maxlen=2000)
         self.stopline = StopLineTracker(self)     # 정지선 거리 추정 (State 들이 공유)
         self.three_lane = ThreeLanePlanner(self)  # 3차선 좌표·차선 번호 (AVOID_STATIC -> LEFT_A_RIGHT_B)
@@ -1368,6 +1373,13 @@ class MissionSupervisor(Node):
         for ev in START_IGNORE:
             if ev in found and self._start_ignored(ev, now):
                 found.remove(ev)
+        if 'sign_ab' in found and self.ab_vote['after_static'] and not self.static_started:
+            # (11/19 사용자·YOLO 팀원) A/B 는 AVOID_STATIC 이 한 번 시작된 뒤에만 (지그재그·보행자 구간 가짜 B 로 갈림길 진입 막음)
+            found.remove('sign_ab')
+            self.dbg('ab/before_static', 1.0)
+            if not self._ab_before_logged:
+                self._ab_before_logged = True
+                self.get_logger().info('[A/B] AVOID_STATIC 전이라 A/B 표지판 무시 (ab_vote.after_static, 중간부터 시험할 땐 false)')
         if allowed is not None:
             found = [n for n in found if EVENT_TO_OUTCOME.get(n) in allowed]
         if skip_locked:

@@ -1,7 +1,7 @@
-"""미션 6 - 서행 유도선 통과 (지그재그 노면).
+"""미션 6 + 3 - 서행 유도선(지그재그) 통과 + 횡단보도 정지 (11/18 사용자: 두 State 를 하나로 합침).
 
 진입: YOLO 가 노면의 지그재그 서행 유도선을 인식하면.
-동작:
+동작 (merge_crosswalk true, 기본):
   1) 유도선 시작점에 도달할 때까지는 speed(0.2 m/s)로 일반 차선 추종.
      (유도선을 코너 끝에서 미리 볼 수 있으므로 차가 직선에 들어선 뒤 방향을 잡는다)
      시작점 = 진입 순간 YOLO 가 준 유도선 거리 + lock_offset 만큼 주행한 지점 (odom).
@@ -10,19 +10,15 @@
        조향 = k_yaw x 헤딩 오차 + lane_blend x confidence x 차선 추종 조향
      으로 직진 헤딩을 유지한다. 지그재그 차선을 그대로 따라가 좌우로 흔들리는 것을 막는다.
      차선이 안 보이면 헤딩 유지만 한다.
-  3) 보행자 표지판을 보면 LANE_FOLLOWING 을 거치지 않고 CROSSWALK_STOP 으로 바로 넘어간다.
-     표지판은 유도선 입구에서부터 보일 수 있으므로(유도선 1.68m + 정지선까지 약 0.2m),
-     유도선 끝 무렵까지는 헤딩 유지를 계속하고 넘어간다:
-       - 정지선을 본 적이 있으면 정지선 추정 거리 <= handoff_stopline 일 때
-       - 정지선이 안 보이면 표지판 거리 <= handoff_sign 일 때
-       - 둘 다 거리 정보가 없으면 바로
-     (11/15 stop_run2) 표지판은 한 번 보면 기억한다. 실차는 표지판이 정지선보다 앞(약 0.3 m)에 길옆으로 서 있어서
-       0.7 m 쯤에서 화면 밖으로 빠지는데, 그때 정지선은 아직 0.9 m -> 예전엔 "표지판 보이는 중 + 정지선 0.5 m" 가
-       한 번도 같이 안 맞아서 안 넘어가고 횡단보도를 지나 20초 뒤 복귀했음.
-     끝내 못 보면 max_duration 뒤 LANE_FOLLOWING 으로 복귀.
-     (11/15 사용자) 표지판을 못 본 채 정지선 추정이 차 뒤로 exit_past_stopline 만큼 넘어가면(횡단보도 지남) 바로 복귀
-       (stop_run2: 횡단보도 지나서도 헤딩 고정으로 20초·4 m 직진해 코너에서 벗어났음).
-규정: 직진 헤딩을 유지하며 서행 통과. 일반 차로이탈 기준 적용.
+  3) 바닥 횡단보도(YOLO CROSSWALK) 측정을 floor_min_meas 번 이상 받으면 정지선 거리를 이어서 추정하고
+     (화면 밖으로 빠지면 odom), 앞바퀴 ~ 정지선이 crosswalk.stop_gap 이하가 되면 이 State 안에서 정지.
+     crosswalk.wait_sec 기다린 뒤 LANE_FOLLOWING. 보행자 표지판은 안 본다 (다른 State 로 안 넘어감).
+  - 횡단보도를 한 번도 못 잡으면 max_duration 뒤 복귀. 정지선을 잡은 뒤에는 멈출 때까지 시간 제한 없음.
+  - 정지선이 차 기준점 뒤로 exit_past_stopline 만큼 넘어가면(멈추지 못하고 지남) 바로 복귀.
+  - 지그재그를 놓쳤을 때는 LANE_FOLLOWING 에서 보행자 표지판 -> CROSSWALK_STOP 이 대신 (그대로 남김).
+예전 방식 (merge_crosswalk false, 11/15~11/17): 보행자 표지판을 보면 정지선이 handoff_stopline 안일 때
+  CROSSWALK_STOP 으로 바로 넘어감 (표지판은 한 번 보면 기억, 정지선이 안 보이면 표지판이 handoff_sign 안일 때).
+규정: 직진 헤딩을 유지하며 서행 통과. 횡단보도는 정지선 ±5cm 완전정지, 3초 이상 대기, 15초 이내 출발.
 """
 
 import math
@@ -60,7 +56,8 @@ class SlowZone(SafeState):
         self.target_yaw = None
         self.start_pose = None
         self.lock_after = None
-        self.ped_seen = None        # (11/15) 보행자 표지판을 본 적 있으면 그 outcome (기억)
+        self.ped_seen = None        # (11/15) 보행자 표지판을 본 적 있으면 그 outcome (기억, 예전 방식)
+        self.stopped_at = None      # (11/18) 합친 방식: 횡단보도에서 멈춘 시각
 
     def on_enter(self):
         node = self.node
@@ -68,7 +65,8 @@ class SlowZone(SafeState):
         self.entered_at = node.clock_sec()
         self.target_yaw = None
         self.ped_seen = None
-        # 보행자 정지선 추정을 여기서부터 이어간다 (CROSSWALK_STOP 이 이어받음)
+        self.stopped_at = None
+        # 보행자 정지선 추정을 여기서부터 이어간다 (예전 방식에선 CROSSWALK_STOP 이 이어받음)
         node.stopline.begin(self.entered_at)
         # 헤딩 고정 시점: 유도선 시작점까지 남은 거리
         self.start_pose = node.odom_pose()
@@ -90,29 +88,58 @@ class SlowZone(SafeState):
                 return 'aborted'
 
             now = node.clock_sec()
-            node.stopline.update(now, node.last_v)
 
-            outcome = node.detect_mission(allowed=self.HANDOFF)
-            if outcome is not None and self.ped_seen is None:
-                self.ped_seen = outcome
-                node.get_logger().info('[SLOW_ZONE] 보행자 표지판 봄 - 정지선 %.2fm 안에 오면 CROSSWALK_STOP'
-                                       % cfg['handoff_stopline'])
-            # (11/15) 표지판이 화면 밖으로 빠져도 기억한 채로 정지선 거리만 보고 넘어간다
-            if self.ped_seen is not None and self._near_crosswalk(cfg, sign_visible=outcome is not None):
-                node.get_logger().info('[SLOW_ZONE] 보행자 표지판 인식 - CROSSWALK_STOP 으로 바로 전환')
-                if self.target_yaw is not None:
-                    node.heading_handoff = (self.target_yaw, now)   # (11/16) CROSSWALK_STOP 이 이 헤딩으로 이어감
-                return self.ped_seen
+            # (11/18 사용자) 합친 방식: 횡단보도 정지선에서 멈춘 뒤 wait_sec 기다리고 끝
+            if self.stopped_at is not None:
+                node.publish_stop()
+                waited = now - self.stopped_at
+                node.dbg('slow_zone/waited', waited)
+                if waited >= node.crosswalk['wait_sec']:
+                    node.get_logger().info('[SLOW_ZONE] 횡단보도 %.1f초 정지 완료 - 출발' % waited)
+                    # 같은 횡단보도의 보행자 표지판으로 LANE_FOLLOWING 이 CROSSWALK_STOP 에 또 들어가지 않게
+                    node.set_lockout('CROSSWALK_STOP')
+                    return 'done'
+                self.sleep()
+                continue
+
+            node.stopline.update(now, node.last_v)
+            measured = False
+
+            if cfg['merge_crosswalk']:
+                # 보행자 표지판은 안 보고, 바닥 횡단보도(YOLO) 정지선만 보고 이 State 안에서 멈춘다
+                tr = node.stopline
+                measured = tr.est is not None and tr.n_meas >= max(1, int(cfg['floor_min_meas']))
+                gap = tr.gap() if measured else None
+                node.dbg('slow_zone/gap', gap)
+                if gap is not None and gap <= node.crosswalk['stop_gap']:
+                    node.get_logger().info('[SLOW_ZONE] 앞바퀴~횡단보도 정지선 %.3fm - 정지' % gap)
+                    self.stopped_at = now
+                    node.publish_stop()
+                    self.sleep()
+                    continue
+            else:
+                # 예전 방식 (merge_crosswalk false): 보행자 표지판을 보면 CROSSWALK_STOP 으로 넘김
+                outcome = node.detect_mission(allowed=self.HANDOFF)
+                if outcome is not None and self.ped_seen is None:
+                    self.ped_seen = outcome
+                    node.get_logger().info('[SLOW_ZONE] 보행자 표지판 봄 - 정지선 %.2fm 안에 오면 CROSSWALK_STOP'
+                                           % cfg['handoff_stopline'])
+                # (11/15) 표지판이 화면 밖으로 빠져도 기억한 채로 정지선 거리만 보고 넘어간다
+                if self.ped_seen is not None and self._near_crosswalk(cfg, sign_visible=outcome is not None):
+                    node.get_logger().info('[SLOW_ZONE] 보행자 표지판 인식 - CROSSWALK_STOP 으로 바로 전환')
+                    if self.target_yaw is not None:
+                        node.heading_handoff = (self.target_yaw, now)   # (11/16) CROSSWALK_STOP 이 이 헤딩으로 이어감
+                    return self.ped_seen
 
             # (11/15) 표지판을 못 보고 횡단보도를 지났으면 헤딩 고정 직진을 끝내고 일반 주행으로
             line = node.stopline.est
             if cfg['exit_past_stopline'] > 0.0 and line is not None and line <= -cfg['exit_past_stopline']:
-                node.get_logger().warn('[SLOW_ZONE] 보행자 표지판 못 보고 정지선을 %.2fm 지남 - 복귀' % -line)
+                node.get_logger().warn('[SLOW_ZONE] 횡단보도에서 못 멈추고 정지선을 %.2fm 지남 - 복귀' % -line)
                 return 'done'
 
             elapsed = now - self.entered_at
-            if elapsed > cfg['max_duration']:
-                node.get_logger().warn('[SLOW_ZONE] 보행자 표지판 미인식 %.0f초 - 복귀'
+            if elapsed > cfg['max_duration'] and not measured:      # 정지선을 잡았으면 멈출 때까지 감
+                node.get_logger().warn('[SLOW_ZONE] 횡단보도 미인식 %.0f초 - 복귀'
                                        % cfg['max_duration'])
                 return 'done'
 

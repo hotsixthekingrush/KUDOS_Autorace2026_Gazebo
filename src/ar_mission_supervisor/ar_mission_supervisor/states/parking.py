@@ -180,6 +180,11 @@ class Parking(SafeState):
                 rear_d = d - 0.5 * wb * math.sin(psi)
                 self.center = (rear_s, rear_d - cfg['turn_radius'])
                 self.target_d, how = self._depth_target(cfg)
+                # (11/18 사용자) 칸 가운데보다 depth_shift 만큼 더 안쪽(차 앞쪽)에 섬 - 뒤쪽 선에 아슬아슬하게 걸려 보여서
+                shift = float(cfg.get('depth_shift', 0.0))
+                if shift:
+                    self.target_d -= shift
+                    how += ', 안쪽으로 %.2fm 더' % shift
                 node.dbg('parking/target_d', self.target_d)
                 node.publish_stop()
                 self._set_phase(self.TURN, now,
@@ -331,7 +336,7 @@ class Parking(SafeState):
         node = self.node
         s_, d, psi = self.frame.car(pose)
         ts = self.gap_s
-        td = self.target_d if self.target_d is not None else -cfg['park_depth']
+        td = self.target_d if self.target_d is not None else -cfg['park_depth'] - float(cfg.get('depth_shift', 0.0))
         c, sn = math.cos(psi), math.sin(psi)
         e_long = (ts - s_) * c + (td - d) * sn          # 차 앞 방향으로 남은 거리
         e_lat = -(ts - s_) * sn + (td - d) * c          # 차 왼쪽 방향으로 벗어난 거리

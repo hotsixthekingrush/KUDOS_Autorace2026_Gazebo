@@ -16,6 +16,9 @@
   BUMP 안에서 보면 끝 지점이 늘어나 지그재그까지 BUMP 로 지나갈 수 있어서 BUMP 중 서행 유도선이면 SLOW_ZONE 으로 넘겼음.
 (11/17 사용자) 서행 표지판이 SLOW 로 나뉘어 그 이유가 없어짐 -> 끝 지점은 방지턱 표지판만 보고, 다른 미션으로 안 넘어감
   (방지턱과 지그재그는 한참 떨어져 있음).
+(11/18 주최측 공지) 방지턱 앞 표지판이 서행 표지판으로 바뀜 -> bump.slow_sign 이면 supervisor 가 서행 표지판을 방지턱 표지판으로
+  바꿔 넘김 (진입 + 끝 거리 둘 다). 서행 표지판은 지그재그·신호등 쪽에도 있어서, bump.handoff 이면 BUMP 중
+  신호등·지그재그 유도선·보행자 표지판을 보면 그 미션으로 바로 넘어간다 (SLOW 와 같은 방식).
 """
 
 import math
@@ -26,7 +29,10 @@ from ar_mission_supervisor.lane_driver import LaneDriver
 
 class Bump(SafeState):
 
-    OUTCOMES = ['done']                  # (11/17 사용자) 다른 미션으로 안 넘어감 (11/15 의 SLOW_ZONE 넘어가기 뺌)
+    # (11/18) 서행 표지판으로 들어온 BUMP 가 다른 서행 구간 미션을 놓치지 않게 (bump.handoff)
+    HANDOFF = ('to_traffic_light', 'to_slow_zone', 'to_crosswalk')
+    OUTCOMES = ['done'] + list(HANDOFF)
+    NAMES = {'to_traffic_light': '신호등', 'to_slow_zone': '지그재그 유도선', 'to_crosswalk': '보행자 표지판'}
     MAX_STEP = 0.5      # odom 이 한 번에 이보다 많이 움직이면 (순간이동·리셋) 거리에 안 더함 [m]
 
     def __init__(self, node):
@@ -97,6 +103,13 @@ class Bump(SafeState):
                 node.get_logger().warn('[BUMP] %.0f초 넘음 - 서행 종료 (%.2fm 주행)'
                                        % (cfg['max_duration'], self.travelled))
                 return 'done'
+
+            if cfg.get('handoff', False):
+                outcome = node.detect_mission(allowed=self.HANDOFF)
+                if outcome is not None:
+                    node.get_logger().info('[BUMP] %s 인식 (%.1f초, %.2fm 서행) - 바로 전환'
+                                           % (self.NAMES[outcome], elapsed, self.travelled))
+                    return outcome
 
             pose = node.odom_pose()
             if pose is None:

@@ -6,8 +6,9 @@ State 9개
 
 기본 흐름은 이전과 같다. LANE_FOLLOWING 이 이벤트를 보고 미션 State 로 보내고,
 미션 State 는 끝나면 LANE_FOLLOWING 으로 돌아온다.
-예외: SLOW_ZONE 은 보행자 표지판을 보면 LANE_FOLLOWING 을 거치지 않고
-CROSSWALK_STOP 으로 바로 넘어간다 (두 미션이 붙어 있음).
+(11/18 사용자) SLOW_ZONE 은 지그재그 + 횡단보도 정지를 한 State 에서 한다 (바닥 횡단보도 정지선에서 멈춤,
+보행자 표지판 안 봄). slow_zone.merge_crosswalk false 면 예전처럼 보행자 표지판을 보면 CROSSWALK_STOP 으로 바로 넘어감.
+LANE_FOLLOWING 에서 보행자 표지판 -> CROSSWALK_STOP 은 그대로 (지그재그를 놓쳤을 때).
 (11/15) BUMP 는 서행 유도선을 보면 SLOW_ZONE 으로, AVOID_STATIC 은 A/B 표지판을 보면 LEFT_A_RIGHT_B 로 바로 넘어간다.
 """
 
@@ -54,7 +55,7 @@ EVENT_TO_OUTCOME = {
     'pedestrian_sign': 'to_crosswalk',
     'parking_sign': 'to_parking',
     'slow_sign': 'to_slow',        # (11/17 사용자) 서행 표지판 -> SLOW (예전 BUMP)
-    'bump_sign': 'to_bump',        # 방지턱 표지판 -> BUMP
+    'bump_sign': 'to_bump',        # 방지턱 표지판 -> BUMP (11/18: bump.slow_sign 이면 서행 표지판도)
     'slow_line': 'to_slow_zone',
     'cone': 'to_cone',
     'limo': 'to_avoid_static',
@@ -253,6 +254,9 @@ PARAM_DEFAULTS = {
     },
     'slow': {
         # (11/17 사용자) 서행 표지판 -> SLOW: 차선 추종 그대로, 속도만. 신호등·지그재그·방지턱·보행자 표지판으로만 넘어감
+        # (11/18 사용자) 서행은 지그재그에만 있어 의미 없음 + 대회장에서 서행 표지판이 P 로 잘못 잡힘 -> 기본 끔.
+        #   false 면 YOLO 서행 표지판을 이벤트로 안 씀 (SLOW 로 안 들어감). 코드는 남겨 둠
+        'use': False,
         'speed': 0.2,
         'max_duration': 0.0,       # >0 이면 이 시간 뒤 LANE_FOLLOWING (0 = 위 미션 나올 때까지 계속) [s]
     },
@@ -277,6 +281,8 @@ PARAM_DEFAULTS = {
         'unknown_sign_distance': 2.0,  # 표지판 위치를 한 번도 못 받았을 때 표지판까지 거리로 침 [m]
         'duration_sec': 8.0,       # odom 이 없을 때만: 진입 후 이 시간 뒤 끝 (예전 방식)
         'max_duration': 30.0,      # 안전용 최대 시간 [s]
+        'slow_sign': True,         # (11/18 주최측 공지) 방지턱 앞 표지판이 서행 표지판으로 바뀜 -> 서행 표지판도 BUMP 로 (slow.use 가 false 일 때)
+        'handoff': True,           # (11/18) BUMP 중 신호등·지그재그 유도선·보행자 표지판을 보면 그 미션으로 바로 (다른 곳 서행 표지판 대비)
     },
     'slow_zone': {
         'speed': 0.2,
@@ -284,10 +290,12 @@ PARAM_DEFAULTS = {
         'lock_delay_sec': 1.0,     # 유도선 거리를 모를 때: 진입 후 이 시간 뒤 헤딩 고정
         'k_yaw': 1.5,              # 고정 헤딩 유지 게인 [rad 조향 / rad 오차]
         'lane_blend': 0.3,         # 차선 보정 비율 (0 = 순수 헤딩 유지, 1 = 일반 차선 추종과 같은 세기)
-        'handoff_stopline': 0.5,   # 보행자 표지판을 본 뒤, 정지선이 이 거리 안일 때 CROSSWALK_STOP 으로
-        'handoff_sign': 1.0,       # 정지선이 안 보이면 표지판이 이 거리 안일 때 (0 = 이 조건 끔)
-        'max_duration': 20.0,      # 보행자 표지판을 끝내 못 보면 이 시간 뒤 LANE_FOLLOWING 복귀
+        'handoff_stopline': 0.5,   # (예전 방식만) 보행자 표지판을 본 뒤, 정지선이 이 거리 안일 때 CROSSWALK_STOP 으로
+        'handoff_sign': 1.0,       # (예전 방식만) 정지선이 안 보이면 표지판이 이 거리 안일 때 (0 = 이 조건 끔)
+        'max_duration': 20.0,      # 횡단보도(예전: 보행자 표지판)를 끝내 못 잡으면 이 시간 뒤 LANE_FOLLOWING 복귀
         'exit_past_stopline': 0.3, # (11/15) 표지판 못 본 채 정지선이 차 기준점 뒤로 이만큼 지나면 복귀 [m] (0 = 끔)
+        'merge_crosswalk': True,   # (11/18 사용자) 지그재그 + 횡단보도 정지를 이 State 하나로 (정지 값은 crosswalk 그룹). false = 예전 방식
+        'floor_min_meas': 2,       # 바닥 횡단보도 측정을 이만큼 받아야 그 정지선으로 멈춤 (한 프레임 오검출 방지)
     },
     'left_a_right_b': {
         'trigger_distance': 0.8,
@@ -492,6 +500,7 @@ PARAM_DEFAULTS = {
         'end_ahead_min': 2,
         'end_ahead_count': 3,
         'end_one_x': 0.30,         # 남은 콘이 있으면 그 콘도 이 거리 안이어야 끝 (한쪽 줄을 못 볼 때 한 줄 일찍 끝나지 않게) [m]
+        'end_ahead_max_y': 0.7,    # (11/18 사용자) 남은 콘은 차에서 옆으로 이 안의 것만 셈 (벽 빼기, comp_lap1 녹화로 고름) [m]
         'end_min_cones': 4,
         'hold_steer_zero': True,   # 콘이 안 보이는데 아직 안 끝낼 때 조향 0 (false = 예전처럼 마지막 조향 유지)
     },
@@ -510,6 +519,7 @@ PARAM_DEFAULTS = {
         'bay_d_min': -0.95,        # 윗줄 칸에 선 LIMO 만 보기 위한 범위 (기준 차선 중앙, 왼쪽 +) [m]
         'bay_d_max': -0.30,
         'park_depth': 0.57,        # 차선 중앙 -> 칸 깊이 가운데 (차선 반폭 0.25 + 선 0.02 + 칸 반 0.30) [m]
+        'depth_shift': 0.06,       # (11/18 사용자) 칸 가운데보다 이만큼 더 안쪽(차 앞쪽)에 섬 [m]. 0 = 칸 가운데
         # (11/10) 칸 깊이 목표 = LIMO 두 대 가운데. 차선 기준(park_depth)과 depth_max_diff 넘게 다르면 둘의 중간
         'limo_depth': True,
         'depth_max_diff': 0.15,    # LIMO 가 칸 안이면 칸 가운데서 최대 (0.6 - 0.322)/2 = 0.14 m 벗어남 [m]
@@ -1076,13 +1086,18 @@ class MissionSupervisor(Node):
         rng = self.yolo['event_range']
         ped_rng = self.yolo['pedestrian_range']
 
+        # (11/18 주최측 공지) 방지턱 앞 표지판 = 서행 표지판 -> SLOW 를 안 쓰면 서행 표지판을 방지턱 표지판처럼 (BUMP 진입·끝 거리)
+        slow_as_bump = bool(self.bump.get('slow_sign', False)) and not self.slow['use']
         best = {}                                    # 클래스별 가장 확실한 1개
         for o in msg.objects:
             if not self._yolo_lateral_ok(o):
                 continue                             # 옆 길 표지판 (11/05)
-            prev = best.get(o.class_id)
+            cid = o.class_id
+            if slow_as_bump and cid == MissionObject.SLOW_SIGN:
+                cid = MissionObject.BUMP_SIGN
+            prev = best.get(cid)
             if prev is None or o.confidence > prev.confidence:
-                best[o.class_id] = o
+                best[cid] = o
 
         st = self.avoid_static
         x_off = float(self.yolo['x_offset'])
@@ -1106,6 +1121,8 @@ class MissionSupervisor(Node):
             name = YOLO_EVENT.get(cls)
             if cls == MissionObject.LIMO:
                 continue                         # LIMO 는 여러 대 중 하나라도 경로 앞이면 (아래)
+            if cls == MissionObject.SLOW_SIGN and not self.slow['use']:
+                continue                         # (11/18 사용자) 서행 표지판 안 씀
             if name is not None and near(o):
                 seen.add(name)
         if any(o.class_id == MissionObject.LIMO and near(o) for o in msg.objects):

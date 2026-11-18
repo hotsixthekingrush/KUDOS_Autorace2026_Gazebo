@@ -35,6 +35,7 @@ class StopLineTracker(object):
         self.last_time = None
         self.last_speed = 0.0
         self.trusted = False        # (11/16) 먼(정확한) 측정을 받은 적 있는지
+        self.n_meas = 0             # (11/18) 받아들인 측정 횟수 (SLOW_ZONE 바닥 횡단보도 전환용)
 
     def begin(self, now):
         """State 진입 시 호출. 바로 앞 State 가 쓰던 추정이 있으면 이어받고, 아니면 새로 시작."""
@@ -69,6 +70,7 @@ class StopLineTracker(object):
                 fresh = False
             else:
                 self.est = dist
+                self.n_meas += 1
                 if not close:
                     self.trusted = True
 

@@ -153,6 +153,7 @@ mission_supervisor:
     # (11/17 사용자) 서행 표지판(원형, SLOW_SIGN) -> SLOW: 차선 추종 그대로 속도만 speed. 신호등·지그재그(SLOW_ZONE)·방지턱 표지판(BUMP)·
     #   보행자 표지판(CROSSWALK_STOP)으로만 넘어감. 방지턱 표지판은 예전처럼 BUMP (예전엔 서행 표지판도 BUMP 였음)
     slow:
+      use: false               # (11/18 사용자) 서행은 지그재그에만 있어 의미 없음 + 대회장에서 서행 표지판이 P 로 잘못 잡힘 -> 끔 (true 면 서행 표지판 -> SLOW)
       speed: 0.2
       max_duration: 0.0        # >0 이면 이 시간 뒤 LANE_FOLLOWING (서행 표지판 오인식 대비). 0 = 위 미션 나올 때까지 계속 [s]
 
@@ -185,6 +186,10 @@ mission_supervisor:
       unknown_sign_distance: 2.0  # 표지판 위치를 한 번도 못 받았을 때 표지판까지 거리로 침 [m]
       duration_sec: 8.0        # odom 이 없을 때만: 진입 후 이 시간 뒤 끝 (예전 방식)
       max_duration: 30.0       # 무슨 일이 있어도 이 시간 뒤 끝 [s]
+      slow_sign: true          # (11/18 주최측 공지) 방지턱 앞 표지판이 서행 표지판으로 바뀜 -> 서행 표지판도 방지턱 표지판처럼 BUMP 진입·끝 거리에 씀
+                               #   (slow.use 가 false 일 때만. true 면 예전처럼 서행 표지판 -> SLOW)
+      handoff: true            # (11/18) BUMP 중 신호등·지그재그 유도선·보행자 표지판을 보면 그 미션으로 바로 넘어감
+                               #   (지그재그·신호등 쪽 서행 표지판으로 BUMP 에 들어가도 그 미션을 놓치지 않게)
 
     # 미션 6 - 서행 유도선 (지그재그)
     slow_zone:
@@ -193,10 +198,12 @@ mission_supervisor:
       lock_delay_sec: 1.0      # 유도선 거리를 모를 때만: 진입 후 이 시간 뒤 헤딩 고정
       k_yaw: 1.5               # 고정 헤딩 유지 게인
       lane_blend: 0.3          # 차선 보정 비율 (0 = 순수 헤딩 유지, 1 = 일반 차선 추종 세기)
-      handoff_stopline: 0.5    # 보행자 표지판을 본 뒤 정지선이 이 거리 안이면 CROSSWALK_STOP 으로 [m]
-      handoff_sign: 1.0        # 정지선이 아직 안 보이면 표지판이 이 거리 안일 때 (0 = 끔) [m]
-      max_duration: 20.0       # 보행자 표지판을 끝내 못 보면 이 시간 뒤 복귀
-      exit_past_stopline: 0.3  # (11/15 사용자) 표지판 못 본 채 정지선이 차 기준점 뒤로 이만큼 지나면(횡단보도 지남) 바로 복귀 [m]. 0 = 끔
+      handoff_stopline: 0.5    # (예전 방식만) 보행자 표지판을 본 뒤 정지선이 이 거리 안이면 CROSSWALK_STOP 으로 [m]
+      handoff_sign: 1.0        # (예전 방식만) 정지선이 아직 안 보이면 표지판이 이 거리 안일 때 (0 = 끔) [m]
+      max_duration: 20.0       # 횡단보도(예전 방식: 보행자 표지판)를 끝내 못 잡으면 이 시간 뒤 복귀
+      exit_past_stopline: 0.3  # (11/15 사용자) 못 멈춘 채 정지선이 차 기준점 뒤로 이만큼 지나면(횡단보도 지남) 바로 복귀 [m]. 0 = 끔
+      merge_crosswalk: true    # (11/18 사용자) 지그재그 + 횡단보도 정지를 SLOW_ZONE 하나로 (정지 값은 crosswalk 그룹). false = 예전 방식
+      floor_min_meas: 2        # 바닥 횡단보도 측정을 이만큼 받아야 그 정지선으로 멈춤 (한 프레임 오검출로 멈추지 않게)
 
     # 미션 2 - 갈림길 A/B
     left_a_right_b:
@@ -443,6 +450,8 @@ mission_supervisor:
       end_ahead_min: 2
       end_ahead_count: 3
       end_one_x: 0.30            # 남은 콘이 있으면 그 콘도 이 거리 안이어야 끝 (라이다가 한쪽 줄을 못 보면 한 줄 일찍 끝났음) [m]
+      end_ahead_max_y: 0.7       # (11/18 사용자) 남은 콘은 차에서 옆으로 이 안의 것만 셈 [m]. comp_lap1: 콘 왼쪽 0.9 m 벽이 세져서
+                                 #   1.0 이면 이 규칙이 안 맞음. 녹화로 돌려 보니 0.7 = 마지막 콘 지나고 0.1초 뒤 끝, 0.6 은 오른쪽 콘(-0.6)이 경계
       end_min_cones: 4
       hold_steer_zero: true      # 콘이 안 보이는데 아직 안 끝낼 때 조향 0 (예전: 마지막 조향 유지 -> 최대 조향 1.7초 유지해 43도 더 돎)
 
@@ -463,6 +472,8 @@ mission_supervisor:
       bay_d_min: -0.95         # 윗줄 칸 LIMO 만 보는 범위 (차선 중앙 기준, 왼쪽 +) [m]
       bay_d_max: -0.30
       park_depth: 0.57         # 차선 중앙 -> 칸 깊이 가운데 (차선 반폭 0.25 + 선 0.02 + 칸 반 0.30) [m]
+      depth_shift: 0.06        # (11/18 사용자) 칸 가운데보다 이만큼 더 안쪽(차 앞쪽)에 섬 [m]. 차 뒤가 입구 쪽 선에 아슬아슬해 보여서.
+                               #   칸 깊이 0.6 - 차 길이 0.322 -> 가운데면 앞뒤 0.14 씩 여유, 0.06 이면 앞 0.08 / 뒤 0.20. 0 = 칸 가운데
       # (11/10) 칸 깊이 목표 = LIMO 두 대 가운데 (기준 방향이 틀어져도 맞음. Gazebo parking_run1 에서 차선 기준은 10 cm 더 들어감)
       #   차선 기준(park_depth)과 depth_max_diff 넘게 다르면 둘의 중간 + 경고. false = 예전처럼 차선 기준만
       limo_depth: true

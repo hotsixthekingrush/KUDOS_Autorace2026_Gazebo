@@ -209,6 +209,9 @@ class AvoidCone(SafeState):
         if not cfg['end_ahead_use']:
             return False
         lim = cfg['end_ahead_x']
+        # (11/18 사용자) 옆으로 end_ahead_max_y 안의 것만 셈 (차 기준). comp_lap1: 콘 왼쪽 0.9 m 벽이 기억에 들어가
+        #   roi_max_y(1.0) 로 세면 끝까지 2개 넘게 남아 이 규칙이 한 번도 안 맞았음
+        side = min(cfg['roi_max_y'], cfg.get('end_ahead_max_y', cfg['roi_max_y']))
         if pose is not None:
             x, y, yaw = pose
             c, s = math.cos(yaw), math.sin(yaw)
@@ -216,10 +219,10 @@ class AvoidCone(SafeState):
             for m in self.memory:
                 bx = c * (m[0] - x) + s * (m[1] - y)
                 by = -s * (m[0] - x) + c * (m[1] - y)
-                if bx > lim and abs(by) <= cfg['roi_max_y']:
+                if bx > lim and abs(by) <= side:
                     xs.append(bx)
         else:
-            xs = [o.x for o in cones if o.x > lim]
+            xs = [o.x for o in cones if o.x > lim and abs(o.y) <= side]
         n = len(xs)
         self.node.dbg('cone/ahead', n)
         if self.n_seen < cfg['end_min_cones']:

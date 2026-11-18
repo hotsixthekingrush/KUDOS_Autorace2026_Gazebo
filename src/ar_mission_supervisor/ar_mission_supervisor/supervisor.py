@@ -351,22 +351,6 @@ PARAM_DEFAULTS = {
         'lane_from_odom': True,    # 바꾸는 중에도 차선 번호는 odom 위치 (11/12, pd_lane_run4: 가운데~오른쪽인데 계속 '왼쪽')
         'edge_check': True,        # 굴려 볼 때 3차선 바깥 선을 넘으면 막힌 것으로 봄 (11/05)
         'edge_margin': 0.0,        # 바깥 선(1.5 x lane_width)에 더하는 여유 [m]
-        # (11/18 사용자) free 방식: 차선 가운데에 얽매이지 않고, 1 m 앞 목표점의 옆 위치를 free_step 간격 후보로 굴려 보고
-        #   가장 멀리 가는 것 중 (안 바꿈·차선 가운데·A/B 목표 차선·LIMO 와 여유) 비용이 가장 작은 것. 바깥 선만 지킴. 'lane' = 지금 방식
-        'mode': 'lane',
-        'free_lookahead': 1.0,     # 목표점까지 앞 거리 [m] (막히면 lookahead, lookahead_short 로 더 급하게 꺾어 봄)
-        'free_step': 0.06,         # 옆 위치 후보 간격 [m]
-        'free_edge_margin': 0.03,  # 3차선 바깥 선 안쪽으로 이만큼은 안 감 [m]
-        'free_horizon': 2.0,       # 후보마다 굴려 보는 거리 [m]
-        'free_reach_tol': 0.05,    # 가장 멀리 가는 것과 이만큼 안 차이 나면 같은 걸로 봄 [m]
-        'free_margin': 0.06,       # 이만큼 더 여유를 두고도 (가장 멀리 가는 만큼) 가는 길이 있으면 그 중에서만 고름 [m]
-        'free_w_change': 0.2,      # 지금 목표에서 옆으로 1 m 바꿀 때 비용
-        'free_w_center': 0.5,      # 가장 가까운 차선 가운데에서 1 m 떨어질 때 비용 (막힌 게 없으면 차선 가운데로)
-        'free_w_goal': 1.0,        # A/B 목표 차선 가운데에서 1 m 떨어질 때 비용
-        'free_keep': 0.03,         # 지금 목표가 이 비용 차이 안이면 안 바꿈
-        'free_hold_slack': 0.4,    # 지금 목표가 가장 먼 것보다 이만큼 안으로 덜 가도 반대쪽으로는 안 뒤집음 [m]
-        'free_goal_slack': 0.6,    # A/B 목표 차선 안 후보가 가장 먼 것보다 이만큼 안으로 덜 가도 그 차선으로 [m]
-        'free_limo_width': 0.22,   # free 방식에서 LIMO 박스 옆 폭 [m]. 0.322 (가로로 놓인 LIMO 대비) 는 시뮬 기본 배치에서 다 막혀서 안 씀
         'limo_length': 0.322,      # 장애물 LIMO 박스 (진행방향 길이 x 폭) [m]
         'limo_width': 0.22,
         'car_length': 0.322,       # 우리 차
@@ -557,6 +541,13 @@ PARAM_DEFAULTS = {
         'stop_tolerance': 0.02,
         'search_timeout': 30.0,
         'search_distance': 6.0,
+        'back_search_distance': 3.0,   # (11/18 사용자) 끝까지 못 찾으면 멈춘 뒤 이만큼 곧게 후진하며 다시 찾음 [m] (0 = 예전처럼 바로 정지)
+        'back_search_max': 1,      # 후진하며 다시 찾기 횟수
+        'back_search_speed': 0.15,     # 그때 후진 속도 [m/s]
+        'back_search_before': 1.0,     # PARKING 들어온 자리보다 이만큼 넘게 뒤로는 안 감 [m]
+        'back_search_timeout': 30.0,   # 후진하며 찾기 최대 시간 [s]
+        'back_search_k_lat': 0.5,      # 후진하며 차선 가운데로 붙는 세기 [rad/m]
+        'back_search_clear': 1.2,      # 후진하며 본 격자 시작보다 이만큼 앞(뒤쪽)까지 오면 후진 멈추고 다시 앞으로 [m]
         'turn_timeout': 15.0,
         'align_timeout': 15.0,
         # (11/18 사용자) 주최측 안내: 6칸 중 1칸만 빔, 위치 바뀔 수 있음 -> 라이다 원본으로 6칸 격자에서 빈칸 찾기

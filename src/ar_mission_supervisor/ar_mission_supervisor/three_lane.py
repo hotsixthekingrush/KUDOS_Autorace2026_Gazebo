@@ -135,7 +135,6 @@ class ThreeLanePlanner(object):
         self.edge_shrink = (0.0, 0.0)   # (오른쪽 바깥 선, 왼쪽 바깥 선)을 안쪽으로 당긴 양 [m] - 확인 전까지 양쪽 가정 모두에서 안전한 폭만
         self.relax_logged = False       # 겹친 LIMO 여유 줄임 로그 (11/12)
         self.lat_offset = 0.0
-        self.free_target = None         # (11/18) free 방식 목표 옆 위치 [m]
 
     @property
     def cfg(self):
@@ -170,7 +169,6 @@ class ThreeLanePlanner(object):
         self.map = ObstacleMap(merge=cfg['merge_distance'], average=cfg['map_average'], ghost=ghost)
         self.lane = self.target = int(lane)
         self.changing = False
-        self.free_target = None
         self.mismatch_since = None
         self.logged_blocked = False
         self.max_obstacle_s = None
@@ -430,7 +428,6 @@ class ThreeLanePlanner(object):
         self.maneuver = None
         self.maneuver_failed = None
         self.target_since = now
-        self.free_target = None
         return car
 
     def finish(self):
@@ -500,19 +497,10 @@ class ThreeLanePlanner(object):
     # ------------------------------------------------------------------
     # 미리 굴려보기 (rollout)
     # ------------------------------------------------------------------
-    def _box_half(self):
-        """LIMO 박스 (반 길이, 반 폭) + clearance. (11/18) free 방식은 옆 폭을 free_limo_width 로
-        (가로로 놓인 LIMO 도 덮게. 라이다 장애물엔 방향이 없어서 늘 차선 방향 박스로 봄)."""
-        cfg = self.cfg
-        hl = 0.5 * cfg['limo_length'] + cfg['clearance']
-        w = cfg['limo_width']
-        if self.free_mode():
-            w = max(w, cfg['free_limo_width'])
-        return hl, 0.5 * w + cfg['clearance']
-
     def _boxes(self, s_car):
         cfg = self.cfg
-        hl, hw = self._box_half()
+        hl = 0.5 * cfg['limo_length'] + cfg['clearance']
+        hw = 0.5 * cfg['limo_width'] + cfg['clearance']
         return [(it['s'], it['d'], hl, hw)
                 for it in self.map.confirmed(cfg['confirm_hits'])
                 if it['s'] + hl > s_car - 0.5]
@@ -613,7 +601,7 @@ class ThreeLanePlanner(object):
         else:
             hl, hw = 0.5 * cfg['car_length'], 0.5 * cfg['car_width']
         ext = hl * abs(math.sin(psi)) + hw * abs(math.cos(psi))
-        lim = 1.5 * self.width() + (-cfg['free_edge_margin'] if self.free_mode() else cfg['edge_margin'])
+        lim = 1.5 * self.width() + cfg['edge_margin']
         cut_right, cut_left = self.edge_shrink
         return d + ext > lim - cut_left or d - ext < -lim + cut_right
 
@@ -656,7 +644,8 @@ class ThreeLanePlanner(object):
 
     def _all_boxes(self):
         cfg = self.cfg
-        hl, hw = self._box_half()
+        hl = 0.5 * cfg['limo_length'] + cfg['clearance']
+        hw = 0.5 * cfg['limo_width'] + cfg['clearance']
         return [(it['s'], it['d'], hl, hw) for it in self.map.confirmed(cfg['confirm_hits'])]
 
     def _relax(self, boxes, s_, d, psi, who=None):
@@ -1029,8 +1018,6 @@ class ThreeLanePlanner(object):
         if self.ident is not None and self._ident_step(pose, s_, d, psi, now, who):
             s_, d, psi = self.frame.car(pose)
         node.dbg('static/lat_offset', self.lat_offset)
-        if self.free_mode():
-            return self._free_step(pose, s_, d, psi, now, goal, who)
 
         if self.changing and self.settled(d, psi):
             self.lane = self.target
@@ -1092,35 +1079,15 @@ class ThreeLanePlanner(object):
         if self.target != self.lane:
             self.changing = True
 
-        free_strs = ' '.join('%s=%.2f' % (self.name(ln), free[ln]) for ln in self.LANES)
-        v, res = self._speed_or_recover(pose, s_, d, psi, now, who, free[self.target], max(reach.values()), free_strs)
-        if res is not None:
-            return res
-
-        node.dbg('static/lane', self.lane)
-        node.dbg('static/target', self.target)
-        node.dbg('static/d', d)
-        node.dbg('static/s', s_)
-        node.dbg('static/lookahead', info[self.target]['la'])
-        node.publish_cmd(v, self.steer(pose, s_, self.center(self.target), v, info[self.target]['la']))
-        return StepResult(pose, s_, d, psi)
-
-    def _speed_or_recover(self, pose, s_, d, psi, now, who, free_t, best_reach, free_strs):
-        """고른 길로 갈 수 있는 거리(free_t)에 따라 속도. 짧으면 감속, stop_distance 안이면 서고 backup_after 뒤
-        후진 / 앞뒤 움직임. 반환 (속도, StepResult 또는 None). StepResult 가 있으면 그대로 돌려줄 것 (서 있음).
-        (11/18) 차선 방식과 free 방식이 같이 씀 (예전 step 안에 있던 것 그대로)."""
-        node = self.node
-        cfg = self.cfg
-        log = node.get_logger()
         v = cfg['speed']
         if self.ident is not None and self.ident['hyp'] is not None:
             v = min(v, cfg['slow_speed'])       # 몇 번 차선인지 확인 중 - 천천히
-        if free_t < cfg['commit_distance']:
+        if free[self.target] < cfg['commit_distance']:
             if not self.logged_blocked:
                 log.warn('[%s] 갈 수 있는 거리가 짧음 (최대 %.2fm) - 감속, %.2fm 안이면 정지'
-                         % (who, free_t, cfg['stop_distance']))
+                         % (who, free[self.target], cfg['stop_distance']))
                 self.logged_blocked = True
-            if free_t <= cfg['stop_distance']:
+            if free[self.target] <= cfg['stop_distance']:
                 node.publish_stop()
                 node.dbg('static/mode', 'stop')
                 if self.blocked_since is None:
@@ -1129,7 +1096,7 @@ class ThreeLanePlanner(object):
                     bxs = self._relax(self._all_boxes(), s_, d, psi)
                     pick = None
                     if cfg['backup_mode'] == 'search' and self.backups < cfg['backup_max']:
-                        pick = self._choose_backup(s_, d, psi, bxs, best_reach)
+                        pick = self._choose_backup(s_, d, psi, bxs, max(reach.values()))
                     # (11/16) 한 번 후진으로 충분히 뚫리면 (앞 maneuver_if_reach_below 넘게) 그게 빠름.
                     #   아니면 앞뒤로 움직여 빠져나갈 길을 찾고, 그것도 없으면 후진
                     quick = (pick is not None and pick[2] >= cfg['maneuver_if_reach_below']
@@ -1139,16 +1106,18 @@ class ThreeLanePlanner(object):
                             and self._maneuver_retry_ok(s_, d, psi)
                             and self._start_maneuver(pose, s_, d, psi, now, who,
                                                      '%.1f초 막힘 (차선별 갈 거리 %s)' % (
-                                                         now - self.blocked_since, free_strs))):
+                                                         now - self.blocked_since,
+                                                         ' '.join('%s=%.2f' % (self.name(ln), free[ln])
+                                                                  for ln in self.LANES)))):
                         self.maneuvers += 1
-                        return v, StepResult(pose, s_, d, psi, blocked=True)
+                        return StepResult(pose, s_, d, psi, blocked=True)
                     if self.backups >= cfg['backup_max']:
-                        return v, StepResult(pose, s_, d, psi, blocked=True)
+                        return StepResult(pose, s_, d, psi, blocked=True)
                     if pick is not None:
                         st, dist, ahead = pick
                         how = '조향 %+.2f' % st if st is not None else '차선 방향으로 펴며'
                         room = dist
-                        extra = ' -> 그 뒤 앞으로 %.2fm (지금 %.2fm)' % (ahead, best_reach)
+                        extra = ' -> 그 뒤 앞으로 %.2fm (지금 %.2fm)' % (ahead, max(reach.values()))
                     else:
                         st, how, extra = None, '차선 방향으로 펴며', ''
                         room = min(self.rollout_back(s_, d, psi, bxs, cfg['backup_distance']), cfg['backup_distance'])
@@ -1165,145 +1134,22 @@ class ThreeLanePlanner(object):
                         self.backing = (pose[0], pose[1], st, room)
                         log.warn('[%s] %.1f초 막힘 - %.2fm 후진 (%s)%s 후 다시 계산 (%d/%d번째, 차선별 갈 거리 %s)'
                                  % (who, now - self.blocked_since, room, how, extra,
-                                    self.backups, cfg['backup_max'], free_strs))
-                return v, StepResult(pose, s_, d, psi, blocked=True)
+                                    self.backups, cfg['backup_max'],
+                                    ' '.join('%s=%.2f' % (self.name(ln), free[ln]) for ln in self.LANES)))
+                return StepResult(pose, s_, d, psi, blocked=True)
             v = cfg['slow_speed']
             self.blocked_since = None
         else:
             self.logged_blocked = False
             self.blocked_since = None
-        return v, None
 
-    # ------------------------------------------------------------------
-    # (11/18 사용자) free 방식: 차선 가운데에 얽매이지 않고 1 m 앞 목표점의 옆 위치를 고름
-    # ------------------------------------------------------------------
-    def free_mode(self):
-        return str(self.cfg.get('mode', 'lane')).lower() == 'free'
-
-    def _free_cands(self):
-        """옆 위치 후보 (free_step 간격 + 차선 가운데 3곳). 바깥 선 안쪽만 (몸통 반폭 + free_edge_margin)."""
-        cfg = self.cfg
-        hw = 0.5 * cfg['car_width']
-        if cfg['wheel_box_length'] > 0.0 and cfg['wheel_box_width'] > 0.0:
-            hw = max(hw, 0.5 * cfg['wheel_box_width'])
-        lim = 1.5 * self.width() - cfg['free_edge_margin'] - hw
-        cut_right, cut_left = self.edge_shrink
-        lo, hi = -lim + cut_right, lim - cut_left
-        step = max(0.02, cfg['free_step'])
-        out = set()
-        k = int(math.floor(lo / step))
-        while k * step <= hi + 1e-9:
-            if k * step >= lo - 1e-9:
-                out.add(round(k * step, 4))
-            k += 1
-        for ln in self.LANES:
-            c = self.center(ln)
-            if lo - 1e-9 <= c <= hi + 1e-9:
-                out.add(round(c, 4))
-        return sorted(out)
-
-    def _free_las(self):
-        cfg = self.cfg
-        las = [cfg['free_lookahead']]
-        for la in self._las():
-            if la < las[-1] - 1e-6:
-                las.append(la)
-        return las
-
-    def _free_plan(self, s_, d, psi, boxes, H):
-        """후보 옆 위치마다 {'reach', 'la'}: 1 m 앞(free_lookahead)을 먼저 굴려 보고, 막히면 더 짧게 (급하게) 꺾는 것도."""
-        out = {}
-        for dc in self._free_cands():
-            best = None
-            for la in self._free_las():
-                r = self.rollout(s_, d, psi, dc, boxes, H, la)
-                if best is None or r > best['reach'] + 1e-6:
-                    best = {'reach': r, 'la': la}
-                if r >= H - 1e-6:
-                    break
-            out[dc] = best
-        return out
-
-    def _free_step(self, pose, s_, d, psi, now, goal, who):
-        node = self.node
-        cfg = self.cfg
-        log = node.get_logger()
-        self.lane = self.lane_of(d)
-        if self.free_target is None:
-            self.free_target = self.center(self.lane)
-
-        if self.backing is not None and self._back_step(pose, s_, d, psi, now, who):
-            return StepResult(pose, s_, d, psi, blocked=True)
-        if self.maneuver is not None and self._maneuver_step(pose, s_, d, psi, now, who):
-            return StepResult(pose, s_, d, psi, blocked=True)
-
-        H = cfg['free_horizon']
-        boxes = self._relax(self._boxes(s_), s_, d, psi, who)
-        info = self._free_plan(s_, d, psi, boxes, H)
-        best_r = max(it['reach'] for it in info.values())
-        pool = [dc for dc, it in info.items() if it['reach'] >= best_r - cfg['free_reach_tol']]
-        # A/B 목표 차선이 있으면: 그 차선 안 후보가 commit_distance 넘게 (가장 먼 것보다 free_goal_slack 안으로) 가면 그 중에서만
-        if goal is not None:
-            gpool = [dc for dc, it in info.items() if self.lane_of(dc) == goal
-                     and it['reach'] >= max(cfg['commit_distance'], best_r - cfg['free_goal_slack'])]
-            if gpool:
-                pool = gpool
-        # 여유를 free_margin 더 두고도 그만큼 가는 길이 있으면 그 중에서만 고름 (LIMO 에 바짝 붙어 가지 않게).
-        #   시뮬: 여유를 비용으로만 주면 라이다 오차·가로로 놓인 LIMO 에서 스쳐 닿음 (11/18 static_noise GHOST / TV 배치)
-        #   그만큼이 안 되면 여유를 2/3, 1/3 로 줄여 가며 (= 좁은 틈이면 그 틈 가운데로. 차선 가운데 쪽 끝에 붙지 않게)
-        if cfg['free_margin'] > 0.0 and len(pool) > 1:
-            for m in (cfg['free_margin'], cfg['free_margin'] * 2.0 / 3.0, cfg['free_margin'] / 3.0):
-                big = [(bs, bd, hl + m, hw + m) for bs, bd, hl, hw in boxes]
-                roomy = [dc for dc in pool
-                         if self.rollout(s_, d, psi, dc, big, info[dc]['reach'], info[dc]['la']) >= info[dc]['reach'] - 1e-6]
-                if roomy:
-                    pool = roomy
-                    break
-        centers = [self.center(ln) for ln in self.LANES]
-
-        def cost(dc):
-            c = cfg['free_w_change'] * abs(dc - self.free_target)
-            c += cfg['free_w_center'] * min(abs(dc - cc) for cc in centers)
-            if goal is not None:
-                c += cfg['free_w_goal'] * abs(dc - self.center(goal))
-            return c
-
-        pick = min(pool, key=cost)
-        old = self.free_target
-        if old in pool and cost(old) <= cost(pick) + cfg['free_keep']:
-            pick = old                          # 자꾸 안 바꿈
-        elif (old in info and old != pick and info[old]['reach'] >= max(cfg['commit_distance'], best_r - cfg['free_hold_slack'])
-              and (goal is None or self.lane_of(old) == goal or self.lane_of(pick) != goal)
-              and (pick - d) * (old - d) < 0.0):
-            pick = old                          # 반대쪽으로 뒤집지 않음 (지금 쪽도 충분히 가면)
-        if abs(pick - old) > 0.10 and (abs(pick - old) > 0.25 or self.lane_of(pick) != self.lane_of(old)):
-            log.info('[%s] 목표 옆 위치 %+.2f -> %+.2fm (%s 차선 쪽, 앞 %.1fm 굴려 %.2fm 감, 후보 %d개 중 %d개가 가장 멂)'
-                     % (who, old, pick, self.name(self.lane_of(pick)), H, info[pick]['reach'], len(info), len(pool)))
-        self.free_target = pick
-        self.target = self.lane_of(pick)
-        self.changing = not (abs(d - pick) <= cfg['settle_tolerance'] and abs(psi) <= cfg['settle_heading']
-                             and abs(pick - self.center(self.target)) <= cfg['settle_tolerance'])
-        node.dbg('static/free_target', info[pick]['reach'])
-        node.dbg('static/reach_target', info[pick]['reach'])
-
-        lanes_best = {}
-        for dc, it in info.items():
-            ln = self.lane_of(dc)
-            lanes_best[ln] = max(lanes_best.get(ln, 0.0), it['reach'])
-        free_strs = ' '.join('%s=%.2f' % (self.name(ln), min(lanes_best.get(ln, 0.0), cfg['plan_horizon']))
-                             for ln in self.LANES)
-        v, res = self._speed_or_recover(pose, s_, d, psi, now, who, min(info[pick]['reach'], cfg['plan_horizon']),
-                                        best_r, free_strs)
-        if res is not None:
-            return res
         node.dbg('static/lane', self.lane)
-        node.dbg('static/target', pick)
+        node.dbg('static/target', self.target)
         node.dbg('static/d', d)
         node.dbg('static/s', s_)
-        node.dbg('static/lookahead', info[pick]['la'])
-        node.publish_cmd(v, self.steer(pose, s_, pick, v, info[pick]['la']))
+        node.dbg('static/lookahead', info[self.target]['la'])
+        node.publish_cmd(v, self.steer(pose, s_, self.center(self.target), v, info[self.target]['la']))
         return StepResult(pose, s_, d, psi)
-
 
     def settled(self, d, psi):
         return (abs(d - self.center(self.target)) <= self.cfg['settle_tolerance']

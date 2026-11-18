@@ -124,6 +124,7 @@ class ThreeLanePlanner(object):
         self.maneuver = None        # (11/16) 앞뒤로 움직여 빠져나가는 중이면 그 계획
         self.maneuver_failed = None     # 마지막으로 길을 못 찾은 자리 (s, d, psi)
         self.ab_goal = None             # (11/16) A/B 표지판으로 정한 목표 차선 (다시 진입해도 이어 감)
+        self.speed_cap = None           # (11/19) A/B 아직 못 정함 -> 이 속도까지만 (State 가 매 주기 정함)
         self.maneuver_failed_n = 0
         self.maneuvers = 0
         self.logged_floor = False
@@ -394,6 +395,7 @@ class ThreeLanePlanner(object):
     def release(self, now):
         """AVOID_STATIC 이 끝남. 잠깐 동안은 LEFT_A_RIGHT_B 가 이어받을 수 있다."""
         self.released_at = now
+        self.speed_cap = None
 
     def resume(self):
         self.released_at = None
@@ -432,6 +434,7 @@ class ThreeLanePlanner(object):
 
     def finish(self):
         self.active = False
+        self.speed_cap = None
 
     # ------------------------------------------------------------------
     # 차선 기하
@@ -1143,6 +1146,9 @@ class ThreeLanePlanner(object):
             self.logged_blocked = False
             self.blocked_since = None
 
+        if self.speed_cap is not None and v > self.speed_cap:
+            v = self.speed_cap                  # (11/19) A/B 표지판을 보는 중인데 아직 못 정함 - 천천히 더 봄
+            node.dbg('static/ab_slow', v)
         node.dbg('static/lane', self.lane)
         node.dbg('static/target', self.target)
         node.dbg('static/d', d)

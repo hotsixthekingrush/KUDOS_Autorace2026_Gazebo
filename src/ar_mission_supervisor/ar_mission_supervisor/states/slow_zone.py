@@ -6,8 +6,8 @@
      (유도선을 코너 끝에서 미리 볼 수 있으므로 차가 직선에 들어선 뒤 방향을 잡는다)
      시작점 = 진입 순간 YOLO 가 준 유도선 거리 + lock_offset 만큼 주행한 지점 (odom).
      유도선 거리나 odom 이 없으면 진입 후 lock_delay_sec 뒤.
-  2) 그 순간의 odom 헤딩을 목표로 고정하고,
-       조향 = k_yaw x 헤딩 오차 + lane_blend x confidence x 차선 추종 조향
+  2) 그 순간의 odom 헤딩을 목표로 고정하고 (11/19: 트랙 축에서 axis_snap_deg 안이면 그 축으로),
+       조향 = k_yaw x 헤딩 오차 + lane_blend x confidence x 차선 추종 조향 (차선 몫은 ±lane_max 까지)
      으로 직진 헤딩을 유지한다. 지그재그 차선을 그대로 따라가 좌우로 흔들리는 것을 막는다.
      차선이 안 보이면 헤딩 유지만 한다.
   3) 바닥 횡단보도(YOLO CROSSWALK) 측정을 floor_min_meas 번 이상 받으면 정지선 거리를 이어서 추정하고
@@ -40,6 +40,9 @@ def heading_hold_steer(node, driver, target_yaw, yaw, now):
     if lane is not None and cfg['lane_blend'] > 0.0:
         confidence = clamp(lane[2], 0.0, 1.0)
         lane_part = cfg['lane_blend'] * confidence * driver.lane_steer(lane, now)
+        if cfg['lane_max'] > 0.0:
+            # (11/19 사용자·차선 팀원) 차선 몫 한계. 예전엔 0.3 x confidence(0.5) x 조향 한계라 ±0.05 에서 막혀 거의 못 고침
+            lane_part = clamp(lane_part, -cfg['lane_max'], cfg['lane_max'])
     steer = clamp(steer + lane_part, -node.max_steer, node.max_steer)
     return steer, yaw_err, lane_part
 
@@ -145,8 +148,7 @@ class SlowZone(SafeState):
 
             yaw = node.odom_yaw()
             if self.target_yaw is None and yaw is not None and self._ready_to_lock(elapsed):
-                self.target_yaw = yaw
-                node.get_logger().info('[SLOW_ZONE] 헤딩 고정 %.1f도' % math.degrees(yaw))
+                self._lock(yaw, cfg)
 
             if self.target_yaw is None or yaw is None:
                 # 고정 전이거나 odom 이 끊김 -> 일반 차선 추종으로 서행
@@ -157,6 +159,20 @@ class SlowZone(SafeState):
 
             self.sleep()
         return 'aborted'
+
+    def _lock(self, yaw, cfg):
+        """(11/19 사용자) 헤딩 고정. 차 방향이 트랙 축에서 axis_snap_deg 안이면 축으로 (흔들리던 중에 잠그면 그 방향 그대로
+        가서 1118 comp_lap18 은 축보다 12도 왼쪽으로 고정 -> 충돌). 더 벗어나 있으면 예전처럼 차 방향."""
+        node = self.node
+        axis, err = node.track_axis(yaw)
+        if cfg['axis_snap_deg'] > 0.0 and abs(err) <= math.radians(cfg['axis_snap_deg']):
+            self.target_yaw = axis
+            node.get_logger().info('[SLOW_ZONE] 헤딩 고정 - 트랙 축 %.1f도 (차 방향 %.1f도, %+.0f도 차이)'
+                                   % (math.degrees(axis), math.degrees(yaw), math.degrees(err)))
+        else:
+            self.target_yaw = yaw
+            node.get_logger().info('[SLOW_ZONE] 헤딩 고정 %.1f도 (트랙 축에서 %.0f도 벗어나 차 방향 그대로)'
+                                   % (math.degrees(yaw), math.degrees(abs(err))))
 
     def _ready_to_lock(self, elapsed):
         node = self.node

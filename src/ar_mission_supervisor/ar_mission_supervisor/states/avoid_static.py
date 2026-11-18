@@ -38,6 +38,7 @@ class AvoidStatic(SafeState):
 
     def on_enter(self):
         node = self.node
+        self.ab_wait_logged = False
         self.entered_at = node.clock_sec()
         cfg = node.avoid_static
         # (11/16 static_1116_2) 3차선에서 끝난 지 얼마 안 됐으면 기준 좌표를 새로 잡지 않고 이어 씀.
@@ -79,11 +80,24 @@ class AvoidStatic(SafeState):
                 return 'done'
 
             handoff = node.detect_mission(allowed=self.HANDOFF)
+            ab = node.ab_vote
+            if handoff is not None and ab['use'] and node.ab_decision(now) is None:
+                # (11/19 사용자·YOLO 팀원) 도는 중이거나 표가 모자라·갈리면 아직 안 넘어감 (천천히 더 봄)
+                if not self.ab_wait_logged:
+                    self.ab_wait_logged = True
+                    na, nb = node.ab_counts(now)
+                    node.get_logger().info('[AVOID_STATIC] A/B 표지판 보이지만 아직 못 정함 (최근 %.1f초 A %d / B %d%s) - %.2f m/s 로 더 봄'
+                                           % (ab['window'], na, nb, ', 도는 중' if node._ab_turning(now) else '',
+                                              ab['undecided_speed']))
+                handoff = None
             if handoff is not None:
+                na, nb = node.ab_counts(now)
                 node.get_logger().info('[AVOID_STATIC] A/B 표지판 인식 - LEFT_A_RIGHT_B 로 바로 전환 '
-                                       '(지금 %s 차선)' % plan.name(plan.lane))
+                                       '(지금 %s 차선, 최근 A %d / B %d)' % (plan.name(plan.lane), na, nb))
                 plan.release(now)
                 return handoff
+            plan.speed_cap = (ab['undecided_speed'] if ab['use'] and plan.ab_goal is None and node.ab_seen(now)
+                              and node.ab_decision(now) is None else None)
 
             if self.gap_mode:
                 plan.gap_step()

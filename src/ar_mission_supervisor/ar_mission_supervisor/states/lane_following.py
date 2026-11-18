@@ -130,8 +130,10 @@ class LaneFollowing(SafeState):
                 return False
             node.entry_armed = False
             self.hold = (pose[0], pose[1], axis)
-            log.info('[LANE] 3차선 입구 직진 시작: 방향 %.0f도로 %.1fm (지금 %.0f도, 차선은 안 따라감)'
-                     % (math.degrees(axis), cfg['distance'], math.degrees(pose[2])))
+            log.info('[LANE] 3차선 입구 직진 시작: 방향 %.0f도로 %.1fm (지금 %.0f도, %s)'
+                     % (math.degrees(axis), cfg['distance'], math.degrees(pose[2]),
+                        '차선은 안 따라감' if cfg['lane_blend'] <= 0.0
+                        else '차선 옆 위치는 조향 %.2f rad 까지만' % cfg['lane_max']))
         dist = math.hypot(pose[0] - self.hold[0], pose[1] - self.hold[1])
         if dist >= cfg['distance'] or abs(err) > math.radians(cfg['abort_deg']):
             log.info('[LANE] 3차선 입구 직진 끝 (%.2fm, 방향 오차 %+.0f도) - 차선 따라가기로'
@@ -142,7 +144,12 @@ class LaneFollowing(SafeState):
         steer = cfg['k_yaw'] * err
         lane = node.lane_error(now)
         if lane is not None and cfg['lane_blend'] > 0.0:
-            steer += cfg['lane_blend'] * clamp(lane[2], 0.0, 1.0) * self.driver.lane_steer(lane, now)
+            part = cfg['lane_blend'] * clamp(lane[2], 0.0, 1.0) * self.driver.lane_steer(lane, now)
+            if cfg['lane_max'] > 0.0:
+                # (11/19 사용자) 차선 몫 한계: 입구에서 차선 노드가 바깥 선을 따라가도 크게 안 끌려가게
+                part = clamp(part, -cfg['lane_max'], cfg['lane_max'])
+            steer += part
+            node.dbg('lane/entry_hold_lane', part)
         steer = clamp(steer, -node.max_steer, node.max_steer)
         v = min(v, cfg['max_speed'])
         node.publish_cmd(v, steering_to_omega(v, steer, node.wheel_base))

@@ -31,6 +31,7 @@ class LaneDriver(object):
         self.lost_since = None
         self.last_cmd = (0.0, 0.0)
         self.last_steer = 0.0
+        self.lost_kappa = None     # (11/19) 차선을 놓친 순간 IMU(odom 방향)로 잰 곡률 [1/m] (False = 못 잼)
         self.pd_prev = None        # omega_pd: 직전 차선 값 (평활한 lateral, 찍은 시각, 원래 lateral)
         self.pd_rate = 0.0         # omega_pd: 평활한 lateral 변화율 [m/s]
 
@@ -51,7 +52,21 @@ class LaneDriver(object):
         else:
             if self.lost_since is None:
                 self.lost_since = now
+                self.lost_kappa = self._measure_kappa(now)
             self._failsafe(now - self.lost_since)
+
+    def _measure_kappa(self, now):
+        """(11/19 사용자·차선 팀원) 차선을 놓친 순간 직전 imu_rate_window 초 동안 실제로 돈 곡률 = 회전 속도 / 속도.
+        조향 명령(last_steer)은 흔들리는 중이면 한쪽 끝일 수 있어서, 실제 돈 양을 씀. 못 재면 False."""
+        node = self.node
+        cfg = node.failsafe
+        if not cfg['imu_keep']:
+            return False
+        rate = node.turn_rate(now, window=cfg['imu_rate_window'])
+        v = abs(getattr(node, 'last_v', 0.0))
+        if rate is None or v < 0.05:
+            return False
+        return rate / v
 
     # ------------------------------------------------------------------
     def lane_omega(self, lane, offset=0.0):
@@ -100,6 +115,11 @@ class LaneDriver(object):
             ref = float(node.lane_gains.get('pd_speed_ref', 0.0))
             if self.speed_ref and ref > 0.0 and v < ref:
                 omega *= v / ref            # (11/15) 느릴 때 조향 세기를 pd_speed_ref 때로 묶음
+            fast = float(node.lane_gains.get('pd_fast_ref', 0.0))
+            if fast > 0.0 and v > fast:
+                # (11/19) 빠를수록 세기를 (fast/v)^pd_fast_exp 로 줄임. 실차 지연(카메라 ~0.2 s + 명령->회전 0.25 s)으로
+                #   0.4 m/s 에서 맞춘 세기가 1.0 m/s 에선 좌우로 커지며 차선 밖으로 나감 (r1118/pdsim 시뮬)
+                omega *= (fast / v) ** float(node.lane_gains.get('pd_fast_exp', 0.0))
             return clamp(math.atan(node.wheel_base * omega / v), -node.max_steer, node.max_steer)
         # lateral = 로봇 기준 차선 중앙의 위치 (왼쪽 +).
         # 목표 지점은 차선 중앙에서 offset 만큼 옆이므로 로봇 기준 위치는 lateral + offset.
@@ -164,18 +184,34 @@ class LaneDriver(object):
         cfg = node.failsafe
         node.dbg('lane/lost_sec', lost_sec)
 
-        # (1) 단기 유실 - 직전 명령 유지
-        if lost_sec < cfg['hold_sec']:
+        # (0) (11/19 사용자·차선 팀원) 놓친 순간 실제로 돌던 곡률(IMU) 그대로, imu_speed 로 줄여 imu_keep_sec 동안
+        #   1118 comp_lap14: 코너 앞에서 선을 놓치고 hold -> creep -> stop 으로 11초 섬
+        kappa = self.lost_kappa
+        if kappa not in (None, False) and lost_sec < cfg['imu_keep_sec']:
+            node.dbg('lane/mode', 'imu')
+            v = min(max(abs(self.last_cmd[0]), cfg['creep_speed']), cfg['imu_speed'])
+            steer = clamp(math.atan(node.wheel_base * kappa), -node.max_steer, node.max_steer)
+            node.dbg('lane/lost_kappa', kappa)
+            node.publish_cmd(v, steering_to_omega(v, steer, node.wheel_base))
+            return
+
+        # (1) 단기 유실 - 직전 명령 유지 (imu_keep 을 못 쓸 때만)
+        if kappa in (None, False) and lost_sec < cfg['hold_sec']:
             node.dbg('lane/mode', 'hold')
             v, omega = self.last_cmd
             node.publish_cmd(v, omega)
             return
 
-        # (2) 저속 - 직전 조향각 유지 (같은 곡률). creep_keep_steer false 면 직진
+        # (2) 저속 - 직전 조향각 유지 (같은 곡률). creep_keep_steer false 면 직진. (11/19) IMU 곡률을 쟀으면 그 곡률
         if lost_sec < cfg['stop_after_sec']:
             node.dbg('lane/mode', 'creep')
             v = cfg['creep_speed']
-            steer = self.last_steer if cfg['creep_keep_steer'] else 0.0
+            if not cfg['creep_keep_steer']:
+                steer = 0.0
+            elif kappa not in (None, False):
+                steer = clamp(math.atan(node.wheel_base * kappa), -node.max_steer, node.max_steer)
+            else:
+                steer = self.last_steer
             node.publish_cmd(v, steering_to_omega(v, steer, node.wheel_base))
             return
 

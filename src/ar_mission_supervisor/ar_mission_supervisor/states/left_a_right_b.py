@@ -52,6 +52,7 @@ class LeftARightB(SafeState):
         self.lane_shift = 0         # (11/13) 차선 노드 기준 차선이 옆으로 바뀐 수 (+1 = 왼쪽 차선 기준)
         self._cam_prev = None       # 직전 차선 값 (lateral, stamp)
         self.waiting_jump = False   # (11/14) settle 뒤 차선 노드 기준 바뀌기 기다리는 중
+        self._ab_why = ''
 
     def on_enter(self):
         node = self.node
@@ -67,6 +68,7 @@ class LeftARightB(SafeState):
         self._cam_prev = None
         self.waiting_jump = False
         self.odom_mode = False
+        self._ab_why = ''
         if node.left_a_right_b['use_lane_context'] and self.plan.fresh(self.entered_at):
             car = self.plan.update(self.entered_at)
             if car is not None:
@@ -100,6 +102,10 @@ class LeftARightB(SafeState):
             if self.odom_mode:
                 if self._odom_step(now, cfg):
                     self.plan.finish()
+                    if cfg['odom_end_clear'] > 0.0 and node.lockout.pop('AVOID_STATIC', None) is not None:
+                        # (11/19) 목표 차선 1 m 앞만 비면 끝내니, 그 너머 LIMO 를 AVOID_STATIC 이 바로 다시 잡을 수 있게
+                        #   (AVOID_STATIC -> 여기로 넘어온 뒤 8초(lockout_sec) 안이면 다시 못 들어가 차선 주행으로 박을 수 있음)
+                        node.get_logger().info('[LEFT_A_RIGHT_B] AVOID_STATIC 재진입 막음 풀음 (앞에 LIMO 있으면 바로 다시 피함)')
                     return 'done'
                 self.sleep()
                 continue
@@ -122,11 +128,14 @@ class LeftARightB(SafeState):
         """표지판까지 접근. 트리거 거리에 도달하면 SHIFT 로 전환.
         True 를 반환하면 미션을 포기하고 복귀한다."""
         node = self.node
-        marker = node.marker_type()
+        marker = self._ab_marker(now, fallback=self.direction == 0.0)
         dist = node.marker_distance()
 
         if marker is not None:
-            self.direction = 1.0 if marker == 'A' else -1.0     # A = 좌(+), B = 우(-)
+            new_dir = 1.0 if marker == 'A' else -1.0     # A = 좌(+), B = 우(-)
+            if new_dir != self.direction:
+                node.get_logger().info('[LEFT_A_RIGHT_B] %s 표지판%s' % ('A(좌)' if marker == 'A' else 'B(우)', self._ab_why))
+            self.direction = new_dir
 
         if dist is not None and dist <= cfg['trigger_distance']:
             if self.direction == 0.0:
@@ -143,8 +152,39 @@ class LeftARightB(SafeState):
             node.get_logger().warn('[LEFT_A_RIGHT_B] 표지판 거리 미확보 - 복귀')
             return True
 
-        self.driver.step(cfg['approach_speed'])
+        v = cfg['approach_speed']
+        if node.ab_vote['use'] and self.direction == 0.0:
+            v = min(v, node.ab_vote['undecided_speed'])      # (11/19) 아직 못 정함 - 천천히 더 봄
+        self.driver.step(v)
         return False
+
+    def _ab_marker(self, now, fallback=True):
+        """(11/19 사용자·YOLO 팀원) 'A' / 'B' / None. 다수결로 정해지면 그쪽, 못 정한 채 표지판이 fallback_distance 안이거나
+        들어온 지 fallback_sec 지나면 여기 들어온 뒤(조금 전부터) 받은 표 전부의 다수. ab_vote.use false 면 예전(마지막 표지판)."""
+        node = self.node
+        ab = node.ab_vote
+        self._ab_why = ''
+        if not ab['use']:
+            return node.marker_type()
+        d = node.ab_decision(now)
+        na, nb = node.ab_counts(now)
+        if d is not None:
+            self._ab_why = ', 최근 %.1f초 A %d / B %d' % (ab['window'], na, nb)
+            return d
+        dist = node.marker_distance()
+        late = now - self.entered_at > ab['fallback_sec']
+        near = dist is not None and dist <= ab['fallback_distance']
+        if fallback and (late or near):
+            since = self.entered_at - ab['window']
+            f = node.ab_fallback(since, now)
+            if f is not None:
+                fa, fb = node.ab_counts(now, since=since)
+                self._ab_why = ', 다수결 못 함 - %s 받은 표 A %d / B %d 로 정함' % (
+                    '표지판 %.2fm' % dist if near else '%.0f초 지나' % ab['fallback_sec'], fa, fb)
+                node.get_logger().warn('[LEFT_A_RIGHT_B] A/B 다수결 못 함 (최근 A %d / B %d) - 받은 표 전부 A %d / B %d 로 %s'
+                                       % (na, nb, fa, fb, f))
+            return f
+        return None
 
     def _track_lane_jump(self, cfg):
         """(11/13) 연속 차선 값의 lateral 이 차선 폭의 반 넘게 튀면 차선 노드 기준 차선이 바뀐 것으로 센다."""
@@ -225,13 +265,15 @@ class LeftARightB(SafeState):
         node = self.node
         plan = self.plan
 
-        marker = node.marker_type()
+        marker = self._ab_marker(now) if self.goal_lane is None else None
         if self.goal_lane is None and marker is not None:
             self.goal_lane = cfg['a_lane'] if marker == 'A' else cfg['b_lane']
             plan.ab_goal = self.goal_lane       # (11/16) 시간 초과 뒤 AVOID_STATIC 에 다시 들어가도 이 차선으로
-            node.get_logger().info('[LEFT_A_RIGHT_B] %s 표지판 - 목표 %s 차선 (지금 %s)'
+            node.get_logger().info('[LEFT_A_RIGHT_B] %s 표지판 - 목표 %s 차선 (지금 %s%s)'
                                    % ('A(좌)' if marker == 'A' else 'B(우)',
-                                      plan.name(self.goal_lane), plan.name(plan.lane)))
+                                      plan.name(self.goal_lane), plan.name(plan.lane), self._ab_why))
+        ab = node.ab_vote
+        plan.speed_cap = ab['undecided_speed'] if ab['use'] and self.goal_lane is None else None
         if self.goal_lane is None and now - self.entered_at > cfg['approach_timeout']:
             node.get_logger().warn('[LEFT_A_RIGHT_B] 표지판 종류 불명 - 복귀')
             return True
@@ -252,10 +294,29 @@ class LeftARightB(SafeState):
                 self.reached_s = res.s
                 node.get_logger().info('[LEFT_A_RIGHT_B] %s 차선 도착 (d=%.2fm)'
                                        % (plan.name(plan.lane), res.d))
-            if res.s - self.reached_s >= cfg['odom_hold_distance'] and not plan.obstacles_ahead(res.s):
+            if res.s - self.reached_s >= cfg['odom_hold_distance'] and self._end_clear(plan, res.s, cfg):
                 node.get_logger().info('[LEFT_A_RIGHT_B] %s 경로 진입 완료 - 복귀'
                                        % ('A(좌)' if self.goal_lane == cfg['a_lane'] else 'B(우)'))
                 return True
         else:
             self.reached_s = None
         return False
+
+    def _end_clear(self, plan, s_car, cfg):
+        """(11/19 사용자) 끝내도 되는지. odom_end_clear > 0: 목표 차선(가운데 +-(차선 반폭 + 차 반폭)) 안, 차 앞 odom_end_clear m 안에
+        장애물이 없으면 됨. 0 = 예전: 3차선 지도에 차보다 앞인 장애물이 하나라도 있으면 (차선·거리 상관없이) 안 끝냄
+        -> 1118 comp_lap18: 도착하고 코너 벽 등이 계속 '앞'에 잡혀 20초 제한까지 카메라 안 보고 직진."""
+        ahead = cfg['odom_end_clear']
+        if ahead <= 0.0:
+            return not plan.obstacles_ahead(s_car)
+        c = plan.center(plan.lane)
+        side = 0.5 * plan.width() + 0.5 * plan.cfg['car_width']
+        front = s_car + 0.5 * plan.cfg['car_length']
+        for it in plan.map.confirmed(plan.cfg['confirm_hits']):
+            if abs(it['d'] - c) > side + it['r']:
+                continue
+            if it['s'] + it['r'] < front - 0.05 or it['s'] - it['r'] > front + ahead:
+                continue
+            self.node.dbg('ab/end_blocked', it['s'] - s_car)
+            return False
+        return True

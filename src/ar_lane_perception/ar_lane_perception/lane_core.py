@@ -45,6 +45,31 @@ DEFAULTS = {
     # 연속 추적 기준점 보정. true 면 이번 프레임 선을 직전 왼쪽/오른쪽 선에 이어 붙일 때 기준이 되는 직전 선 위치를
     # 차가 움직인 만큼(LaneCore.pose_at: odom 거리 + imu 방향) 옮긴 뒤 가장 가까운 선을 고른다. 한 선/두 선 모두.
     'track_motion_comp': False,
+    # 앞을 가로지르는 경계선 (각진 코너 입구, report_c3fix). corner_line_enable: 노란 마스크에서 가로로 길고(지면 길이
+    # corner_line_min_len_m 이상) 얇은(평균 두께 = 면적/길이 corner_line_max_thick_m 이하) 구간 묶음을 찾아 '경계선'으로 분류하고,
+    # 그 화소를 선 후보에서 뺀다 (방지턱 줄무늬처럼 두꺼운 것은 지금처럼 max_seg_w_m 로 버림). 경계선 끝에 옆선이 붙은 쪽의
+    # 반대편(= 열린 쪽)으로 코너 경로(경계선을 반폭만큼 차 쪽으로 옮긴 선)를 만들어, 그 경로의 reference_distance_m 앞 점으로
+    # lateral 을, 경계선 방향 쪽으로 heading 을 낸다. 판단 조향(omega_pd)은 lateral 만 쓰고, heading 은 감속 조건에만 쓴다.
+    'corner_line_enable': False,
+    'corner_line_seg_w_m': 0.06,      # 한 화소 줄에서 이보다 넓은 노란 구간만 경계선 후보 조각으로 봄
+    'corner_line_min_len_m': 0.25,
+    'corner_line_max_thick_m': 0.06,
+    'corner_line_max_angle_deg': 40.0,  # 경계선 방향이 차의 좌우 축과 이 각도 안 (앞을 가로지름)
+    'corner_line_max_dev_m': 0.03,    # 조각 중심이 맞춘 직선에서 이보다 멀면 곡선(둥근 코너 바깥 선)으로 보고 뺌
+    'corner_line_on_line_m': 0.05,    # 추적 L/R 점이 경계선 가운데 부분(끝 0.1 m 뺌)에서 이 안이면: 2개 이상이면 옆선으로 보고 뺌
+    'corner_line_collinear_m': 0.08,  # 같은 옆선 점 2개 이상이 경계선 연장선에서 이 안에 나란히 있으면 비스듬히 본 옆선으로 보고 뺌
+    'corner_line_max_dist_m': 1.0,    # 이 거리 안(영상 줄)에서만 찾음. heading 섞는 비율도 이 거리에서 0
+    'corner_line_near_m': 0.4,        # 이 거리 이하면 heading 을 경계선 방향으로 다 바꿈
+    'corner_line_attach_m': 0.15,     # 옆선 연장선이 경계선 끝에서 이 안이면 '붙음'
+    'corner_line_end_early_m': 0.15,  # (보조) 두 옆선 꼭대기 거리 차가 이보다 크면 먼저 끝난 쪽이 열린 쪽
+    'corner_line_mem_sec': 1.0,       # 열린 쪽 기억 시간 (방향을 못 정한 프레임, opposite_guard 용)
+    'corner_line_confidence': 0.25,   # 차선은 invalid 인데 경계선으로 낸 프레임의 confidence
+    # 반대쪽 lat 막기. 한 선 또는 경계선 프레임에서, 가까운 점 없이(가장 가까운 점 > opposite_far_m) 만든 lat 이 열린 쪽과
+    # 반대 부호(|lat| > opposite_min_lat_m)면 그 값을 내지 않고 예측값(마지막 출력을 odom 으로 옮긴 값, 없으면 0)을 낸다.
+    # 열린 쪽은 경계선 검출로만 정한다 (이 파라미터만 켜도 검출은 돌지만 마스크·출력은 바꾸지 않음).
+    'opposite_guard_enable': False,
+    'opposite_far_m': 0.55,
+    'opposite_min_lat_m': 0.08,
     # 선 추적 (영상 px)
     'center_x': 320,          # 처음 시작할 때만 좌/우 선을 가르는 기준
     'y_top': 320,
@@ -150,8 +175,10 @@ class LaneCore:
         self.out_lat = self.out_head = self.out_t = None
         self.slew_on = False
         self.counts = dict(frames=0, pair=0, single=0, fixed_a=0, fixed_b=0, width_reject=0, slew=0,
-                           side_flip=0, side_hold=0, side_accept=0)
+                           side_flip=0, side_hold=0, side_accept=0, corner=0, corner_line=0, opp_block=0)
         self.side_hold_t = None             # side_guard_m (a)/(b) 가 이어지기 시작한 시각
+        self.corner = None                  # 이번 프레임 경계선 (track 에서 찾음)
+        self.corner_dir_mem = (None, None)  # (열린 쪽 +1 왼쪽 / -1 오른쪽, 시각)
 
     def width_fresh(self, t):
         return (self.w_mem is not None and self.w_t is not None
@@ -399,6 +426,9 @@ class LaneCore:
         y1 = min(int(max(g('y_top'), g('y_bot'))) + 3, h)
         mask = self.lane_mask(img)
         self._ymask_raw = mask
+        self.corner = None
+        if g('corner_line_enable') or g('opposite_guard_enable'):
+            self.corner = self._find_corner_line(mask, w, h)   # 검증·점 빼기는 process 에서 (추적된 L/R 점이 필요)
         self._dropped_rows = set()
         self._wrow_new = {}      # 이번 프레임 줄별 픽셀 폭 후보 (process가 폭 검사 통과 때만 wrow에 반영)
         wmask = self.white_mask(img) if g('white_enable') else None
@@ -704,6 +734,143 @@ class LaneCore:
                 ws.append(abs(a[1] - b[1]) * c)
         return float(np.median(ws)) if ws else None
 
+    def _find_corner_line(self, mask, w, h):
+        """앞을 가로지르는 얇은 노란 경계선. 화소 줄마다 지면 폭 > corner_line_seg_w_m 인 구간을 모아 위아래로 이어진 묶음을 만들고,
+        묶음 화소의 지면 좌표로 방향(주축)·길이·두께(면적/길이)를 잰다. 조건을 넘는 가장 긴 묶음 하나. 없으면 None."""
+        g = self.p.get
+        X, Y, A = self.ground_maps(w, h)
+        cx = w // 2
+        col = X[:, cx]
+        ok = np.isfinite(col) & (col <= g('corner_line_max_dist_m'))
+        if not ok.any():
+            return None
+        v0 = int(np.argmax(ok))
+        v1 = h - 3                                         # 가까워져도 놓치지 않게 화면 아래까지
+        segw = g('corner_line_seg_w_m')
+        groups = []          # 각 묶음: 구간 목록 [(v, c0, c1)], 마지막 줄의 구간
+        open_ = []
+        for v in range(v0, v1 + 1):
+            cols = np.nonzero(mask[v])[0]
+            runs = []
+            if len(cols):
+                for gp in np.split(cols, np.where(np.diff(cols) > 3)[0] + 1):
+                    if np.isfinite(Y[v, gp[0]]) and abs(Y[v, gp[0]] - Y[v, gp[-1]]) > segw:
+                        runs.append((v, int(gp[0]), int(gp[-1])))
+            nxt = []
+            for r in runs:
+                hit = None
+                for gi in open_:
+                    pv, pc0, pc1 = groups[gi][-1]
+                    if pv == v - 1 and r[1] <= pc1 + 2 and r[2] >= pc0 - 2:
+                        hit = gi
+                        break
+                if hit is None:
+                    groups.append([r])
+                    hit = len(groups) - 1
+                else:
+                    groups[hit].append(r)
+                if hit not in nxt:
+                    nxt.append(hit)
+            open_ = nxt
+        best = None
+        amax = np.radians(g('corner_line_max_angle_deg'))
+        for runs in groups:
+            if len(runs) < 2:
+                continue
+            px = np.concatenate([np.arange(c0, c1 + 1) for _, c0, c1 in runs])
+            pv = np.concatenate([np.full(c1 - c0 + 1, v) for v, c0, c1 in runs])
+            gx, gy, ga = X[pv, px], Y[pv, px], A[pv, px]
+            m = np.isfinite(gx)
+            if m.sum() < 10:
+                continue
+            gx, gy, ga = gx[m], gy[m], ga[m]
+            c = np.array([gx.mean(), gy.mean()])
+            ev, evec = np.linalg.eigh(np.cov(np.vstack([gx - c[0], gy - c[1]])))
+            d = evec[:, 1]
+            proj = (gx - c[0]) * d[0] + (gy - c[1]) * d[1]
+            length = float(proj.max() - proj.min())
+            thick = float(ga.sum() / max(length, 1e-3))
+            phi = abs(np.arctan2(d[0], d[1]))          # 좌우 축(Y)과 이루는 각
+            phi = min(phi, np.pi - phi)
+            if length < g('corner_line_min_len_m') or thick > g('corner_line_max_thick_m') or phi > amax:
+                continue
+            rc = np.array([[X[v, (c0 + c1) // 2], Y[v, (c0 + c1) // 2]] for v, c0, c1 in runs])
+            rc = rc[np.isfinite(rc[:, 0])]
+            if len(rc) and np.max(np.abs((rc[:, 0] - c[0]) * -d[1] + (rc[:, 1] - c[1]) * d[0])) > g('corner_line_max_dev_m'):
+                continue
+            if best is None or length > best['length']:
+                if d[1] < 0:
+                    d = -d                                 # d 는 왼쪽(+Y) 쪽을 향하게
+                e_l = c + d * proj.max()
+                e_r = c + d * proj.min()
+                # 차 앞 축(Y=0)과 만나는 거리 (경계선이 차 좌우 범위 밖으로 끝나도 직선 연장)
+                dist = float(c[0] - d[0] * c[1] / d[1]) if abs(d[1]) > 1e-6 else float(c[0])
+                # ang: 좌우 축(+Y)에서 앞(+X) 쪽으로 기운 각 [도]
+                best = dict(runs=runs, c=c, d=d, length=length, thick=thick, ang=float(np.degrees(np.arctan2(d[0], d[1]))),
+                            end_l=e_l, end_r=e_r, dist=dist)
+        return best
+
+    def _corner_dir(self, cor, newL, newR, w, h):
+        """열린 쪽 (+1 왼쪽 / -1 오른쪽, 근거). 옆선(직선 맞춤 연장)이 경계선 한쪽 끝에 붙으면 반대쪽이 열림.
+        못 정하면 (보조) 두 옆선이 다 보일 때 먼저 끝난 쪽. 그래도 못 정하면 (0, '')."""
+        g = self.p.get
+        P = {}
+        for side, pts in (('L', newL), ('R', newR)):
+            q = [self.pix_to_base(u, y, w, h) for y, u in pts.items()]
+            q = np.array([x for x in q if x is not None])
+            if len(q) >= 2 and np.ptp(q[:, 0]) > 0.05:
+                P[side] = q
+        att = {}
+        for side, q in P.items():
+            # 옆선 점 중 경계선 끝에 가장 가까운 점까지 거리 (옆선이 그 끝까지 와서 붙음)
+            dl = float(np.min(np.hypot(q[:, 0] - cor['end_l'][0], q[:, 1] - cor['end_l'][1])))
+            dr = float(np.min(np.hypot(q[:, 0] - cor['end_r'][0], q[:, 1] - cor['end_r'][1])))
+            if min(dl, dr) <= g('corner_line_attach_m') and abs(dl - dr) > 0.1:
+                att[side] = 'l' if dl < dr else 'r'
+        ends = set(att.values())
+        if len(ends) == 1:
+            e = ends.pop()
+            return (-1 if e == 'l' else 1), 'attach_' + ''.join(sorted(att))
+        if 'L' in P and 'R' in P:
+            tl, tr = P['L'][:, 0].max(), P['R'][:, 0].max()
+            if abs(tl - tr) > g('corner_line_end_early_m'):
+                return (-1 if tr < tl else 1), 'end_early'
+        return 0, ''
+
+    def _corner_check(self, cor, newL, newR, w, h):
+        """추적된 L/R 점으로 경계선 검증. 점이 경계선 가운데 부분 위에 2개 이상이면 옆선(비스듬히 본 차선)이므로 None.
+        아니면 (경계선, 경계선 위 점을 뺀 newL, newR)."""
+        g = self.p.get
+        n = np.array([-cor['d'][1], cor['d'][0]])
+        half = cor['length'] / 2.0
+
+        def on(u, y):
+            q = self.pix_to_base(u, y, w, h)
+            if q is None:
+                return False, False
+            r = q - cor['c']
+            near = abs(r @ n) <= g('corner_line_on_line_m') and abs(r @ cor['d']) <= half + 0.02
+            mid = near and abs(r @ cor['d']) <= half - 0.10
+            return near, mid
+        nmid = 0
+        keepL, keepR = {}, {}
+        for pts, keep in ((newL, keepL), (newR, keepR)):
+            along = []
+            for y, u in pts.items():
+                near, mid = on(u, y)
+                nmid += mid
+                q = self.pix_to_base(u, y, w, h)
+                if q is not None and abs((q - cor['c']) @ n) <= g('corner_line_collinear_m'):
+                    along.append(float((q - cor['c']) @ cor['d']))
+                if not near:
+                    keep[y] = u
+            # 같은 옆선 점 2개 이상이 경계선 (연장선) 위에 나란히 놓이면 = 비스듬히 본 옆선
+            if len(along) >= 2 and np.ptp(along) >= 0.05:
+                return None
+        if nmid >= 2:
+            return None
+        return cor, keepL, keepR
+
     def _comp_rows(self, rows, a, b, w, h):
         """track_motion_comp: 직전 선 점 {줄: u}(자세 a 에서 잰 것)를 지면으로 바꿔 자세 b 기준으로 옮긴 뒤 영상으로 되돌려
         같은 줄들의 u 를 다시 읽는다 (옮긴 점 사이 보간, 범위 밖은 끝 두 점 직선 연장). 점이 2개 미만이면 그대로."""
@@ -836,6 +1003,12 @@ class LaneCore:
                 self._refR = self._comp_rows(self.prevR, a, b, w, h)
         oldL, oldR = dict(self._refL), dict(self._refR)
         newL, newR, pairs, dbg = self.track(img, want_debug)
+        if self.corner is not None:
+            chk = self._corner_check(self.corner, newL, newR, w, h)
+            if chk is None:
+                self.corner = None
+            elif g('corner_line_enable'):
+                _, newL, newR = chk                          # 경계선 위 점은 L/R 로 쓰지 않음
         tracked = bool(newL or newR)
         if tracked:
             self._lr_t = t
@@ -947,14 +1120,66 @@ class LaneCore:
             prev = self._moved(prev[0], prev[1], self.prev_raw_t, t)
         self.prev_raw = (lat, head) if valid else None
         self.prev_raw_t = t
-        if ok and not self.last_ok and self.p['confirm_head_rad'] > 0:
+        # --- 앞을 가로지르는 경계선 (corner_line) / 반대쪽 lat 막기 (opposite_guard)
+        corner_kind = False
+        corner_set = False                                   # 이번 프레임 lat/heading 을 경계선으로 바꿈 (confirm 건너뜀)
+        cs = dict(corner_line=0, corner_dir=0, corner_why='', corner_dist=None, corner_ang=None, corner_len=None,
+                  corner_head=None, opp_block=0)
+        cor = self.corner
+        if cor is not None:
+            sdir, why_d = self._corner_dir(cor, newL, newR, w, h)
+            if sdir:
+                self.corner_dir_mem = (sdir, t)
+            elif self.corner_dir_mem[0] is not None and 0.0 <= t - self.corner_dir_mem[1] <= g('corner_line_mem_sec'):
+                sdir, why_d = self.corner_dir_mem[0], 'mem'
+            cs.update(corner_line=1, corner_dir=sdir, corner_why=why_d, corner_dist=round(cor['dist'], 3),
+                      corner_ang=round(cor['ang'], 1), corner_len=round(cor['length'], 3))
+            self.counts['corner_line'] += 1
+            if g('corner_line_enable') and sdir:
+                xr = float(g('reference_distance_m'))
+                Dt = cor['dist'] - self.half                 # 코너 경로(경계선을 반폭만큼 차 쪽으로) 까지 거리
+                fresh = self.out_t is not None and 0.0 <= t - self.out_t <= g('guard_memory_sec')
+                base_lat = lat if ok else (self._moved(self.out_lat, self.out_head, self.out_t, t)[0] if fresh else 0.0)
+                base_head = head if ok else 0.0
+                lat_c = base_lat
+                if Dt < xr:
+                    lat_c = sdir * float(np.sqrt(xr * xr - max(Dt, 0.0) ** 2))
+                    lat_c = max(base_lat, lat_c) if sdir > 0 else min(base_lat, lat_c)
+                ang_open = float(np.arctan2(cor['d'][1] * sdir, cor['d'][0] * sdir))   # 열린 쪽을 향한 경계선 방향
+                far, near = g('corner_line_max_dist_m'), g('corner_line_near_m')
+                wgt = float(np.clip((far - cor['dist']) / max(far - near, 1e-6), 0.0, 1.0))
+                head_c = (1.0 - wgt) * base_head + wgt * ang_open
+                if not ok:
+                    corner_kind = True
+                    ok, why = True, ''
+                    conf = float(g('corner_line_confidence'))
+                lat, head = float(lat_c), float(head_c)
+                corner_set = True
+                self.path_pts = None
+                cs['corner_head'] = round(float(np.degrees(head)), 1)
+        if g('opposite_guard_enable') and ok and (single or cs['corner_line']):
+            od = cs['corner_dir'] or (self.corner_dir_mem[0] if self.corner_dir_mem[0] is not None
+                                      and 0.0 <= t - self.corner_dir_mem[1] <= g('corner_line_mem_sec') else 0)
+            pi = self.path_info or {}
+            P = pi.get('P') if pi.get('P') is not None else pi.get('C')
+            far_only = P is not None and len(P) and float(np.min(np.asarray(P)[:, 0])) > g('opposite_far_m')
+            if od and far_only and lat * od < -g('opposite_min_lat_m') and side_act != 'hold':
+                fresh = self.out_t is not None and 0.0 <= t - self.out_t <= g('guard_memory_sec')
+                p_lat = self._moved(self.out_lat, self.out_head, self.out_t, t)[0] if fresh else 0.0
+                lat = float(p_lat) if p_lat * od >= -g('opposite_min_lat_m') else 0.0
+                self.path_pts = None
+                cs['opp_block'] = 1
+                self.counts['opp_block'] += 1
+        if g('corner_line_enable') or g('opposite_guard_enable'):
+            self.stats.update(cs)
+        if ok and not self.last_ok and self.p['confirm_head_rad'] > 0 and not corner_set:
             if (prev is None or abs(head - prev[1]) > self.p['confirm_head_rad']
                     or abs(lat - prev[0]) > self.p['confirm_lat_m']):
                 ok, why = False, 'confirm'
         self.last_ok = ok
         # --- 한 선 -> 두 선 전환 때만 lateral 변화 속도 제한 (따라잡으면 해제)
         lat_raw = lat
-        kind = ('single' if single else 'pair') if ok else ''
+        kind = ('corner' if corner_kind else 'single' if single else 'pair') if ok else ''
         if ok:
             rate = g('pair_return_rate_mps')
             if kind == 'pair' and self.last_kind == 'single':

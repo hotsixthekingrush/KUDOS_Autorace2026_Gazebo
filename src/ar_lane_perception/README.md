@@ -149,6 +149,22 @@ ros2 launch ar_lane_perception camera_perception.launch.py image_topic:=/my/imag
   예측은 노드가 odom 을 받을 때(`predict_enable`)만 차 움직임을 반영한다. lane_status: `side_flip`, `side_hold` (누적), `side_act`.
 - **연속 추적 기준점 보정 (`track_motion_comp`, 기본 false):** 이번 프레임 선을 직전 왼쪽/오른쪽 선에 이어 붙일 때 기준이 되는 직전 선 점을
   지면으로 바꿔 차가 움직인 만큼 옮긴 뒤 영상으로 되돌려 쓴다 (가장 가까운 선 고르기는 그대로). 노드가 odom 을 받을 때만 동작.
+- **앞을 가로지르는 경계선 (`corner_line_enable`, 기본 false):** 각진 코너 입구(대회장 라바콘 전 코너)는 스캔 범위에서 옆선이 곧고,
+  앞을 가로지르는 경계선은 한 줄 위에서 길게 재져 `max_seg_w_m` 에 버려진다. 그래서 코너가 코앞에 올 때까지 신호가 없다.
+  이 기능은 화소 줄마다 지면 폭이 `corner_line_seg_w_m` 넘는 노란 구간을 위아래로 묶어, 주축 길이 ≥ `corner_line_min_len_m`(0.25 m),
+  두께(면적/길이) ≤ `corner_line_max_thick_m`(0.06 m), 좌우 축과 각 ≤ `corner_line_max_angle_deg`(40°), 곧음(조각 중심 편차 ≤ 0.03 m) 이면 경계선으로 본다.
+  거리는 `corner_line_max_dist_m`(1.0 m) 안, 화면 아래 끝까지다. 방지턱 줄무늬처럼 두꺼운 것은 지금처럼 버린다.
+  추적된 L/R 점이 경계선 가운데 위에 2개 이상 있거나 연장선 위에 나란히 있으면, 비스듬히 본 옆선으로 보고 뺀다.
+  열린 쪽: 옆선 점이 경계선 한쪽 끝에 붙으면(`corner_line_attach_m`) 반대쪽이다. (보조) 두 옆선 꼭대기가
+  `corner_line_end_early_m` 넘게 차이 나면 먼저 끝난 쪽이다. 정한 방향은 `corner_line_mem_sec` 동안 기억한다.
+  출력: 경계선 위 점은 L/R 로 쓰지 않는다. 코너 경로(경계선을 반폭만큼 차 쪽으로 옮긴 선)가 `reference_distance_m` 보다 가까우면
+  그 경로의 0.5 m 앞 점으로 lateral 을 낸다(오른쪽 코너면 기존 값과 둘 중 더 오른쪽). heading 은 경계선 거리 1.0 → 0.4 m 동안
+  열린 쪽 경계선 방향으로 섞는다. 판단 decision-1114 조향(omega_pd)은 lateral 만 쓰고, heading 은 감속 조건(|heading| > 15°)에만 쓴다.
+  차선이 invalid 여도 방향이 정해지면 valid(kind=corner, confidence `corner_line_confidence`)로 낸다. 값을 바꾼 프레임은 confirm 을 건너뛴다.
+  lane_status: `corner_line`, `corner_dir`(+1 왼쪽 / -1 오른쪽), `corner_why`, `corner_dist`, `corner_ang`, `corner_len`, `corner_head`.
+- **반대쪽 lat 막기 (`opposite_guard_enable`, 기본 false):** 한 선 또는 경계선 프레임에서 가장 가까운 점이 `opposite_far_m`(0.55 m)보다 멀고,
+  lat 이 열린 쪽(경계선 검출로만 정함)과 반대 부호(> `opposite_min_lat_m`)면 그 값 대신 예측값(없으면 0)을 낸다.
+  side_guard 가 예측값을 낸(hold) 프레임은 건드리지 않는다. 이것만 켜도 검출은 돌지만 마스크와 다른 출력은 바꾸지 않는다. lane_status `opp_block`.
 - **줄을 뺀 뒤의 추적:** 원래 -19°의 직접 원인은 빠진 줄 다음 줄에서 멀리 떨어진 아래 줄 위치로 선을 찾다가 옆 도로 선을 잡은 것이다.
   한 선을 바로 아래 줄에서 못 찾았으면 이번 프레임 점들을 이은 직선으로 연장해(점 1개면 소실점 쪽으로 원근 축소) 찾는다.
   점선 끊김에도 같은 처리가 쓰인다.
@@ -260,6 +276,8 @@ hls / lab 모두 같았다 (색 공간 문제가 아님).
 | `max_seg_w_m` | 0.0 | 노란 구간 가로 폭이 이보다 넓으면 그 구간만 버림 (0 = 끔) |
 | `side_guard_m`, `side_hold_max_sec` | 0.0, 0.5 | 한 선 프레임 좌우 착각 막기 (0 = 끔). 아래 '한 선 좌우 착각 막기' |
 | `track_motion_comp` | false | 연속 추적 기준점(직전 선 위치)을 차가 움직인 만큼 옮겨서 비교 |
+| `corner_line_enable` (+ `corner_line_*`) | false | 앞을 가로지르는 경계선(각진 코너 입구)으로 코너 경로 lateral/heading 을 냄 |
+| `opposite_guard_enable` (+ `opposite_far_m`, `opposite_min_lat_m`) | false | 먼 점만으로 만든 lat 이 코너 열린 쪽과 반대면 예측값을 냄 |
 | `guard_need_pair` | true | 한 선 프레임은 최근 실측 폭이 있을 때만 valid |
 | `min_confidence` | 0.05 | 이보다 낮으면 valid=false. 0이면 끔 |
 | `single_tol_m`, `single_conflict` | 0.05, invalid | 흰 선 프레임의 쌍/한쪽 선 충돌 → valid=false |

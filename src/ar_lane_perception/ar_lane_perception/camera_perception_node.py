@@ -313,6 +313,12 @@ class CameraPerceptionNode(Node):
             # 한 선 좌우 착각 막기 (side_guard_m): 누적 횟수와 이번 프레임 처리 ('' | flip | hold | accept)
             st.update(side_flip=int(r.get('side_flip', 0)), side_hold=int(r.get('side_hold', 0)),
                       side_act=r.get('side_act', ''))
+            if 'corner_line' in r:
+                # 앞을 가로지르는 경계선 (corner_line_enable / opposite_guard_enable 일 때만): 표시, 열린 쪽(+1 왼쪽 -1 오른쪽),
+                # 근거, 거리 m, 방향 도, 길이 m, 낸 heading 도, 반대쪽 lat 막음
+                st.update({k: (None if r.get(k) is None else (r[k] if isinstance(r[k], str) else float(r[k])))
+                           for k in ('corner_line', 'corner_dir', 'corner_why', 'corner_dist', 'corner_ang', 'corner_len',
+                                     'corner_head', 'opp_block')})
             # 차선 폭 실측: 프레임 종류(pair/single), 이번 폭, 기억 폭, 쓴 폭, 고정 폭 경우(a=가, b=나), 속도 제한 여부
             st.update(kind=r['kind'], lat_raw=float(r['lat_raw']), width_meas=r['width_meas'],
                       width_mem=r['width_mem'], width_used=float(r['width_used']), fixed=r['fixed'],

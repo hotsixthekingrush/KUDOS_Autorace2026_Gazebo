@@ -1,0 +1,16 @@
+# 차선 색 프리셋 1: 실내 트랙 (11/11). LAB 로 쓰려면 color_space 만 lab 으로 바꾼다.
+camera_perception_node:
+  ros__parameters:
+    color_space: hls
+    lane_h_l: 12
+    lane_h_h: 30
+    lane_l_l: 90
+    lane_l_h: 210
+    lane_s_l: 50
+    lane_s_h: 255
+    lab_l_min: 100
+    lab_l_max: 215
+    lab_a_min: 118
+    lab_a_max: 142
+    lab_b_min: 143
+    lab_b_max: 255

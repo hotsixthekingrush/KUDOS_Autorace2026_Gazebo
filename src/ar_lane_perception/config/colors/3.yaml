@@ -1,0 +1,18 @@
+# 차선 색 프리셋 3: 대회장 bag comp_lap2 (11/18). LAB 로 쓰려면 color_space 만 lab 으로 바꾼다.
+camera_perception_node:
+  ros__parameters:
+    color_space: hls
+    lane_h_l: 18
+    lane_h_h: 34
+    lane_l_l: 100
+    lane_l_h: 245
+    lane_s_l: 60
+    lane_s_h: 255
+    lab_l_min: 110
+    lab_l_max: 255
+    lab_a_min: 105
+    lab_a_max: 135
+    lab_b_min: 148
+    lab_b_max: 255
+    max_seg_w_m: 0.08
+    side_guard_m: 0.25

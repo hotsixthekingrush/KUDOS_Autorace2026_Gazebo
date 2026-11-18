@@ -1,0 +1,16 @@
+# 차선 색 프리셋 2: 대회장 화면 캡처 (11/17). LAB 로 쓰려면 color_space 만 lab 으로 바꾼다.
+camera_perception_node:
+  ros__parameters:
+    color_space: hls
+    lane_h_l: 18
+    lane_h_h: 45
+    lane_l_l: 190
+    lane_l_h: 255
+    lane_s_l: 70
+    lane_s_h: 255
+    lab_l_min: 190
+    lab_l_max: 255
+    lab_a_min: 110
+    lab_a_max: 140
+    lab_b_min: 130
+    lab_b_max: 255

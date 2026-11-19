@@ -1,0 +1,18 @@
+# 차선 색 프리셋 5: 대회용 (11/19). 4번에서 lane_l_h 252 -> 240 (흰 페인트 빼기), LAB b 하한 140. LAB 로 쓰려면 color_space 만 lab 으로 바꾼다.
+camera_perception_node:
+  ros__parameters:
+    color_space: hls
+    lane_h_l: 17
+    lane_h_h: 35
+    lane_l_l: 50
+    lane_l_h: 240
+    lane_s_l: 35
+    lane_s_h: 255
+    lab_l_min: 110
+    lab_l_max: 255
+    lab_a_min: 105
+    lab_a_max: 135
+    lab_b_min: 140
+    lab_b_max: 255
+    max_seg_w_m: 0.08
+    side_guard_m: 0.25

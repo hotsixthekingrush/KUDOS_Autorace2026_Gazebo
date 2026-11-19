@@ -8,7 +8,9 @@
 | `2.yaml` | 11/17 대회장 화면 캡처 (HLS, LAB 모두 캡처 값) |
 | `3.yaml` | 11/18 대회장 bag comp_lap2 (HLS + 공통 LAB, max_seg_w_m 0.08, side_guard_m 0.25) |
 | `4.yaml` | 11/18 3번에서 L/S 범위를 넓힌 값 (HLS + 공통 LAB, max_seg_w_m 0.08, side_guard_m 0.25) |
-| `6.yaml` | 11/19 대회용 추천: 4번에서 lane_l_h 240 (흰 페인트 빼기), LAB b 하한 140, corner_line 끔, crop_rows·멀티스레드·QoS depth 1 (report_final_lane) |
+| `5.yaml` | 11/19 대회용: 4번에서 lane_l_h 240 (흰 페인트 빼기), LAB b 하한 140, max_seg_w_m 0.08, side_guard_m 0.25 |
+
+**대회는 5번.**
 
 공통 LAB (3, 4번): lab_l 110~255, lab_a 105~135, lab_b 148~255.
 

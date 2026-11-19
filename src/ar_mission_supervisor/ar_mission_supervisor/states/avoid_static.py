@@ -20,6 +20,8 @@
 규정: 접촉 시 1점 감점, 15초 이내 미진입 시 실패, 체크포인트 거리 비례 부분점수.
 """
 
+import math
+
 from ar_mission_supervisor.base_state import SafeState
 
 
@@ -36,7 +38,24 @@ class AvoidStatic(SafeState):
 
     def on_enter(self):
         node = self.node
+        self.ab_wait_logged = False
+        node.static_started = True      # (11/19) 이제부터 A/B 표지판 받음 (ab_vote.after_static)
+        if hasattr(node, 'mark_entry_done'):
+            node.mark_entry_done('AVOID_STATIC')   # (11/20 F1)
         self.entered_at = node.clock_sec()
+        cfg = node.avoid_static
+        # (11/16 static_1116_2) 3차선에서 끝난 지 얼마 안 됐으면 기준 좌표를 새로 잡지 않고 이어 씀.
+        #   실차: LEFT_A_RIGHT_B 시간 초과 뒤 차가 71도 틀어진 채 다시 들어와 '3차선 방향 안 씀' -> 트랙 축 -90 을 길로 잡고 반대로 감
+        if cfg['reenter_keep'] and self.plan.fresh_within(self.entered_at, cfg['reenter_sec']):
+            car = self.plan.reenter(self.entered_at)
+            if car is not None:
+                self.gap_mode = False
+                node.get_logger().warn('[AVOID_STATIC] 다시 진입 - 전 기준 좌표·LIMO 지도 이어 씀 (지금 %s 차선, d=%+.2fm, '
+                                       '차 방향이 3차선 방향과 %+.0f도%s)'
+                                       % (self.plan.name(self.plan.lane), car[2], math.degrees(car[3]),
+                                          '' if self.plan.ab_goal is None
+                                          else ', A/B 목표 %s 차선 이어 감' % self.plan.name(self.plan.ab_goal)))
+                return
         ok = self.plan.begin(node.avoid_static['start_lane'])
         self.gap_mode = not ok
         if ok:
@@ -50,6 +69,8 @@ class AvoidStatic(SafeState):
         cfg = node.avoid_static
         plan = self.plan
 
+        last_s = None
+        self.center_logged = False
         while node.ok():
             if self.reset_requested():
                 plan.finish()
@@ -62,22 +83,47 @@ class AvoidStatic(SafeState):
                 return 'done'
 
             handoff = node.detect_mission(allowed=self.HANDOFF)
+            ab = node.ab_vote
+            if handoff is not None and ab['use'] and node.ab_decision(now) is None:
+                # (11/19 사용자·YOLO 팀원) 도는 중이거나 표가 모자라·갈리면 아직 안 넘어감 (천천히 더 봄)
+                if not self.ab_wait_logged:
+                    self.ab_wait_logged = True
+                    na, nb = node.ab_counts(now)
+                    node.get_logger().info('[AVOID_STATIC] A/B 표지판 보이지만 아직 못 정함 (최근 %.1f초 A %d / B %d%s) - %.2f m/s 로 더 봄'
+                                           % (ab['window'], na, nb, ', 도는 중' if node._ab_turning(now) else '',
+                                              ab['undecided_speed']))
+                handoff = None
             if handoff is not None:
+                na, nb = node.ab_counts(now)
                 node.get_logger().info('[AVOID_STATIC] A/B 표지판 인식 - LEFT_A_RIGHT_B 로 바로 전환 '
-                                       '(지금 %s 차선)' % plan.name(plan.lane))
+                                       '(지금 %s 차선, 최근 A %d / B %d)' % (plan.name(plan.lane), na, nb))
                 plan.release(now)
                 return handoff
+            plan.speed_cap = (ab['undecided_speed'] if ab['use'] and plan.ab_goal is None and node.ab_seen(now)
+                              and node.ab_decision(now) is None else None)
 
             if self.gap_mode:
                 plan.gap_step()
                 self.sleep()
                 continue
 
-            res = plan.step(now, goal=None, who='AVOID_STATIC')
+            # (11/16) A/B 를 이미 봤으면 그 차선으로. (11/17 사용자) 아직 못 봤으면 마지막 LIMO 를 지난 뒤 가운데 차선으로:
+            #   3차선 끝 섬의 A/B 표지판을 정면에서 보게. 가운데로 옮기는 동안은 끝나지 않음 (위 '장애물 구간 통과' 는 차선 변경 중엔 안 함).
+            #   full_1117_1: 표지판을 끝내 못 봐 LEFT_A_RIGHT_B 가 안 켜짐. LIMO 사이에서부터 가운데를 고집하면
+            #   run.py STATIC 몇 개가 나빠져서 (차선을 더 자주 바꿈) 마지막 LIMO 뒤에서만
+            goal = plan.ab_goal
+            if (goal is None and cfg['center_when_no_ab'] and last_s is not None
+                    and plan.max_obstacle_s is not None and not plan.obstacles_ahead(last_s)):
+                goal = 1
+                if not self.center_logged and plan.lane != 1:
+                    self.center_logged = True
+                    node.get_logger().info('[AVOID_STATIC] 마지막 LIMO 지남, A/B 표지판 아직 못 봄 - 가운데 차선으로 (표지판 정면에서 보게)')
+            res = plan.step(now, goal=goal, who='AVOID_STATIC')
             if res is None:
                 node.get_logger().warn('[AVOID_STATIC] odom 끊김 - 빈 공간 따라가기로 전환')
                 self.gap_mode = True
                 continue
+            last_s = res.s
             if res.blocked:
                 self.sleep()                    # 길이 없음 - 정지한 채로 다시 계산
                 continue

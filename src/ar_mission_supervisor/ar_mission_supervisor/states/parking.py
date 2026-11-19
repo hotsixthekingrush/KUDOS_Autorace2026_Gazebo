@@ -6,6 +6,7 @@
 단계
   SEARCH : 카메라 차선 추종으로 천천히 가면서 라이다 장애물을 기준 좌표(odom)에 쌓는다.
            오른쪽에서 칸 하나 건너(간격 2 x bay_pitch) 나란히 선 LIMO 2대를 찾으면
+           (11/14 any_pair: 모든 두 LIMO 쌍에서 찾음. 새 배치 = 윗줄 LIMO-빈칸-LIMO + 아랫줄 3대, 규정 '주차 구역 양옆 최소 2대')
            그 가운데가 목표 칸. 뒷축이 (칸 중심 - turn_radius) 에 오면 TURN.
            (지나쳤으면 그 지점까지 천천히 후진한 뒤 TURN)
            LIMO 는 안 움직이므로 지금까지 본 위치의 평균으로 쌓는다 (11/10).
@@ -21,6 +22,19 @@
   ALIGN  : 칸 깊이 목표까지 전진/후진하며 방향(-90도)을 맞추고 정지.
   PARKED : 정지 유지 (마지막 미션이므로 기본 주행으로 돌아가지 않음).
 실패(빈칸 못 찾음, 시간 초과) 시 정지 후 외부 리셋을 기다린다.
+
+(11/18 사용자) 칸 찾기 grid_use (기본 true): 주최측 안내 - 6칸(2행 x 3열) 중 한 칸만 비우고 나머지는 LIMO, 빈칸 위치는
+  경기 중 바뀔 수 있음. 위 'LIMO 두 대 사이' 방식은 1·3열 빈칸(1행에 옆 LIMO 가 한 대뿐)을 못 찾음.
+  -> 라이다 원본(/scan)을 기준 좌표에 쌓아 '6칸 중 1칸만 빈 격자' 로 빈칸을 고름 (park_grid.GridFinder).
+     확정 뒤에도 회전 시작 전까지 위치를 다듬음. 칸 깊이 목표 = 차선 기준(park_depth) + 1행 LIMO 앞면으로 잰 옆 어긋남.
+  1행 3칸이 다 찬 것으로 나오면(빈칸이 2행 - 차선에서 못 들어감, 주최측 안내상 없어야 하는 경우) 정지 + 경고 (사용자: a).
+  격자를 찾았는데 빈칸을 못 정한 채 칸 끝을 지나면 정지 (차선이 칸 끝 0.46 m 뒤에서 막힘).
+  (11/18 사용자) 칸 끝을 지나거나 search_distance / search_timeout 까지 빈칸을 못 정하면, 바로 서지 않고 멈춘 뒤
+  back_search_distance(3 m) 곧게 후진하며 다시 찾는다 (격자·LIMO 지도는 그대로 계속 쌓음, back_search_max 번).
+  후진하는 동안은 라이다를 격자에 쌓기만 하고 빈칸은 안 정함 (칸 너머에서 보면 LIMO 반대쪽 면이 보여 격자 시작이 10~20 cm 밀림 - 시뮬).
+  격자 시작보다 back_search_clear 앞까지 오거나 back_search_distance 를 다 후진하면 멈추고, 다시 앞으로 다가가며 보통처럼 정해서 주차.
+  또 끝에 닿으면 그때 정지. (1행 만차는 그대로 바로 정지)
+  grid_use false (또는 numpy 없음) 면 예전 방식.
 규정: 차체 네 모서리가 모두 칸 안이면 15점, 1곳 걸치면 7점, 2곳 이상이면 0점.
 """
 
@@ -32,6 +46,11 @@ from ar_mission_supervisor.geometry import normalize_angle
 from ar_mission_supervisor.lane_driver import LaneDriver
 from ar_mission_supervisor.lane_frame import LaneFrame, ObstacleMap
 
+try:
+    from ar_mission_supervisor.park_grid import GridFinder
+except ImportError:          # numpy 없음 -> 예전 방식
+    GridFinder = None
+
 
 class Parking(SafeState):
 
@@ -42,7 +61,7 @@ class Parking(SafeState):
 
     def __init__(self, node):
         SafeState.__init__(self, node, 'PARKING', self.OUTCOMES)
-        self.driver = LaneDriver(node)
+        self.driver = LaneDriver(node, speed_ref=False)   # (11/15) 칸 찾기는 저속 조향 제한(pd_speed_ref) 안 씀 (사용자 결정)
         self.frame = LaneFrame()
         self.map = ObstacleMap()
         self.phase = self.SEARCH
@@ -52,6 +71,12 @@ class Parking(SafeState):
         self.gap_hits = 0
         self.center = None
         self.target_d = None        # ALIGN 깊이 목표 (TURN 시작 때 정함)
+        self.grid = None            # (11/18) 격자 칸 찾기
+        self.last_scan = None
+        self.s0 = 0.0               # 들어올 때 차 s
+        self.back_from = None       # (11/18) 빈칸 못 찾아 후진하며 다시 찾는 중이면 후진 시작한 s
+        self.back_started = 0.0
+        self.back_tries = 0
 
     def on_enter(self):
         node = self.node
@@ -63,6 +88,8 @@ class Parking(SafeState):
         self.gap_hits = 0
         self.center = None
         self.target_d = None
+        self.back_from = None
+        self.back_tries = 0
         now = node.clock_sec()
         pose = node.odom_pose()
         if pose is None:
@@ -72,7 +99,23 @@ class Parking(SafeState):
         lane_ref, why = node.lane_for_frame()
         self.frame.begin(pose, lane_ref)
         node.get_logger().info('[PARKING] 기준 좌표: %s' % (why if lane_ref is not None else '차 방향 그대로 (' + why + ')'))
-        self._set_phase(self.SEARCH, now, '진입 - 오른쪽 빈칸(양옆 LIMO) 찾는 중')
+        self.grid = None
+        self.last_scan = None
+        self.s0 = self.frame.car(pose)[0]
+        if cfg['grid_use'] and GridFinder is None:
+            node.get_logger().error('[PARKING] grid_use 인데 numpy 가 없음 - 예전 방식(LIMO 두 대 사이)으로 찾음')
+        if cfg['grid_use'] and GridFinder is not None:
+            self.grid = GridFinder(self.s0 - 0.5, self.s0 + cfg['search_distance'] + 2.5, cfg=self._grid_cfg(cfg))
+            self._set_phase(self.SEARCH, now, '진입 - 라이다로 6칸 격자에서 빈칸 찾는 중')
+        else:
+            self._set_phase(self.SEARCH, now, '진입 - 오른쪽 빈칸(양옆 LIMO) 찾는 중')
+
+    @staticmethod
+    def _grid_cfg(cfg):
+        return dict(decide_margin=cfg['grid_decide_margin'], target_free=cfg['grid_target_free'],
+                    align_tol=cfg['grid_align_tol'], limo_half_w=0.5 * cfg['grid_limo_width'],
+                    limo_len=cfg['grid_limo_length'], near_range=cfg['grid_near_range'],
+                    max_range=cfg['grid_max_range'], stable=cfg['grid_stable'])
 
     def run(self):
         node = self.node
@@ -105,18 +148,27 @@ class Parking(SafeState):
     def _search(self, now, cfg, pose):
         node = self.node
         s_, d, psi = self.frame.car(pose)
-        if now - self.phase_started > cfg['search_timeout'] or s_ > cfg['search_distance']:
-            node.publish_stop()
-            self._fail('빈칸을 찾지 못함 (%.1fm 주행)' % s_)
+        if self.back_from is None and (now - self.phase_started > cfg['search_timeout'] or s_ > cfg['search_distance']):
+            self._end_of_search(now, cfg, s_, '빈칸을 찾지 못함 (%.1fm 주행)' % s_)
             return
 
-        def accept(so, do):
-            return cfg['bay_d_min'] <= do <= cfg['bay_d_max'] and so > s_ - 1.5
+        if self.grid is not None:
+            r = self._grid_step(now, cfg, s_, d, psi)
+            if r is False:
+                return
+            if r == 'end':
+                b = self.grid.best
+                self._end_of_search(now, cfg, s_, '칸 끝(s=%.2fm)을 지났는데 빈칸을 못 정함 (가장 그럴듯한 빈칸 %d행 %d열, 점수 %.1f)'
+                                    % (b[0] + 3 * 0.52 + 0.02, b[1] + 1, b[2] + 1, b[3]))
+                return
+            gap = None
+        else:
+            def accept(so, do):
+                return cfg['bay_d_min'] <= do <= cfg['bay_d_max'] and so > s_ - 1.5
 
-        self.map.update(self.frame, pose, node.obstacles(), now, accept,
-                        cfg['min_obstacle_radius'], cfg['max_obstacle_radius'])
-
-        gap = self._find_gap(s_, cfg)
+            self.map.update(self.frame, pose, node.obstacles(), now, accept,
+                            cfg['min_obstacle_radius'], cfg['max_obstacle_radius'])
+            gap = self._find_gap(s_, cfg)
         if gap is not None:
             gs, gd = gap
             if self.gap_s is None or abs(gs - self.gap_s) > cfg['gap_match']:
@@ -143,6 +195,11 @@ class Parking(SafeState):
                 rear_d = d - 0.5 * wb * math.sin(psi)
                 self.center = (rear_s, rear_d - cfg['turn_radius'])
                 self.target_d, how = self._depth_target(cfg)
+                # (11/18 사용자) 칸 가운데보다 depth_shift 만큼 더 안쪽(차 앞쪽)에 섬 - 뒤쪽 선에 아슬아슬하게 걸려 보여서
+                shift = float(cfg.get('depth_shift', 0.0))
+                if shift:
+                    self.target_d -= shift
+                    how += ', 안쪽으로 %.2fm 더' % shift
                 node.dbg('parking/target_d', self.target_d)
                 node.publish_stop()
                 self._set_phase(self.TURN, now,
@@ -151,13 +208,102 @@ class Parking(SafeState):
                 return
             speed = cfg['final_speed'] if start - rear_s < cfg['slow_distance'] else cfg['search_speed']
         else:
+            if self.back_from is not None:
+                self._back_search_step(now, cfg, s_, d, psi)
+                return
             speed = cfg['search_speed']
         self.driver.step(speed)
 
+    def _end_of_search(self, now, cfg, s_, why):
+        """(11/18 사용자) 끝까지 가도 빈칸을 못 정하면: 멈춘 뒤 back_search_distance 만큼 곧게 후진하며 다시 찾음 (back_search_max 번).
+        그래도 못 찾으면 다시 앞으로 찾고, 또 끝에 닿으면 정지 (예전처럼)."""
+        node = self.node
+        node.publish_stop()
+        if cfg['back_search_distance'] > 0.0 and self.back_tries < int(cfg['back_search_max']):
+            self.back_tries += 1
+            self.back_from = s_
+            self.back_started = now
+            self.phase_started = now
+            node.get_logger().warn('[PARKING] %s - 멈춘 뒤 %.1fm 곧게 후진하며 다시 찾음 (%d/%d번째)'
+                                   % (why, cfg['back_search_distance'], self.back_tries, int(cfg['back_search_max'])))
+            return
+        self._fail(why)
+
+    def _back_search_step(self, now, cfg, s_, d, psi):
+        """후진하며 찾기: 차선 방향(기준 좌표 0도)으로 펴고 차선 가운데(d=0)로 조금씩 붙으며 back_search_speed 로 후진.
+        back_search_distance 를 다 가거나 (들어온 자리 - back_search_before) 보다 뒤로 가면 멈추고 다시 앞으로 찾음."""
+        node = self.node
+        wb = node.wheel_base
+        back = self.back_from - s_
+        node.dbg('parking/back', back)
+        b = self.grid.best if self.grid is not None else None
+        before_grid = (b is not None and b[3] >= cfg['grid_end_score']
+                       and s_ <= b[0] - cfg['back_search_clear'])
+        if (back >= cfg['back_search_distance'] or s_ <= self.s0 - cfg['back_search_before'] or before_grid
+                or now - self.back_started > cfg['back_search_timeout']):
+            node.publish_stop()
+            self.back_from = None
+            self.phase_started = now            # 앞으로 다시 찾는 시간 제한은 지금부터
+            node.get_logger().warn('[PARKING] %.2fm 후진 (%s) - 다시 앞으로 가며 빈칸 정함'
+                                   % (back, '격자 시작 %.2fm 앞까지 옴' % cfg['back_search_clear'] if before_grid
+                                      else '끝까지'))
+            return
+        # 후진: 머리를 왼쪽(+)으로 두면 차가 오른쪽(-d)으로 감 -> d>0 이면 psi_des>0
+        psi_des = clamp(cfg['back_search_k_lat'] * d, -0.15, 0.15)
+        v = -cfg['back_search_speed']
+        steer = clamp(-cfg['k_heading'] * normalize_angle(psi_des - psi), -node.max_steer, node.max_steer)
+        node.publish_cmd(v, steering_to_omega(v, steer, wb))
+
+    def _grid_step(self, now, cfg, s_, d, psi):
+        """(11/18) 새 스캔이면 격자에 쌓고 빈칸 판단. 실패로 멈췄으면 False, 빈칸 못 정한 채 칸 끝을 지났으면 'end'."""
+        node = self.node
+        scan = node.latest_scan()
+        if scan is None or scan is self.last_scan:
+            return True
+        self.last_scan = scan
+        lx = s_ + cfg['grid_lidar_x'] * math.cos(psi)
+        ly = d + cfg['grid_lidar_x'] * math.sin(psi)
+        self.grid.add_scan(lx, ly, psi + math.radians(cfg['grid_lidar_yaw_deg']),
+                           scan.angle_min, scan.angle_increment, scan.ranges)
+        if self.back_from is not None:
+            # (11/18) 후진 중엔 쌓기만 하고 정하지 않음: 칸 너머에서 보면 LIMO 의 반대쪽 면이 보여 격자 시작이 10~20 cm 뒤로 밀림 (시뮬).
+            #   다시 앞으로 다가가며 (앞쪽 면을 보며) 정함
+            return True
+        first = self.grid.decided is None
+        dec = self.grid.decide(self.s0 - 0.3, self.s0 + cfg['search_distance'])
+        node.dbg('parking/grid_dd', self.grid.dd)
+        if dec is None:
+            b = self.grid.best
+            if b is not None:
+                node.dbg('parking/grid_best_G', b[0])
+                # 격자를 꽤 확실히 찾았는데(점수 grid_end_score 이상) 빈칸을 못 정한 채 앞바퀴가 칸 끝을 지남 -> 정지
+                end = b[0] + 3 * 0.52 + 0.02
+                if (self.back_from is None and b[3] >= cfg['grid_end_score']
+                        and s_ + node.front_wheel_x > end + cfg['grid_end_margin']):
+                    return 'end'            # (11/18) _search 가 후진하며 다시 찾거나 정지
+            return True
+        if dec['kind'] == 'row1_full':
+            node.publish_stop()
+            self._fail('1행 3칸이 다 찬 것으로 보임 (빈칸이 2행이면 차선에서 못 들어감 - 주최측 안내상 없어야 함, '
+                       '격자 시작 s=%.2fm, 점수 %.1f/%.1f)' % (dec['G'], dec['best'], dec['second']))
+            return False
+        self.gap_s = dec['target_s']
+        self.gap_d = -cfg['park_depth'] + self.grid.dd
+        self.gap_hits = cfg['gap_confirm']
+        node.dbg('parking/gap_s', self.gap_s)
+        if first:
+            node.get_logger().info('[PARKING] 빈칸 1행 %d열 (칸 가운데 s=%.2fm, 차 s=%.2fm, 격자 시작 s=%.2fm, '
+                                   '점수 %.1f / 다른 칸 %.1f, 옆 어긋남 %+.2fm)'
+                                   % (dec['col'] + 1, self.gap_s, s_, dec['G'], dec['best'], dec['second'],
+                                      self.grid.dd))
+        return True
+
     def _find_gap(self, s_car, cfg):
-        """오른쪽 LIMO 들 중 칸 하나를 사이에 두고(2 x bay_pitch) 나란히 선 쌍의 가운데 s."""
+        """오른쪽 LIMO 들 중 칸 하나를 사이에 두고(2 x bay_pitch) 나란히 선 쌍의 가운데 (s, d)."""
         items = sorted(self.map.confirmed(cfg['confirm_hits']), key=lambda it: it['s'])
         want = 2.0 * cfg['bay_pitch']
+        if cfg['any_pair']:
+            return self._find_gap_any(items, s_car, cfg, want)
         for a, b in zip(items, items[1:]):
             if abs((b['s'] - a['s']) - want) > cfg['pitch_tolerance']:
                 continue
@@ -169,17 +315,50 @@ class Parking(SafeState):
             return mid, 0.5 * (a['d'] + b['d'])
         return None
 
+    def _find_gap_any(self, items, s_car, cfg, want):
+        """(11/14) 바로 옆끼리만이 아니라 모든 두 LIMO 쌍에서 찾는다 (실차 park_real1).
+        새 배치(윗줄 LIMO-빈칸-LIMO, 아랫줄 LIMO 3대)에서 라이다가 빈칸 너머 아랫줄 LIMO 를 깊이 -0.91 m 로 보고,
+        깊이 0.5 m 짜리 박스 하나를 둘로 봐서, 두 LIMO 사이에 물체가 끼어 바로 옆끼리 짝짓기가 실패했다.
+        칸이 빈 건 '쌍 깊이에서 slot_block_d 안, 칸 앞뒤 반(bay_pitch/2) 안쪽에 물체가 없음'으로 본다
+        -> 빈칸 너머 아랫줄 LIMO(쌍보다 0.3 m 넘게 깊음)와 같은 LIMO 의 다른 조각은 막지 않는다.
+        규정상 목표 칸(윗줄 가운데)은 늘 비어 있어서, 이 검사는 다른 쌍을 잘못 고르지 않게 하는 안전장치.
+        여럿이면 가장 앞(가까운) 칸, 가운데가 gap_match 안으로 같은 쌍끼리는 덜 본 쪽(n)이 더 많은 쌍."""
+        found = []
+        for i, a in enumerate(items):
+            for b in items[i + 1:]:
+                if abs((b['s'] - a['s']) - want) > cfg['pitch_tolerance']:
+                    continue
+                if abs(b['d'] - a['d']) > cfg['pair_d_tolerance']:
+                    continue
+                mid = 0.5 * (a['s'] + b['s'])
+                if mid < s_car - cfg['turn_radius'] - 0.5:
+                    continue                    # 이미 한참 지나간 칸
+                gd = 0.5 * (a['d'] + b['d'])
+                blocked = any(it is not a and it is not b
+                              and abs(it['s'] - mid) < 0.5 * cfg['bay_pitch']
+                              and abs(it['d'] - gd) <= cfg['slot_block_d'] for it in items)
+                if not blocked:
+                    found.append((mid, min(a['n'], b['n']), gd))
+        if not found:
+            return None
+        first = min(f[0] for f in found)
+        mid, _, gd = max((f for f in found if f[0] - first <= cfg['gap_match']), key=lambda f: f[1])
+        return mid, gd
+
     def _depth_target(self, cfg):
         """ALIGN 깊이 목표 d 와 로그용 설명. LIMO 가운데 깊이를 쓰되 차선 기준과 너무 다르면 중간."""
         lane_d = -cfg['park_depth']
         if not cfg['limo_depth'] or self.gap_d is None:
             return lane_d, '차선 기준 %.2fm' % -lane_d
         diff = self.gap_d - lane_d
-        if abs(diff) > cfg['depth_max_diff']:
+        # (11/18) 격자 방식은 옆 어긋남을 1행 LIMO 여러 대 앞면으로 잼 -> 더 크게 믿음 (기울어진 진입 -3.6도에서 0.20 m 를
+        #   예전 한도 0.15 로 반만 믿으니 11 cm 깊게 섬)
+        lim = cfg['grid_depth_max_diff'] if self.grid is not None else cfg['depth_max_diff']
+        if abs(diff) > lim:
             target = 0.5 * (self.gap_d + lane_d)
             self.node.get_logger().warn(
                 '[PARKING] LIMO 가운데 깊이 %.2fm 가 차선 기준 %.2fm 와 %.2fm 차이 (허용 %.2fm) - 중간 %.2fm 사용'
-                % (-self.gap_d, -lane_d, abs(diff), cfg['depth_max_diff'], -target))
+                % (-self.gap_d, -lane_d, abs(diff), lim, -target))
             return target, '중간 %.2fm' % -target
         return self.gap_d, 'LIMO 가운데 %.2fm (차선 기준 %.2fm)' % (-self.gap_d, -lane_d)
 
@@ -217,7 +396,7 @@ class Parking(SafeState):
         node = self.node
         s_, d, psi = self.frame.car(pose)
         ts = self.gap_s
-        td = self.target_d if self.target_d is not None else -cfg['park_depth']
+        td = self.target_d if self.target_d is not None else -cfg['park_depth'] - float(cfg.get('depth_shift', 0.0))
         c, sn = math.cos(psi), math.sin(psi)
         e_long = (ts - s_) * c + (td - d) * sn          # 차 앞 방향으로 남은 거리
         e_lat = -(ts - s_) * sn + (td - d) * c          # 차 왼쪽 방향으로 벗어난 거리

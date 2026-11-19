@@ -11,7 +11,8 @@
   lane            차선만
   traffic_light   신호등 + 정지선. 색은 -p light_color:=red|yellow|green (실행 중 param set 가능)
   pedestrian      보행자 표지판 + 정지선
-  bump            서행 표지판
+  bump            방지턱 표지판 (11/17: 서행 표지판 -> 방지턱 표지판. 서행 표지판은 아래 slow)
+  slow            서행 표지판 (11/17 SLOW) + then_gap 뒤에 -p then:=bump|zig|ped|light|parking|ab|none
   slow_zone       distance 앞에서 시작하는 지그재그 유도선(zigzag_length) + 0.2m 뒤 보행자 정지선
   sign_a, sign_b  갈림길 A / B 표지판
   cone            좌우 라바콘 3쌍 (라이다 cone 이벤트)
@@ -19,6 +20,9 @@
                   (-p spacing:=LIMO 진행방향 간격, 기본 0.55 = 연습 Gazebo 배치)
   parking         2026 주차: 오른쪽 칸, 목표 칸 양옆 LIMO 2대 + 아랫줄 LIMO 1대 + 주차 표지판
                   (-p gap:=목표 칸 중심까지 거리)
+                  (11/14 새 배치) -p park_bottom:=full 이면 아랫줄 3대 (윗줄 LIMO-빈칸-LIMO + 아랫줄 LIMO 3대),
+                  -p park_ghost_d:=-0.91 이면 라이다가 빈칸 너머 아랫줄 LIMO 를 그 깊이로 보는 것도 보냄,
+                  -p park_split:=0.20 이면 윗줄 LIMO 를 그만큼 더 깊은 데에도 하나 더 보냄 (깊은 박스를 둘로 봄)
   * static_3lane / parking 에서 -p fake_limos:=false 면 가짜 LIMO 를 안 보내고
     (차선·표지판만 보냄) Gazebo 의 진짜 LIMO 를 라이다 노드가 보게 한다.
 """
@@ -61,18 +65,40 @@ class FakePerception(Node):
         self.declare_parameter('rate', 10.0)
         self.declare_parameter('lateral_error', 0.0)
         self.declare_parameter('heading_error', 0.0)
+        # (11/16) 지그재그 선 때문에 차선 값이 좌우로 흔들리는 것 흉내: 옆 값에 진폭 lane_wobble [m], 주기 lane_wobble_period [s] 사인 더함
+        self.declare_parameter('lane_wobble', 0.0)
+        self.declare_parameter('lane_wobble_period', 2.0)
         self.declare_parameter('distance', 1.5)        # 정지선/표지판까지 거리 (시나리오 시작 기준)
         self.declare_parameter('sign_position_valid', True)  # bump: false 면 표지판 위치 없이 보냄 (시험용)
         self.declare_parameter('sign_lateral', -0.35)        # bump: 표지판 좌우 위치 (왼쪽 +) [m]
+        # (11/15) bump: >0 이면 표지판에서 이만큼 뒤에 지그재그 유도선 시작 + 그 0.3 m 앞에 서행 표지판 하나 더 (서행 구간마다 표지판)
+        self.declare_parameter('zig_after_sign', 0.0)
+        self.declare_parameter('then', 'none')               # slow: 서행 표지판 뒤에 올 것 (11/17)
+        self.declare_parameter('then_gap', 1.0)              # slow: 서행 표지판에서 그것까지 [m]
         self.declare_parameter('side_lateral', -1.15)        # side_signs: 신호등·주차 표지판 좌우 위치 (왼쪽 +) [m]
         self.declare_parameter('lane_valid', True)           # false 면 차선 valid=false (차선 유실 시험)
         self.declare_parameter('lane_confidence', 1.0)       # 차선 확신도 (코너 감속 시험)
         self.declare_parameter('lane_single', False)        # single_lane_estimated (한 선 추정 시험, 11/11)
+        # (11/13) 차선 값을 차 위치로 계산 (트랙 = 시나리오 시작 기준 +x 방향, 차선 가운데 y = k x lane_spacing).
+        #   lane_pick 'nearest' = 차가 지금 들어가 있는 차선 기준 (팀원 약속), 'fixed' = 처음 차선(y = 0) 기준
+        self.declare_parameter('lane_from_pose', False)
+        self.declare_parameter('lane_pick', 'fixed')
+        self.declare_parameter('lane_spacing', 0.52)
+        self.declare_parameter('lane_ref_x', 0.5)           # 차선 값을 재는 차 앞 거리 (판단 lane.reference_distance_m)
         self.declare_parameter('crosswalk_after_line', 0.06) # 정지선 -> 횡단보도 줄무늬 앞끝 (판단 yolo.crosswalk_to_stopline 과 같게)
         self.declare_parameter('light_color', 'red')
         self.declare_parameter('stopline_visible', 1.2)   # 횡단보도(정지 기준) 위치가 이 거리 안에서만 나옴
         self.declare_parameter('stopline_min', 0.25)      # 이보다 가까우면 박스 아래가 화면 밖 (위치 없음)
+        # (11/16 실차 YOLO) 횡단보도가 stopline_near_x 보다 가까우면 거리를 stopline_near_short 만큼 짧게 보냄 (0 = 정확)
+        self.declare_parameter('stopline_near_x', 1.1)
+        self.declare_parameter('stopline_near_short', 0.0)
+        # (11/16) YOLO x_m 기준점이 판단 기준점(몸통 가운데)보다 뒤에 있는 실차 흉내: 모든 YOLO x_m 에 더함 (뒷바퀴 축이면 +0.10)
+        self.declare_parameter('x_shift', 0.0)
         self.declare_parameter('zigzag_length', 1.677)
+        # (11/15 stop_run2) slow_zone: 보행자 표지판 위치 = 정지선 + ped_offset (실차는 정지선 앞 약 0.3 m = -0.3),
+        #   ped_visible_min 보다 가까우면 표지판이 화면 밖 (실차 0.7 m 에서 빠짐). 0 = 항상 보임 (예전)
+        self.declare_parameter('ped_offset', 0.2)
+        self.declare_parameter('ped_visible_min', 0.0)
         self.declare_parameter('publish_odom', True)
         self.declare_parameter('sign', 'A')            # static_3lane 끝의 A/B 표지판 (none = 없음)
         self.declare_parameter('gap', 1.5)             # parking: 목표 칸 중심까지 거리
@@ -95,6 +121,10 @@ class FakePerception(Node):
         self.declare_parameter('start_yaw_deg', 0.0)    # publish_odom 일 때 처음 차 방향 (차선은 계속 오차 0 으로 보냄 = 기울어진 진입 시험, 11/10)
         self.declare_parameter('start_y', 0.0)          # publish_odom 일 때 처음 차 옆 위치 (왼쪽 +, 차선은 계속 오차 0 = 비켜 선 진입 시험, 11/12) [m]
         self.declare_parameter('limo_depth_offset', 0.0)  # parking: 윗줄 LIMO 를 칸 가운데보다 이만큼 더 안쪽(+)에 세움 [m]
+        # (11/14) 새 주차 배치 / 실차 라이다 흉내 (park_real1)
+        self.declare_parameter('park_bottom', 'one')     # parking: 'one' = 아랫줄 목표 칸 뒤 1대, 'full' = 아랫줄 3대
+        self.declare_parameter('park_ghost_d', 0.0)      # parking: 0 이 아니면 빈칸 앞뒤 가운데, 이 깊이(오른쪽 -)에 라이다 장애물 하나 더 [m]
+        self.declare_parameter('park_split', 0.0)        # parking: >0 이면 윗줄 LIMO 마다 이만큼 더 깊은 데에도 라이다 장애물 [m]
 
         pub = self.create_publisher
         self.pub_lane = pub(LaneError, '/perception/lane_error', 10)
@@ -247,6 +277,21 @@ class FakePerception(Node):
         lane.heading_error_rad = float(self._p('heading_error'))
         lane.confidence = float(self._p('lane_confidence'))
         lane.single_lane_estimated = bool(self._p('lane_single'))
+        if bool(self._p('lane_from_pose')):
+            ox, oy, oyaw = self.origin
+            c, s = math.cos(oyaw), math.sin(oyaw)
+            ty = -s * (self.x - ox) + c * (self.y - oy)
+            tyaw = math.atan2(math.sin(self.yaw - oyaw), math.cos(self.yaw - oyaw))
+            w = float(self._p('lane_spacing'))
+            center = w * round(ty / w) if self._p('lane_pick') == 'nearest' else 0.0
+            fy = ty + float(self._p('lane_ref_x')) * math.sin(tyaw)
+            lane.lateral_offset_m = float((center - fy) / max(0.2, math.cos(tyaw)))
+            lane.heading_error_rad = float(-tyaw)
+        wob = float(self._p('lane_wobble'))
+        if wob != 0.0:
+            t_now = self.get_clock().now().nanoseconds * 1e-9
+            lane.lateral_offset_m = float(lane.lateral_offset_m
+                                          + wob * math.sin(2.0 * math.pi * t_now / float(self._p('lane_wobble_period'))))
         self.pub_lane.publish(lane)
 
         self.objects = []
@@ -276,7 +321,7 @@ class FakePerception(Node):
         o.confidence = 0.9
         o.light_color = color
         o.position_valid = True
-        o.x_m = float(x_m)
+        o.x_m = float(x_m) + float(self._p('x_shift'))
         o.y_m = float(y_m)
         o.position_source = MissionObject.POS_DEPTH
         self.objects.append(o)
@@ -286,7 +331,8 @@ class FakePerception(Node):
         보이는 거리 안일 때만 위치와 함께 보냄."""
         cw = dist + float(self._p('crosswalk_after_line'))
         if self._p('stopline_min') <= cw <= self._p('stopline_visible'):
-            self._object(MissionObject.CROSSWALK, cw, 0.0)
+            short = float(self._p('stopline_near_short')) if cw < float(self._p('stopline_near_x')) else 0.0
+            self._object(MissionObject.CROSSWALK, cw - short, 0.0)
 
     # ------------------------------------------------------------------
     # 시나리오
@@ -306,10 +352,40 @@ class FakePerception(Node):
         self._stopline(line)
 
     def _s_bump(self):
-        self._object(MissionObject.SLOW_SIGN, self._ahead(self._p('distance')),
+        # (11/17) 방지턱 표지판 -> BUMP (서행 표지판은 이제 SLOW, _s_slow)
+        self._object(MissionObject.BUMP_SIGN, self._ahead(self._p('distance')),
                      float(self._p('sign_lateral')))
         if self.objects and not self._p('sign_position_valid'):
             self.objects[-1].position_valid = False
+        zig = float(self._p('zig_after_sign'))
+        if zig > 0.0:
+            start_wx = float(self._p('distance')) + zig
+            zig_start, zig_end = self._ahead(start_wx), self._ahead(start_wx + 1.677)
+            if zig_end > 0.3 and zig_start < 2.0:
+                self._object(MissionObject.SLOW_GUIDE_LINE, max(0.3, zig_start), 0.0)
+            self._object(MissionObject.SLOW_SIGN, self._ahead(start_wx - 0.3), float(self._p('sign_lateral')))
+
+    def _s_slow(self):
+        """(11/17) 서행 표지판(distance) 뒤 then_gap 만큼에 다음 것 (then: bump / zig / ped / light / parking / ab / none)."""
+        d = float(self._p('distance'))
+        self._object(MissionObject.SLOW_SIGN, self._ahead(d), float(self._p('sign_lateral')))
+        nxt = str(self._p('then'))
+        w = d + float(self._p('then_gap'))
+        if nxt == 'bump':
+            self._object(MissionObject.BUMP_SIGN, self._ahead(w), float(self._p('sign_lateral')))
+        elif nxt == 'zig':
+            self._object(MissionObject.SLOW_GUIDE_LINE, max(0.3, self._ahead(w)), 0.0)
+        elif nxt == 'ped':
+            self._object(MissionObject.PEDESTRIAN_SIGN, self._ahead(w) + 0.2, -0.35)
+            self._stopline(self._ahead(w))
+        elif nxt == 'light':
+            color = LIGHT.get(str(self._p('light_color')), MissionObject.LIGHT_UNKNOWN)
+            self._object(MissionObject.TRAFFIC_LIGHT, self._ahead(w) + 0.3, 0.35, color)
+            self._stopline(self._ahead(w))
+        elif nxt == 'parking':
+            self._object(MissionObject.PARKING_SIGN, self._ahead(w), -0.35)
+        elif nxt == 'ab':
+            self._object(MissionObject.SIGN_A, self._ahead(w), 0.3)
 
     def _s_side_signs(self):
         """옆 길 표지판 시험 (11/05): 빨간 신호등(distance+0.3)·주차 표지판(distance+2.0)을 side_lateral 옆에,
@@ -332,7 +408,9 @@ class FakePerception(Node):
         line_wx = start_wx + self._p('zigzag_length') + 0.2
         line = self._ahead(line_wx)
         # 실제 트랙처럼 표지판은 유도선 입구에서부터 보인다
-        self._object(MissionObject.PEDESTRIAN_SIGN, line + 0.2, -0.35)
+        ped = line + float(self._p('ped_offset'))
+        if ped >= float(self._p('ped_visible_min')):
+            self._object(MissionObject.PEDESTRIAN_SIGN, ped, -0.35)
         self._stopline(line)
 
     def _s_sign_a(self):
@@ -373,21 +451,38 @@ class FakePerception(Node):
         bay_mid = -(BAY_ENTRY + 0.5 * BAY_DEPTH)
         top = bay_mid - float(self._p('limo_depth_offset'))
         bottom = bay_mid - BAY_DEPTH - 0.02
-        return [(gap - BAY_PITCH, top), (gap + BAY_PITCH, top), (gap, bottom)]
+        out = [(gap - BAY_PITCH, top), (gap + BAY_PITCH, top), (gap, bottom)]
+        if str(self._p('park_bottom')).lower() == 'full':
+            out += [(gap - BAY_PITCH, bottom), (gap + BAY_PITCH, bottom)]
+        return out
 
-    def _publish_limos(self, limos):
-        """라이다 시야(앞 0.1~3 m, 좌우 1.2 m) 안의 LIMO 를 장애물로, 카메라 시야 안은 YOLO 로."""
+    def parking_lidar_extra(self):
+        """(11/14) 실차 라이다 흉내: 빈칸 너머 아랫줄 LIMO 를 얕게 본 점, 깊은 박스를 둘로 본 점 [(x, y)]."""
+        gap = float(self._p('gap'))
+        out = []
+        ghost = float(self._p('park_ghost_d'))
+        if ghost != 0.0:
+            out.append((gap, ghost))
+        split = float(self._p('park_split'))
+        if split > 0.0:
+            top = -(BAY_ENTRY + 0.5 * BAY_DEPTH) - float(self._p('limo_depth_offset'))
+            out += [(gap - BAY_PITCH, top - split), (gap + BAY_PITCH, top - split)]
+        return out
+
+    def _publish_limos(self, limos, lidar_only=()):
+        """라이다 시야(앞 0.1~3 m, 좌우 1.2 m) 안의 LIMO 를 장애물로, 카메라 시야 안은 YOLO 로.
+        lidar_only: 라이다 장애물로만 보내는 점 (YOLO 안 보냄)."""
         if not self._p('fake_limos'):
             return
         arr = ObstacleArray()
         arr.header = self._header()
-        for wx, wy in limos:
+        for k, (wx, wy) in enumerate(list(limos) + list(lidar_only)):
             x, y = self._to_base(wx, wy)
             if 0.1 <= x <= 3.0 and abs(y) <= 1.2:
                 o = Obstacle()
                 o.x, o.y, o.radius, o.point_count = x, y, LIMO_R, 20
                 arr.obstacles.append(o)
-            if 0.3 <= x <= 2.5 and abs(math.atan2(y, x)) < math.radians(35):
+            if k < len(limos) and 0.3 <= x <= 2.5 and abs(math.atan2(y, x)) < math.radians(35):
                 self._object(MissionObject.LIMO, x, y)
         self.pub_obstacles.publish(arr)
 
@@ -405,7 +500,7 @@ class FakePerception(Node):
     def _s_parking(self):
         """2026 주차: 주차 표지판 + 목표 칸 양옆 LIMO (벽 없음)."""
         self._object(MissionObject.PARKING_SIGN, self._ahead(0.6), -0.45)
-        self._publish_limos(self.parking_limos())
+        self._publish_limos(self.parking_limos(), self.parking_lidar_extra())
 
 
 def main(args=None):

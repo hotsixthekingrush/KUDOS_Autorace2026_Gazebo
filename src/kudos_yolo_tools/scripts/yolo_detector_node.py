@@ -134,6 +134,7 @@ class YoloDetectorNode(Node):
         # 화면 가장자리에 닿아 잘린 표지판은 버림 (잘린 A/B 가 P 처럼 보이는 경우 확인, 10/8). 0 = 끔
         p('edge_reject_px', 4)
         p('edge_reject_classes', ['marker_left', 'marker_right', 'sign_a', 'sign_b', 'parking_sign'])
+        p('ab_min_box_h', 0)          # (11/19) A/B 박스 높이가 이보다 작으면(멀면) 버림 [px]. 0 = 끔
         p('light_s_min', 90)        # 신호등 색 판정: 켜진 램프로 볼 최소 채도
         p('light_v_min', 150)       #                 최소 밝기
         # 색 판정 방식 (11/9): 'hue' = 램프 색상 투표 (시뮬), 'lamp' = 어느 램프가 켜졌나 + 위치 (실차.
@@ -174,6 +175,7 @@ class YoloDetectorNode(Node):
         self.publish_debug = bool(g('publish_debug'))
         self.edge_px = int(g('edge_reject_px'))
         self.edge_classes = set(x for x in g('edge_reject_classes') if x)
+        self.ab_min_h = int(g('ab_min_box_h'))
         self.light_s_min = int(g('light_s_min'))
         self.light_v_min = int(g('light_v_min'))
         self.light_method = str(g('light_method'))
@@ -428,6 +430,9 @@ class YoloDetectorNode(Node):
             if e > 0 and name in self.edge_classes and (
                     x1 <= e or y1 <= e or x2 >= img_w - e or y2 >= img_h - e):
                 continue
+            if self.ab_min_h > 0 and name in ('marker_left', 'marker_right', 'sign_a', 'sign_b') \
+                    and (y2 - y1) < self.ab_min_h:
+                continue                    # (11/19) 먼 A/B: 2 m 밖 B 를 A 로 봄 (comp_lap21·30·31)
             d = {'name': name, 'const': const, 'conf': float(conf[i]), 'box': xyxy[i]}
             if name in MULTI_INSTANCE:
                 multi.append(d)

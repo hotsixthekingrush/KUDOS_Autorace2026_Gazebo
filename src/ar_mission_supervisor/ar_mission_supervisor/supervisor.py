@@ -6,8 +6,10 @@ State 9개
 
 기본 흐름은 이전과 같다. LANE_FOLLOWING 이 이벤트를 보고 미션 State 로 보내고,
 미션 State 는 끝나면 LANE_FOLLOWING 으로 돌아온다.
-예외: SLOW_ZONE 은 보행자 표지판을 보면 LANE_FOLLOWING 을 거치지 않고
-CROSSWALK_STOP 으로 바로 넘어간다 (두 미션이 붙어 있음).
+(11/18 사용자) SLOW_ZONE 은 지그재그 + 횡단보도 정지를 한 State 에서 한다 (바닥 횡단보도 정지선에서 멈춤,
+보행자 표지판 안 봄). slow_zone.merge_crosswalk false 면 예전처럼 보행자 표지판을 보면 CROSSWALK_STOP 으로 바로 넘어감.
+LANE_FOLLOWING 에서 보행자 표지판 -> CROSSWALK_STOP 은 그대로 (지그재그를 놓쳤을 때).
+(11/15) BUMP 는 서행 유도선을 보면 SLOW_ZONE 으로, AVOID_STATIC 은 A/B 표지판을 보면 LEFT_A_RIGHT_B 로 바로 넘어간다.
 """
 
 import collections
@@ -30,6 +32,7 @@ from ar_msgs.msg import (ObstacleArray, LaneError,
 
 from ar_mission_supervisor.stopline import StopLineTracker
 from ar_mission_supervisor.three_lane import ThreeLanePlanner
+from ar_mission_supervisor.white_lines import WhiteLines
 from ar_mission_supervisor.states.lane_following import LaneFollowing
 from ar_mission_supervisor.states.stub import StubState
 from ar_mission_supervisor.states.traffic_light import TrafficLight
@@ -38,6 +41,7 @@ from ar_mission_supervisor.states.crosswalk_stop import CrosswalkStop
 from ar_mission_supervisor.states.parking import Parking
 from ar_mission_supervisor.states.bump import Bump
 from ar_mission_supervisor.states.slow_zone import SlowZone
+from ar_mission_supervisor.states.slow import Slow
 from ar_mission_supervisor.states.avoid_cone import AvoidCone
 from ar_mission_supervisor.states.avoid_static import AvoidStatic
 
@@ -50,7 +54,8 @@ EVENT_TO_OUTCOME = {
     'sign_ab': 'to_left_a_right_b',
     'pedestrian_sign': 'to_crosswalk',
     'parking_sign': 'to_parking',
-    'slow_sign': 'to_bump',
+    'slow_sign': 'to_slow',        # (11/17 사용자) 서행 표지판 -> SLOW (예전 BUMP)
+    'bump_sign': 'to_bump',        # 방지턱 표지판 -> BUMP (11/18: bump.slow_sign 이면 서행 표지판도)
     'slow_line': 'to_slow_zone',
     'cone': 'to_cone',
     'limo': 'to_avoid_static',
@@ -62,6 +67,7 @@ OUTCOME_TO_STATE = {
     'to_crosswalk': 'CROSSWALK_STOP',
     'to_parking': 'PARKING',
     'to_bump': 'BUMP',
+    'to_slow': 'SLOW',
     'to_slow_zone': 'SLOW_ZONE',
     'to_avoid_static': 'AVOID_STATIC',
     'to_cone': 'AVOID_CONE',
@@ -75,6 +81,7 @@ IMPLEMENTED = {
     'CROSSWALK_STOP': CrosswalkStop,
     'PARKING': Parking,
     'BUMP': Bump,
+    'SLOW': Slow,
     'SLOW_ZONE': SlowZone,
     'AVOID_CONE': AvoidCone,
     'AVOID_STATIC': AvoidStatic,
@@ -88,7 +95,7 @@ EVENT_SOURCES = ('yolo', 'lidar', 'test')
 # slow_line 이 pedestrian_sign 보다 앞: 유도선 입구에서는 보행자 표지판도 같이 보이므로
 # 먼저 SLOW_ZONE 으로 들어가고, SLOW_ZONE 이 끝 무렵 CROSSWALK_STOP 으로 넘긴다.
 EVENT_PRIORITY = ('traffic_light', 'slow_line', 'pedestrian_sign', 'cone', 'sign_ab',
-                  'slow_sign', 'parking_sign', 'limo')
+                  'bump_sign', 'slow_sign', 'parking_sign', 'limo')
 
 # YOLO 클래스 -> 이벤트 이름
 YOLO_EVENT = {
@@ -98,7 +105,7 @@ YOLO_EVENT = {
     MissionObject.SIGN_B: 'sign_ab',
     MissionObject.SLOW_GUIDE_LINE: 'slow_line',
     MissionObject.SLOW_SIGN: 'slow_sign',
-    MissionObject.BUMP_SIGN: 'slow_sign',
+    MissionObject.BUMP_SIGN: 'bump_sign',
     MissionObject.PARKING_SIGN: 'parking_sign',
     MissionObject.LIMO: 'limo',       # 진행 경로 앞에 있을 때만 (주차 구역 LIMO 무시)
 }
@@ -138,6 +145,14 @@ PARAM_DEFAULTS = {
         #   실제보다 30% 넘게 큼 (전체 회전 IMU 105도 vs odom 136도), IMU 방향은 자이로 적분과 0.3도 안으로 맞음.
         'odom_heading_source': 'odom',
         'imu_topic': '/imu',
+        # (11/16 사용자 A안) 판단 켤 때 차 방향을 몇 도로 볼지 [도]. 대회 출발선에 똑바로 놓고 켜면 0.
+        #   트랙 중간에서 켜고 시험할 땐 출발 직선 기준 지금 방향 (시계방향 트랙: 첫 코너 뒤 -90, 3차선 직선 180)
+        'start_yaw_deg': 0.0,
+        # (11/17 사용자) 출발 쪽 표지판 무시: 판단 켠 자리에서 신호등 traffic_light.ignore_start_distance, 주차 표지판
+        #   parking.ignore_start_distance 를 가기 전엔 그 미션으로 안 들어감. 재도전·시험(그 미션 앞에서 켤 때)은 false
+        #   (launch ignore_start:=false). odom 이 안 오면 켠 뒤 ignore_start_max_sec 지나면 끝
+        'ignore_start': True,
+        'ignore_start_max_sec': 30.0,
     },
     'lane': {
         # 차선 노드가 lateral 을 재는 지점 = 차 앞 몇 m (차선 노드 reference_distance_m 과 같아야 함, 11/04 0.5 로 정함)
@@ -149,6 +164,10 @@ PARAM_DEFAULTS = {
         # (11/11) 차선 노드가 한 선만 보고 추정한 값(single_lane_estimated)은 기준 좌표에 안 씀
         #   (차선 팀원 새 방식: 한 선이면 '마지막 폭의 절반' 떨어진 경로 기준 -> 넓어진 곳에선 실제 중앙과 최대 15 cm 다름)
         'frame_reject_single': True,
+        # (11/14) 차선 노드가 valid 로 냈어도 confidence 가 이보다 작으면 조향에 안 씀 (직전 값 유지, stale_sec 지나면 유실).
+        #   실차 lane_run1 지그재그(서행 유도선) 구간: conf 0.00~0.10 값의 방향이 튀어(+0.49 rad) 조향이 +-0.3 흔들림.
+        #   그 녹화에서 conf < 0.1 은 5% (지그재그 20%, 직선 0%), 가장 길게 이어진 게 0.37 초. 0 = 안 거름
+        'min_confidence': 0.1,
         'kp_lateral': 1.2,
         'kd_lateral': 0.15,
         'kp_heading': 0.8,
@@ -165,21 +184,41 @@ PARAM_DEFAULTS = {
         #   변화율은 새 차선 값이 왔을 때만 계산해 pd_d_smooth 로 평활, pd_d_jump 넘게 튀면(한 선<->두 선, 차로 바뀜) 버림.
         #   조향각 변화는 초당 steer_rate_max 까지 (명령이 툴툴 바뀌지 않게). false = Pure Pursuit (11/04)
         'omega_pd': True,
-        'pd_kp': 4.0,              # [rad/s per m] 실차 시험값 (팀원 kp = kd = 4.0, base_speed 0.2)
+        'pd_kp': 3.0,              # [rad/s per m] (11/19) 4.0 -> 3.0 (실차 지연 넣은 시뮬, params.yaml 설명). 예전 팀원 kp = kd = 4.0, base_speed 0.2
         # (11/12 Gazebo pd_lane_run1: 한 선 구간에서 옆오차가 0.1초마다 1 cm 씩 흔들려 kd 5.5 의 D 항이 P 보다 커지고
         #   핸들이 0.5초마다 좌우로 뒤집힘 -> kd 1, 변화율·옆오차 평활. 같은 녹화 값을 넣어 다시 계산하면 좌우 바뀜
         #   코너1 9->4, 지그재그 25->9, 코너2 10->2, 코너에서 한쪽으로 꺾는 크기는 그대로 0.27~0.28 rad)
         'pd_kd': 1.0,              # [rad/s per m/s]
         'pd_d_smooth': 0.15,       # 변화율 평활: 새 값 비중
-        'pd_lat_tau': 0.15,        # 옆오차 평활 시간 상수 [s] (0 = 안 함, 차선 10 Hz 면 새 값 비중 약 0.5). 튀면 새 값에서 다시 시작
+        'pd_lat_tau': 0.0,         # (11/19) 0.15 -> 0. 옆오차 평활 시간 상수 [s] (0 = 안 함, 차선 10 Hz 면 새 값 비중 약 0.5). 튀면 새 값에서 다시 시작
         'pd_d_jump': 0.12,         # 이웃 차선 값끼리 이만큼 넘게 다르면 변화율 계산 안 함 [m]
-        'pd_max_omega': 1.0,       # [rad/s]
+        'pd_max_omega': 2.0,       # [rad/s] (11/19) 1.0 -> 2.0
         'steer_rate_max': 2.0,     # 조향각 변화 한계 [rad/s] (0.41 rad 를 0.2초에)
+        # (11/15) 이 속도보다 느리면 조향 세기를 이 속도 때로 묶음 (느릴수록 세지는 것 막기). 0 = 끔. 주차 칸 찾기는 안 씀
+        'pd_speed_ref': 0.2,       # [m/s]
+        # (11/19) 이 속도보다 빠르면 세기를 (pd_fast_ref / 속도)^pd_fast_exp 로 줄임 (0 = 끔)
+        'pd_fast_ref': 0.4,        # [m/s]
+        'pd_fast_exp': 0.5,
+        # (11/19 차선 팀원 제안) |차선 방향| 이 pd_head_dead_deg 넘으면 넘은 만큼 x pd_head_k 더 돎 (+-pd_head_max). 0 = 끔
+        #   (11/19 사용자: 팀 속도 0.5~1.0 이라 켬) |옆오차| 0.1 안 + |방향| 20도 넘을 때만, k 2.0. 시뮬(차선 팀원 실측 지연):
+        #   0.5 m/s R0.5 왼쪽 최대 벗어남 0.132 -> 0.116, 0.6 m/s R0.6 0.242 -> 0.173~0.188, 직선 같음. 0.3 m/s 는 나빠짐 (0.067 -> 0.134~0.160)
+        'pd_head_k': 2.0,          # [rad/s per rad]. 0 = 끔
+        'pd_head_dead_deg': 20.0,
+        'pd_head_max': 0.5,        # [rad/s]
+        'pd_head_lat_max': 0.1,    # (11/19 차선 팀원 제안) |옆오차| 가 이 안일 때만 방향 항 [m]. 0 = 상관없이
+        # (11/19 차선 팀원) 지령 속도로 자동: pd_head_v0 이하 0, pd_head_v1 이상 pd_head_k, 사이 비례 (0.3 m/s 에선 나빠져서). v1 0 = 항상 pd_head_k
+        'pd_head_v0': 0.35,        # [m/s]
+        'pd_head_v1': 0.5,         # [m/s]
+        # (11/19 사용자·차선 팀원) 한 선 추정(single)이고 |방향| 이 이 이상이면 속도·옆오차 상관없이 방향 보정 전부 (lat 믿기 어려울 때). 0 = 끔
+        'pd_head_single_deg': 25.0,
         # speed_by_lateral: LANE_FOLLOWING 속도 = base_speed * max(min_ratio, 1 - |lateral| / slow_lat),
         #   한 선 추정 프레임은 min_ratio. 최저 min_speed. 가속 accel_max, 감속 decel_max 까지.
         #   켜면 위 corner_* 감속은 안 씀 (겹치지 않게). false = corner_* 감속 (11/10)
         'speed_by_lateral': True,
         'slow_lat': 0.17,          # |lateral| 이 이 값이면 최저 비율 [m]
+        # (11/15) 최저 비율(min_ratio)로 줄이는 조건: 'quality' = 확신도 < corner_min_confidence 또는
+        #   |방향| > corner_heading_deg, 'single' = 예전처럼 한 선 추정(single_lane_estimated)이면
+        'slow_rule': 'quality',
         'min_ratio': 0.4,
         'min_speed': 0.12,         # 이보다 느리면 모터가 섰다 갔다 함 (팀원 실차: 0.08 에서 끄릭끄릭) [m/s]
         'accel_max': 0.4,          # [m/s^2]
@@ -190,6 +229,24 @@ PARAM_DEFAULTS = {
         'creep_speed': 0.12,
         'stop_after_sec': 5.0,
         'creep_keep_steer': True,  # (11/10) 저속 구간에서 직전 조향각 유지 (false = 예전처럼 직진)
+        # (11/19 사용자·차선 팀원) 놓친 순간 직전 imu_rate_window 초 동안 실제로 돈 곡률(IMU 방향 변화 / 속도)을
+        #   imu_keep_sec 동안 imu_speed 로 유지 (hold 대신). 그 뒤 creep(같은 곡률, creep_speed) -> stop_after_sec 에 정지
+        'imu_keep': True,
+        'imu_keep_sec': 2.0,
+        'imu_speed': 0.2,
+        'imu_rate_window': 1.0,
+        # (11/19 사용자·차선 팀원) 놓치기 직전 1초 안 카메라 방향(|head_min_deg| 넘음)이 있으면 그 방향(최대 90도)으로 돌아 감
+        #   (1118 comp_lap14 145초: 방향 -17~-28도인데 lat 0 이라 직진하다 놓침). 없으면 갈림길 뒤면 오른쪽 90도(after_ab), 아니면 imu_keep
+        'head_follow': True,
+        'head_min_deg': 8.0,
+        'head_max_age': 1.0,       # [s]
+        'head_k_yaw': 1.5,
+        # (11/19 차선 팀원 lap24) 놓치기 직전 head_max_age 초 안 큰 |차선 방향| 을 씀 (튄 값 빼고 큰 쪽 20% 자리). 마지막 값만 보면
+        #   lap24 24.7초 -5도라 안 켜짐 (그 전 1초 -33~-5도, 영상: 오른쪽 코너 바깥으로 노란 선 넘어 벽 쪽). 그게 head_full_deg 넘으면
+        #   그쪽으로 그때 차 방향에서 head_full_turn_deg 까지 크게 (거의 끝까지 꺾음) 돎, 선 다시 잡으면 차선 따라가기.
+        #   lap24 그 순간 값이 -17도라 20 이면 안 켜짐 -> 15
+        'head_full_deg': 15.0,     # [도]. 0 = 끔 (차 방향 + 차선 방향까지만)
+        'head_full_turn_deg': 90.0,
     },
     'perception': {
         'stale_sec': 0.5,
@@ -200,48 +257,82 @@ PARAM_DEFAULTS = {
     'yolo': {
         'event_range': 3.0,        # 위치가 유효할 때 이 거리 안에 들어와야 이벤트로 인정
         'pedestrian_range': 1.5,   # 보행자 표지판만 따로 (유도선보다 먼저 잡혀 SLOW_ZONE 을 건너뛰지 않게)
+        'slow_range': 1.5,         # (11/19 오전 사용자) 서행 표지판(SLOW, 지금은 방지턱 구간 표지판)만 따로 [m]. n1119: 2.15~2.35 m 에서 BUMP 시작. 0 = event_range
+        'parking_range': 1.5,      # (11/19 사용자·YOLO 팀원) 주차 표지판(P)만 따로: 새 모델이 3 m 넘게 멀리서도 잡아 신호등 앞에서 주차로 갈 수 있음 [m]. 0 = event_range
         'confirm_frames': 2,       # 같은 이벤트가 연속 N 프레임 검출돼야 인정 (오인식 방지)
         'hold_sec': 1.0,           # YOLO 결과 유지시간 (추론이 느려도 프레임 사이가 끊기지 않게)
         # (11/05) 옆 길 표지판 거르기: 위치가 있으면 |y_m| 이 이 안일 때만 씀 (이벤트·거리·신호등 색 전부)
         'max_lateral': 0.7,        # 표지판·신호등·유도선 [m]
-        'sign_ab_max_lateral': 1.1,    # A/B 표지판 (3차선 가운데 섬 앞이라 옆 차선에서도 봐야 함) [m]
+        'sign_ab_max_lateral': 1.5,    # A/B 표지판 (3차선 가운데 섬 앞, 옆 차선에서 비스듬히 봐도 받게. 11/15 1.1 -> 1.5) [m]
         'crosswalk_max_lateral': 0.35, # 정지 기준 횡단보도 [m]
         # (11/05) 정지선은 YOLO 횡단보도(줄무늬) 앞끝보다 이만큼 차 쪽에 있음 -> 그만큼 앞에서 선다 [m]
         'crosswalk_to_stopline': 0.06,
+        # (11/16 YOLO 팀원) YOLO x_m 기준점(그쪽 base_link) -> 판단 기준점(차 몸통 가운데) 앞뒤 차이 [m].
+        #   YOLO base_link 가 뒷바퀴 축이면 -0.10 (판단 기준점이 0.10 m 앞). 모든 YOLO 거리에 더함
+        'x_offset': 0.0,
+        # (11/16 YOLO 팀원) 횡단보도 x_m 이 이보다 가까우면 덜 정확 (실차 렌즈 0.7 m 에서 5.7 cm 짧음, 1.0 m 에서 0.3 cm).
+        #   먼 값(>= 이 값)을 한 번이라도 받았으면 가까운 값은 버리고 odom 으로 이어감. 가까운 값만 있으면 near_bias 를 더해 씀.
+        #   YOLO x_m 그대로(x_offset 더하기 전) 기준 [m]. 0 = 끔
+        'crosswalk_trust_x': 1.1,
+        'crosswalk_near_bias': 0.05,
     },
     'traffic_light': {
         'approach_speed': 0.2,
         'min_speed': 0.08,
         'slowdown_distance': 0.0,  # >0 이면 정지 직전 이 거리부터 감속 (0 = 끝까지 approach_speed)
-        'stop_gap': 0.03,          # 앞바퀴~정지선 남은 거리가 이 값 이하면 정지/통과 판정
+        'stop_gap': 0.07,          # (11/17 사용자) 0.03 -> 0.08: full_1117_1 아슬아슬. (11/19) 0.13: 1118 comp_lap11 0.074 에서 5 cm 뒤로. (11/19 오전 사용자) 0.10: n1119 0.121~0.130 에서 3 cm 앞으로. (11/20 04:36 사용자) 0.07
         'green_confirm_sec': 0.3,  # 정지 후 초록불이 이 시간 이상 유지되면 출발
         'approach_timeout': 25.0,  # 정지선 거리를 끝내 못 받으면 이 시간 뒤 현 위치에서 판정
-        'max_wait_sec': 10.0,      # 정지 후 이 시간 안에 초록불을 못 보면 출발 (0 = 무한 대기)
+        'max_wait_sec': 90.0,      # 정지 후 이 시간 안에 초록불을 못 보면 출발 (0 = 무한 대기). (11/19 사용자) 10 -> 90: 대회 신호등 자동, 빨간불만 약 45초
+        # (11/17 사용자) 출발할 때 옆 길 신호등을 보고 TRAFFIC_LIGHT 로 들어감 -> 켠 자리에서 이 거리 전엔 무시 (켜고 끄기: ignore_start)
+        'ignore_start_distance': 3.0,  # [m] 켠 뒤 실제로 간 거리 (11/17 full_1117_2 전엔 직선거리)
+    },
+    'slow': {
+        # (11/17 사용자) 서행 표지판 -> SLOW: 차선 추종 그대로, 속도만. 신호등·지그재그·방지턱·보행자 표지판으로만 넘어감
+        # (11/18 사용자) 서행은 지그재그에만 있어 의미 없음 + 대회장에서 서행 표지판이 P 로 잘못 잡힘 -> 기본 끔.
+        #   false 면 YOLO 서행 표지판을 이벤트로 안 씀 (SLOW 로 안 들어감). 코드는 남겨 둠
+        'use': False,
+        'speed': 0.2,
+        'max_duration': 0.0,       # >0 이면 이 시간 뒤 LANE_FOLLOWING (0 = 위 미션 나올 때까지 계속) [s]
     },
     'crosswalk': {
         'approach_speed': 0.2,
         'min_speed': 0.08,
         'slowdown_distance': 0.0,
-        'stop_gap': 0.03,
+        'stop_gap': 0.11,          # (11/17 사용자) 0.03 -> 0.18: full_1117_1 15 cm 더 가서 섬. (11/19) 0.14: 1118 녹화 0.175 에서 4 cm 앞으로. (11/19 오전) 0.11: n1119 0.129~0.139 에서 3 cm 앞으로
         'wait_sec': 4.0,           # 규정: 완전정지 후 3초 이상, 15초 이내 출발
         'approach_timeout': 25.0,
+        # (11/16 사용자) 횡단보도가 지그재그 바로 뒤라 접근 중에도 SLOW_ZONE 처럼 헤딩 고정 (k_yaw·lane_blend 는 slow_zone 값).
+        #   SLOW_ZONE 에서 넘어오면 그 헤딩을 이어받고, 아니면 회전이 hold_turn_rate_deg 아래일 때 고정.
+        #   고정할 때 차 방향이 트랙 축(avoid_static.axis_ref_deg + 90도 단위)에서 hold_axis_snap_deg 안이면 그 축으로.
+        'heading_hold': True,
+        'hold_turn_rate_deg': 10.0,
+        'hold_axis_snap_deg': 12.0,
     },
     'bump': {
         'speed': 0.2,              # 규정: 기본 속도의 1/2, 최대 0.2 m/s
-        'after_sign_distance': 1.8,    # 표지판을 지나 이만큼 더 가면 끝 (odom) [m] (11/05)
+        'after_sign_sec': 5.0,     # (11/15 사용자) 표지판 옆을 지나고 이 시간 뒤 끝 [s]. 0 = 아래 거리 방식. (11/19 사용자) 3 -> 5
+        'after_sign_distance': 1.8,    # after_sign_sec 0 일 때: 표지판을 지나 이만큼 더 가면 끝 (odom) [m] (11/05)
         'unknown_sign_distance': 2.0,  # 표지판 위치를 한 번도 못 받았을 때 표지판까지 거리로 침 [m]
         'duration_sec': 8.0,       # odom 이 없을 때만: 진입 후 이 시간 뒤 끝 (예전 방식)
         'max_duration': 30.0,      # 안전용 최대 시간 [s]
+        'slow_sign': True,         # (11/18 주최측 공지) 방지턱 앞 표지판이 서행 표지판으로 바뀜 -> 서행 표지판도 BUMP 로 (slow.use 가 false 일 때)
+        'handoff': True,           # (11/18) BUMP 중 신호등·지그재그 유도선·보행자 표지판을 보면 그 미션으로 바로 (다른 곳 서행 표지판 대비)
     },
     'slow_zone': {
         'speed': 0.2,
         'lock_offset': 0.0,        # 유도선 시작점 도달 후 이만큼 더 가서 헤딩 고정 [m]
         'lock_delay_sec': 1.0,     # 유도선 거리를 모를 때: 진입 후 이 시간 뒤 헤딩 고정
         'k_yaw': 1.5,              # 고정 헤딩 유지 게인 [rad 조향 / rad 오차]
-        'lane_blend': 0.3,         # 차선 보정 비율 (0 = 순수 헤딩 유지, 1 = 일반 차선 추종과 같은 세기)
-        'handoff_stopline': 0.5,   # 보행자 표지판을 본 뒤, 정지선이 이 거리 안일 때 CROSSWALK_STOP 으로
-        'handoff_sign': 1.0,       # 정지선이 안 보이면 표지판이 이 거리 안일 때 (0 = 이 조건 끔)
-        'max_duration': 20.0,      # 보행자 표지판을 끝내 못 보면 이 시간 뒤 LANE_FOLLOWING 복귀
+        'lane_blend': 0.9,         # 차선 보정 비율 (0 = 순수 헤딩 유지, 1 = 일반 차선 추종과 같은 세기). (11/19) 0.3 -> 0.9 + lane_max
+        'lane_max': 0.15,          # (11/19 사용자·차선 팀원) 차선 몫 한계 [rad 조향]. 0 = 한계 없음 (예전 0.3 일 땐 사실상 ±0.05)
+        'axis_snap_deg': 15.0,     # (11/19 사용자) 헤딩 고정 때 차 방향이 트랙 축에서 이 안이면 축으로 [도]. 0 = 끔 (차 방향 그대로)
+        'handoff_stopline': 0.5,   # (예전 방식만) 보행자 표지판을 본 뒤, 정지선이 이 거리 안일 때 CROSSWALK_STOP 으로
+        'handoff_sign': 1.0,       # (예전 방식만) 정지선이 안 보이면 표지판이 이 거리 안일 때 (0 = 이 조건 끔)
+        'max_duration': 20.0,      # 횡단보도(예전: 보행자 표지판)를 끝내 못 잡으면 이 시간 뒤 LANE_FOLLOWING 복귀
+        'exit_past_stopline': 0.3, # (11/15) 표지판 못 본 채 정지선이 차 기준점 뒤로 이만큼 지나면 복귀 [m] (0 = 끔)
+        'merge_crosswalk': True,   # (11/18 사용자) 지그재그 + 횡단보도 정지를 이 State 하나로 (정지 값은 crosswalk 그룹). false = 예전 방식
+        'floor_min_meas': 2,       # 바닥 횡단보도 측정을 이만큼 받아야 그 정지선으로 멈춤 (한 프레임 오검출 방지)
     },
     'left_a_right_b': {
         'trigger_distance': 0.8,
@@ -256,6 +347,19 @@ PARAM_DEFAULTS = {
         'a_lane': 0,               # odom 모드에서 A(좌) 경로로 이어지는 차선 (0 왼쪽, 1 가운데, 2 오른쪽)
         'b_lane': 2,
         'odom_hold_distance': 0.6, # 목표 차선 도착 후 이만큼 더 간 뒤 종료 [m]
+        'odom_end_after': 0.0,     # (11/19 사용자) 목표 차선 도착 뒤 이만큼 더 가서 끝 [m] (예전 odom_hold_distance 0.6 을 같이 씀)
+        'odom_bend_deg': 15.0,     # (11/19 사용자·차선 팀원) 도착 뒤 카메라(두 선) |방향| 이 이보다 크면 길이 휜 것 [도]. 0 = 끔
+        'odom_bend_sec': 0.5,      #   그게 이만큼 계속되면 차선 따라가기로 [s]
+        # (11/19 13:00 사용자·차선 팀원) 섬 끝(표지판) 지나기 전엔 안 끝냄: 섬 끝 바로 앞에서 차선 따라가기로 넘기면 '왼쪽 선 + 섬 선' 을
+        #   한 쌍으로 잡아 A 쪽 가운데를 가리킴 (lap18 175.5초). 정할 때 표지판 거리 + 이만큼 더 간 뒤에만 끝 (도착·앞 비었음·휨 모두). 음수 = 끔
+        'odom_end_pass_sign': 0.3,     # [m]
+        'odom_end_pass_default': 1.5,  # [m] 정할 때 표지판 거리를 모르면 이 거리로 셈
+        'odom_end_clear': 1.0,     # (11/19 사용자) 끝낼 때 목표 차선 안, 차 앞 이 거리 안에 장애물이 없으면 됨 [m]. 0 = 예전 (지도 어디든 앞에 있으면 안 끝냄)
+        'odom_max_duration': 90.0, # (11/16) 3차선 이어받은 뒤 앞뒤 움직임을 했으면 이 시간까지 (max_duration 20 은 앞뒤 움직임보다 짧음)
+        # (11/13) 카메라 방식: 옮기는 중 차선 노드가 '지금 들어간 차선' 기준으로 바뀌면 lateral 이 차선 폭만큼 튐 -> 목표 이동량에서 뺌
+        'lane_jump': True,
+        'jump_max_gap': 1.0,       # 이 시간 안의 연속 차선 값끼리만 비교 [s]
+        'jump_wait_sec': 3.0,      # (11/14) settle 뒤 차선 노드 기준이 새 차선으로 바뀔 때까지 더 기다리는 최대 시간 [s]
     },
     'avoid_static': {
         'trigger_distance': 1.2,   # 라이다: 진행 경로 앞 이 거리 안 장애물이면 진입 [m]
@@ -268,6 +372,10 @@ PARAM_DEFAULTS = {
         #   단 장애물이 defer_min_distance 안으로 오면 바로 진입. 0 이면 안 미룸
         'defer_turn_rate_deg': 10.0,
         'defer_min_distance': 0.5,
+        # (11/14) 카메라 차선을 기준 좌표로 못 쓸 때(lane_for_frame 이 None) 차 방향이 트랙 축에서 이만큼 넘게 틀어져 있으면 미룸.
+        #   실차 lane_run1: 코너를 빠져나오며 회전은 느려졌지만 축에서 9도 틀어진 채 진입 -> 카메라 차선(방향 34도)을 못 믿어
+        #   차 위치를 가운데 차선으로 잡음 -> 실제론 0.2~0.3 m 옆이라 끝에 바깥 노란 선 위를 달림. 0 = 안 미룸 (axis_snap 일 때만)
+        'defer_axis_deg': 5.0,
         'min_obstacle_radius': 0.10,  # 라바콘(작음)과 구분 [m]
         'max_obstacle_radius': 0.40,
         'start_lane': 1,           # 3차선 시작 차선 (항상 가운데)
@@ -281,6 +389,12 @@ PARAM_DEFAULTS = {
         'switch_step': 0.3,        # 이 거리마다 '여기서 옆 차선으로 옮기면' 을 굴려 봄 [m]
         'switch_margin': 0.15,     # 목표 차선은 이만큼 더 멀리 갈 수 있을 때만 바꿈 [m]
         'switch_hold': 1.0,        # 목표 차선을 바꾼 뒤 이 시간은 유지 (지금 목표가 곧 막히면 예외) [s] (11/12: 0.5 -> 1.0)
+        # (11/19 사용자) 3차선 왔다갔다 (n1119 comp_lap20·21·30·31)
+        'goal_after_pass': True,   # A/B 목표 차선 앞 goal_pass_ahead m 안에 LIMO 가 남아 있으면 지날 때까지 목표 안 씀 (피하기만)
+        'goal_pass_ahead': 3.0,    # [m]
+        'goal_pass_side': 0.05,    # 목표 차선 반폭에 더하는 옆 여유 [m]
+        'goal_full_sec': 0.3,      # 목표 차선이 끝까지 빈 게 이만큼 계속돼야 그쪽으로 [s] (0.15~0.3 시험: 섬 앞 A/B 차선은 그대로)
+        'quick_switch_free': 0.25, # A/B 목표 차선에서 다른 차선으로: 바꾼 지 switch_hold 안이면 목표 차선이 이 거리 안에서 막힐 때만 [m] (예전 = commit_distance 0.9). 0 = 예전
         # (11/12) 차선 바꾸기 확정: 켜면 목표 차선에 들어가기 전엔 목표 고정 (목표가 commit_distance 안에서 막히고
         #   switch_hold 지났을 때만 예외). pd_lane_run4 의 목표 뒤집힘 때문에 넣었지만 0.55 배치는 계속 다시 골라야
         #   빠져나가는 경우가 있어 (run.py 4개 막힘) 기본 끔. '바로 옆 차선만' 은 0.55 배치에서 막혀서 코드에 안 넣음
@@ -304,9 +418,52 @@ PARAM_DEFAULTS = {
         'slow_speed': 0.10,        # 그때 감속 속도
         'stop_distance': 0.25,     # 그래도 이 거리 안에서 닿게 되면 정지 [m]
         'backup_after': 1.0,       # 이만큼 서 있으면 후진 [s] (11/04)
-        'backup_distance': 0.20,   # 한 번에 후진하는 거리 [m]
+        'backup_distance': 0.20,   # 펴는 후진(예전 방식)일 때 한 번에 후진하는 거리 [m]
         'backup_speed': 0.10,      # 후진 속도 [m/s]
-        'backup_max': 3,           # 한 미션에 후진하는 최대 횟수
+        'backup_max': 8,           # 한 미션에 후진하는 최대 횟수 (11/16 3 -> 8)
+        # (11/16 사용자) 'search' = 조향 6가지 x backup_search_dists 를 지도로 굴려 앞으로 갈 거리가 가장 길어지는 후진,
+        #   LIMO 에 닿거나 3차선 바깥 선 넘는 후진은 버림. 'straighten' = 예전 (차선 방향으로 펴며 backup_distance)
+        'backup_mode': 'search',
+        'backup_search_dists': [0.20, 0.30, 0.40],
+        'backup_min_gain': 0.05,   # 지금보다 앞 거리가 이만큼 넘게 길어지는 후진이 없으면 예전처럼 펴며 후진 [m]
+        # (11/16 사용자) 막히면 앞뒤로 움직여 빠져나가기 (하이브리드 A*, three_lane.py 위 설명)
+        'maneuver': True,
+        'maneuver_max': 4,             # 한 미션에 몇 번까지
+        'maneuver_step': 0.10,         # 조각 길이 [m]
+        'maneuver_goal_ahead': 2.0,    # 지금 자리에서 이만큼 앞까지 [m]
+        'maneuver_goal_heading_deg': 20.0,
+        'maneuver_goal_lane_tol': 0.15,  # 끝 자리: 차선 가운데에서 이만큼 안 [m]
+        'back_floor': True,            # (11/16) 첫 LIMO 가운데보다 뒤는 입구 사선 구간으로 보고, 뒤로 갈 때 그 사선 밖으로 안 나감
+        'back_floor_offset': 0.12,     # 사선이 끝나는 곳을 첫 LIMO 가운데에서 이만큼 앞(+)/뒤(-)로 [m] (11/17 사용자 0.10 -> 0.12)
+        # (11/17) 앞으로 갈 때도 사선 안으로 (full_1117_1: 진입 직후 오른쪽 차선으로 바꾸다 오른쪽 사선 밟음). 기본 끔:
+        #   shift 0 이면 첫 LIMO 가 가까운 배치에서 아예 못 지나감 (run.py STATIC 40개 넘게 실패), -0.3 이면 시뮬 사선 밟기가
+        #   거의 안 줄고 간격 0.46 은 19 -> 15/20. 입구 선 위치를 모르는 한계 (차선 팀원 흰 가로선이 있어야 제대로)
+        'taper_forward': False,
+        'taper_forward_shift': -0.3,   # 앞으로 갈 땐 사선 끝을 이만큼 앞(+)/뒤(-)로 [m] (후진보다 덜 조이게)
+        'back_floor_slope': 1.0,       # 한계 뒤로 1 m 갈 때 한쪽 폭이 줄어드는 양 [m] (1.0 = 45도, 99 = 한계 뒤는 가운데 차선 폭만)
+        'maneuver_back_floor': True,   # 앞뒤 움직임의 뒤로 가는 조각에도 같은 한계
+        'maneuver_max_heading_deg': 100.0, # (11/16) 앞뒤 움직임 중 차 방향 한계 (3차선 방향 기준) [도]. 60/75 는 static_1116_1 배치를 못 지나감
+        'center_when_no_ab': True,     # (11/17 사용자) A/B 표지판을 아직 못 봤으면 가운데 차선을 목표로 (끝까지 비면 늘 가운데)
+        'reenter_keep': True,          # (11/16) 3차선에서 끝난 뒤 reenter_sec 안에 다시 들어오면 전 기준 좌표·지도를 이어 씀
+        'reenter_sec': 10.0,
+        'maneuver_max_back': 0.35,     # 시작 자리보다 이만큼 넘게 뒤로는 안 감 (입구 사선 구간 보호) [m]
+        'maneuver_margin': 0.02,       # 길 찾을 때 LIMO 박스를 이만큼 더 키움 (없으면 절반 -> 0 으로 다시 찾음) [m]
+        'maneuver_check_slack': 0.005, # 움직이는 중 확인은 박스를 이만큼 줄여서 [m]
+        'maneuver_back_cost': 1.5,     # 뒤로 1 m = 앞으로 1.5 m 로 침
+        'maneuver_switch_cost': 0.4,   # 앞뒤 바꿀 때마다 더하는 값 [m]
+        'maneuver_steer_cost': 0.05,   # 조향 바꿀 때마다 더하는 값 [m]
+        'maneuver_if_reach_below': 1.2,  # 한 번 후진으로 앞 거리가 이만큼 안 나올 때만 앞뒤 움직임 (나오면 후진이 빠름) [m]
+        'maneuver_after_backup_within': 0.8,  # 후진했던 자리에서 이 거리 안에 또 막히면 후진 말고 앞뒤 움직임 [m]
+        'maneuver_handback_deg': 30.0, # 움직이는 중 방향이 이 안이고 보통 계획으로 끝까지 갈 차선이 생기면 차선 따라가기로
+        'maneuver_max_nodes': 30000,
+        'maneuver_time_budget': 3.0,   # 길 찾기 최대 계산 시간 [s] (그동안 차는 서 있음)
+        'maneuver_speed': 0.15,        # 앞으로 [m/s]
+        'maneuver_back_speed': 0.10,   # 뒤로 [m/s]
+        'maneuver_settle': 0.6,        # 앞뒤가 바뀌거나 조향이 크게 바뀔 때 서서 바퀴 돌리는 시간 [s]
+        'maneuver_settle_steer': 0.5,  # 조향이 이만큼 넘게 바뀌면 (왼쪽 끝 <-> 오른쪽 끝) 서서 돌림 [rad]
+        'maneuver_tol_d': 0.06,        # 조각 끝에서 예상 자리와 옆으로 이만큼 넘게 어긋나면 다시 찾음 [m]
+        'maneuver_tol_deg': 10.0,
+        'maneuver_max_replans': 4,
         'backup_k_heading': 1.5,   # 후진하며 차 방향을 차선 방향으로 펴는 게인 [rad/rad]
         'settle_tolerance': 0.08,  # 목표 차선 중앙 +- 이 안 + 방향 오차 settle_heading 이하면 변경 완료
         'settle_heading': 0.20,
@@ -317,7 +474,7 @@ PARAM_DEFAULTS = {
         'ghost_margin': 0.05,      # 겹침 판정 때 박스 길이·폭에 더하는 값 [m]
         'exit_clear_distance': 0.8,  # 마지막 장애물을 지나 이만큼 더 가면 종료 [m]
         'max_distance': 7.0,       # 진입 후 최대 주행거리 (3차선 직선 5.5 m) [m]
-        'max_duration': 40.0,
+        'max_duration': 90.0,      # (11/16 40 -> 90) 앞뒤로 움직여 빠져나가면 한 번에 30~60초 걸릴 수 있음
         'context_timeout': 5.0,    # 끝난 뒤 이 시간 안에 A/B 가 오면 차선 번호를 넘겨줌 [s]
         # (11/12 사용자 선택) 카메라 차선을 못 믿어 차 방향을 기준으로 쓸 때, 트랙 축(axis_ref_deg + 90도 단위)에서
         #   axis_snap_max_deg 안이면 그 축으로 맞춤. Gazebo pd_lane_run3: 코너 16도 덜 돈 채(-164도) 진입 -> 바깥 선 위.
@@ -325,6 +482,13 @@ PARAM_DEFAULTS = {
         'axis_snap': True,
         'axis_ref_deg': 0.0,
         'axis_snap_max_deg': 30.0,
+        # (11/16 사용자 A안) 3차선 직선 방향을 알고 있으면 (판단 켤 때 방향 0 = 출발 직선 기준) 기준 좌표 방향을 늘 이 값으로.
+        #   카메라 차선을 믿을 때도 방향만은 이 값 (옆 위치는 카메라). 차 방향이 이 값에서 three_lane_axis_max_deg 넘게
+        #   벗어나 있으면 (판단을 다른 데서 켰거나 다른 곳 LIMO) 안 쓰고 예전 방식. 시계방향 트랙: 3차선은 출발 직선의 반대 = 180
+        #   (실차 stop_run3: 3차선 끝 -175도, 진입 -131도 = 49도 틀어진 채 '그대로 씀' -> 트랙 밖)
+        'three_lane_axis_use': True,
+        'three_lane_axis_deg': 180.0,
+        'three_lane_axis_max_deg': 60.0,
         # (11/12 사용자 선택) 차 방향 기준일 때 옆 위치(d = 0)도 차 위치라 차가 비켜 있으면 세 차선이 다 밀림
         #   (pd_lane_run4: 11 cm). 차 앞 lat_snap_range 안에서 확실히 본 LIMO 가 lat_snap_min_items 대 이상,
         #   차선 가운데에서 비킨 값이 lat_snap_spread 안에 절반 넘게 모이면 그 평균만큼 한 번 옮김.
@@ -340,7 +504,7 @@ PARAM_DEFAULTS = {
         'robot_width': 0.30,
     },
     'cone': {
-        'speed': 0.25,
+        'speed': 0.30,             # (11/19 23:41 사용자) 0.35 -> 0.30. (11/19) 0.45 -> 0.35. (11/18) 0.25 -> 0.45: 대회장 콘 배치가 쉬움, 규정 미션 Time-out 15초 (comp_lap1 14.8초)
         'creep_speed': 0.10,
         'lookahead': 0.45,         # 게이트 중점을 이은 선 위 목표점 거리 [m]
         'curve_gain': 0.35,
@@ -365,7 +529,24 @@ PARAM_DEFAULTS = {
         'lookahead_short': 0.25,   # 후보: 짧게 보고 꽉 꺾어 도는 길 [m] (11/04, 0 = 안 씀)
         'lookahead_long': 0.60,    # 후보: 길게 보고 부드럽게 가는 길 [m] (0 = 안 씀)
         'w_lookahead': 0.1,        # 기본 lookahead 와 다른 만큼 벌점
-        'tight_speed': 0.15,       # 안 닿는 길이 없을 때 속도 [m/s] (멈추지 않고 덜 닿는 쪽으로. 0.05 는 기어가다 40초 넘김 - 11/04 녹화)
+        # (11/19 사용자: real_lap1 488.3·491.4초 콘 두 개씩 충돌) 안 닿는 길이 없을 때 고르는 법: 처음 닿기까지 멀리 가는 것 ->
+        #   닿기 전 여유 -> 평소 점수. false = 예전 (1 m 안 가장 큰 여유 - 먼 콘 하나에 다 닿아 동점이 많고 목록 첫 후보를 골랐음)
+        'tight_pick_far': True,
+        # (11/19 real_lap1) 라이다가 콘을 안 보내도 기억한 콘이 차 옆에 있으면 마지막 길(이 시간 안에 만든 것)로 계속. 0 = 끔
+        #   real_lap1 콘 배치 시뮬 48번 (지연 0.25 s, 라이다 빠짐): 기억으로 길만 -> 4·5번 콘 등 19번 닿음, + 이것 -> 2번
+        'mem_follow_sec': 0.6,     # [s]
+        # (11/19 real_lap1 시뮬) 명령 -> 실제 조향 지연 [s]. 굴려볼 때 처음 act_delay x speed 만큼은 지난 조향으로 감. 0 = 끔
+        'act_delay': 0.0,          # (시뮬에서 뚜렷한 차이 없음 -> 끔)
+        # (11/19) 고른 길의 여유가 이보다 작거나 다 닿으면 slow_speed 로 (그 동안만). 0 = 끔
+        'slow_margin': 0.0,        # [m]
+        'slow_speed': 0.25,        # [m/s]
+        # (11/19 real_lap1 시뮬) 길(게이트·한쪽 줄)을 이번 장에 보인 콘 대신 기억한 콘(지금 ROI 안)으로 만듦. false = 예전.
+        #   real_lap1 콘 배치 시뮬 48번: 안 닿음 4번 -> 15번, 가장 작은 여유 중간 -0.145 -> -0.011 m
+        'path_from_memory': True,
+        # (11/19 real_lap1) 게이트/한쪽 줄 방식을 바꾸면 이 시간은 그대로 (한쪽 줄이면 같은 쪽). 0 = 끔
+        'mode_hold_sec': 0.0,      # [s] (real_lap1 시뮬: 기억으로 길 만들면 효과 없음 -> 끔)
+        'tight_safe_dist': 0.5,    # [m] 이보다 멀리서 처음 닿는 후보끼리는 같게 보고 닿기 전 여유로 고름
+        'tight_speed': 0.30,       # (11/19 23:41 사용자) 0.35 -> 0.30 (= speed). (11/19) 0.45 -> 0.35. (11/18) 0.15 -> 0.45 = 감속 안 함 (comp_lap1: 안 닿았는데 절반을 이걸로 감). 안 닿는 길이 없을 때 속도 [m/s] (멈추지 않고 덜 닿는 쪽으로. 0.05 는 기어가다 40초 넘김 - 11/04 녹화)
         'w_offset': 1.0,           # 길을 옆으로 옮긴 만큼 벌점 (가운데 선호)
         'w_margin': 1.0,           # 콘과 여유 보너스 (margin_cap 까지만)
         'margin_cap': 0.10,
@@ -380,9 +561,26 @@ PARAM_DEFAULTS = {
         'side_max_step': 0.62,     # 같은 줄 다음 콘으로 볼 최대 거리 [m]
         'side_max_turn_deg': 60.0, # 같은 줄 다음 콘은 지금 줄 방향에서 이 각도 안 (건너편 콘은 거의 90도)
         'pass_margin': 0.10,       # 마지막 게이트 선을 앞바퀴가 이만큼 더 지날 때까지 구간을 안 끝냄 [m]
+        # (11/18 사용자) 콘 끝내기: 차 앞(x > end_ahead_x)에 남은 콘(보이는 것 + 기억)이 end_ahead_min 개 미만이
+        #   end_ahead_count 번 연속이면 끝. 콘을 end_min_cones 개 넘게 본 뒤부터. false = 예전 규칙만
+        'end_ahead_use': True,
+        'end_ahead_x': 0.15,       # 차 가운데 기준 [m] (앞바퀴 0.10 보다 5 cm 앞)
+        'end_ahead_min': 2,
+        'end_ahead_count': 3,
+        'end_one_x': 0.30,         # 남은 콘이 있으면 그 콘도 이 거리 안이어야 끝 (한쪽 줄을 못 볼 때 한 줄 일찍 끝나지 않게) [m]
+        'end_ahead_max_y': 0.7,    # (11/18 사용자) 남은 콘은 차에서 옆으로 이 안의 것만 셈 (벽 빼기, comp_lap1 녹화로 고름) [m]
+        'end_min_cones': 4,
+        # (11/20 E1) 라이다가 잘 보는 자리(차 앞 ghost_x_min~ghost_x_max, 옆 end_ahead_max_y 안)에 있는 기억 콘이 ghost_sec 초 동안
+        #   한 번도 다시 안 보이면 '앞 콘' 수와 기억으로 만드는 길에서 뺌 (벽 조각을 한 번 콘으로 받아 끝까지 남던 것). 0 = 끔
+        'ghost_sec': 0.0,
+        'ghost_x_min': 0.45,
+        'ghost_x_max': 1.5,
+        'hold_steer_zero': True,   # 콘이 안 보이는데 아직 안 끝낼 때 조향 0 (false = 예전처럼 마지막 조향 유지)
     },
     'parking': {
-        'search_speed': 0.15,
+        # (11/17 사용자) full_1117_1: 켜자마자 왼쪽 2 m 주차 표지판을 보고 PARKING -> 켠 자리에서 이 거리 전엔 무시 (켜고 끄기: ignore_start)
+        'ignore_start_distance': 4.5,
+        'search_speed': 0.4,       # (11/18 사용자) 0.15 -> 0.4. 시뮬: 회전 시작점 0.35 m 전에 칸 정함 (0.8 은 거의 0 이라 지나침)
         'final_speed': 0.08,
         'min_speed': 0.04,
         'turn_speed': 0.10,
@@ -394,6 +592,7 @@ PARAM_DEFAULTS = {
         'bay_d_min': -0.95,        # 윗줄 칸에 선 LIMO 만 보기 위한 범위 (기준 차선 중앙, 왼쪽 +) [m]
         'bay_d_max': -0.30,
         'park_depth': 0.57,        # 차선 중앙 -> 칸 깊이 가운데 (차선 반폭 0.25 + 선 0.02 + 칸 반 0.30) [m]
+        'depth_shift': 0.06,       # (11/18 사용자) 칸 가운데보다 이만큼 더 안쪽(차 앞쪽)에 섬 [m]. 0 = 칸 가운데
         # (11/10) 칸 깊이 목표 = LIMO 두 대 가운데. 차선 기준(park_depth)과 depth_max_diff 넘게 다르면 둘의 중간
         'limo_depth': True,
         'depth_max_diff': 0.15,    # LIMO 가 칸 안이면 칸 가운데서 최대 (0.6 - 0.322)/2 = 0.14 m 벗어남 [m]
@@ -403,7 +602,10 @@ PARAM_DEFAULTS = {
         'confirm_hits': 2,
         'gap_confirm': 3,
         'gap_match': 0.15,
-        'slow_distance': 0.15,     # 회전 시작점 이 거리 앞부터 final_speed 로 [m]
+        # (11/14) 모든 두 LIMO 쌍에서 칸 찾기 (빈칸 너머 아랫줄 LIMO·같은 LIMO 의 다른 조각이 끼어도 됨). false = 예전 바로 옆끼리만
+        'any_pair': True,
+        'slot_block_d': 0.15,      # (11/14) any_pair: 쌍 깊이에서 이 안에 칸 안쪽 물체가 있으면 그 칸은 찬 것 [m]
+        'slow_distance': 0.3,      # 회전 시작점 이 거리 앞부터 final_speed 로 [m] (11/18: search 0.4 라 0.15 -> 0.3)
         'overshoot_tolerance': 0.04,
         'heading_tolerance': 0.05, # -90도 에서 이 안이면 회전 끝 [rad]
         'k_heading': 1.5,
@@ -412,16 +614,172 @@ PARAM_DEFAULTS = {
         'stop_tolerance': 0.02,
         'search_timeout': 30.0,
         'search_distance': 6.0,
+        'back_search_distance': 3.0,   # (11/18 사용자) 끝까지 못 찾으면 멈춘 뒤 이만큼 곧게 후진하며 다시 찾음 [m] (0 = 예전처럼 바로 정지)
+        'back_search_max': 1,      # 후진하며 다시 찾기 횟수
+        'back_search_speed': 0.15,     # 그때 후진 속도 [m/s]
+        'back_search_before': 1.0,     # PARKING 들어온 자리보다 이만큼 넘게 뒤로는 안 감 [m]
+        'back_search_timeout': 30.0,   # 후진하며 찾기 최대 시간 [s]
+        'back_search_k_lat': 0.5,      # 후진하며 차선 가운데로 붙는 세기 [rad/m]
+        'back_search_clear': 1.2,      # 후진하며 본 격자 시작보다 이만큼 앞(뒤쪽)까지 오면 후진 멈추고 다시 앞으로 [m]
         'turn_timeout': 15.0,
         'align_timeout': 15.0,
+        # (11/18 사용자) 주최측 안내: 6칸 중 1칸만 빔, 위치 바뀔 수 있음 -> 라이다 원본으로 6칸 격자에서 빈칸 찾기
+        'grid_use': True,
+        'grid_lidar_x': 0.1025,     # 몸통 가운데 -> 라이다 [m] (LIMO laser_link)
+        'grid_lidar_yaw_deg': 0.0,
+        'grid_max_range': 2.6,      # 이 거리 안에서 맞은 점만 쌓음 [m]
+        'grid_near_range': 1.0,     # 확정 뒤 위치 다듬기는 이 거리 안에서 본 점만 (odom 거리 배율 오차가 본 거리만큼 커짐) [m]
+        'grid_decide_margin': 1.0,  # 가장 좋은 가설과 다른 칸 가설의 점수 차
+        'grid_target_free': 0.7,    # 목표 칸 가운데 넓은 곳 중 빔이 지나간 비율
+        'grid_align_tol': 0.13,     # 보이는 LIMO 가 다 칸 가운데에서 이 안 [m]
+        'grid_stable': 3,           # 같은 판단이 이만큼 연속이면 확정 (스캔 수)
+        'grid_limo_width': 0.22,
+        'grid_limo_length': 0.322,
+        'grid_end_score': 4.0,      # 격자를 이 점수 넘게 찾았는데
+        'grid_end_margin': 0.20,
+        'grid_depth_max_diff': 0.25,  # 칸 깊이: 1행 LIMO 앞면으로 잰 옆 어긋남을 이만큼까지 그대로 믿음 (넘으면 차선 기준과 중간) [m]
     },
     'debug': {
         'enabled': True,
     },
 }
 
+PARAM_DEFAULTS['white'] = {
+    # (11/16 사용자·차선 팀원) 흰 점선 노드 /perception/white_status (String JSON) 로 '실제로 몇 번 차선인지' 확인.
+    #   AVOID_STATIC 진입 때 가운데 차선이라는 건 가정일 뿐 (왼쪽 선을 따라 왼쪽 차선으로 들어와 있을 수 있음). white_lines.py, three_lane._ident_step
+    'use': True,               # false = 흰 점선 안 씀 (예전처럼 늘 가운데 차선에서 시작으로 봄)
+    'alive_sec': 1.0,
+    'max_age': 0.5,            # 영상 시각 t 가 이보다 오래됐으면 버림 [s]
+    'min_conf': 0.0,           # conf 가 이보다 낮은 쪽은 못 본 것으로 (팀원: 점수일 뿐 확률 아님 -> 실차 값 보고 정할 것)
+    'min_dash': 2,             # 점선 조각 수가 이보다 적은 쪽은 못 본 것으로
+    'min_offset': 0.03,        # 옆 거리가 이 범위 밖이면 버림 [m] (먼 쪽 점선 0.78 까지)
+    'max_offset': 0.95,
+    'axis_tol_deg': 30.0,      # 차 방향이 3차선 방향에서 이보다 벗어난 동안은 안 모음
+    'heading_tol_deg': 20.0,   # 점선 방향이 3차선 방향과 이보다 다르면 버림 (횡단보도·글씨)
+    'window_sec': 3.0,         # 이 시간 / 이 거리 안의 관측만
+    'window_dist': 1.0,
+    'pair_tol': 0.15,          # 양쪽 다 보일 때 왼쪽 + 오른쪽 = 차선 폭 +- 이 값 [m]
+    'lane_tol': 0.20,          # 차선 가운데에서 이만큼까지 어긋난 건 같은 차선으로 [m]
+    'min_votes': 3,            # 확정에 필요한 관측 수
+    'single_min_votes': 6,     # 한쪽만 보여서 '밀렸을 수도' 로 두는 데 필요한 관측 수
+    'ratio': 0.7,              # 전체 관측 중 이 비율 이상이 같은 말을 해야
+    'use_offset': True,        # 양쪽 다 봤으면 옆 위치도 그 값으로 맞춤
+    'max_fine': 0.15,          # 그렇게 맞추는 양의 한계 [m]
+    'pending_dist': 2.0,       # 진입 뒤 이 거리 / 시간 동안만 확인하고, 못 정하면 처음 가정 그대로 [m] [s]
+    'pending_sec': 10.0,
+    'limo_tol': 0.25,          # 라이다 LIMO 가 차선 가운데에서 이 안이면 그 차선에 놓인 것으로 [m]
+}
+PARAM_DEFAULTS['entry_hold'] = {
+    # (11/16 사용자) 3차선 입구 직진: 우회전을 끝내 차 방향이 3차선 방향(avoid_static.three_lane_axis_deg)에 들어오면,
+    #   넓어지는 구간에서 차선(왼쪽 선)을 따라가지 않고 방향만 잡고 곧게 간다 -> 들어오던 차선이 이어지는 가운데 차선으로.
+    #   차선 팀원: 넓어지면서 왼쪽 선을 따라 왼쪽 차선으로 들어가는 일이 있음. three_lane_axis_use 가 꺼져 있으면 안 함.
+    'enable': True,
+    'arm_deg': 45.0,           # 3차선 방향에서 이만큼 넘게 벗어나 있었어야 (= 코너 전) 다음에 한 번 함. 판단 켠 직후엔 바로 가능
+    'start_deg': 8.0,          # 3차선 방향에서 이 안으로 들어오면 시작. (11/19 사용자) 15 -> 8 (1118: 코너 덜 끝나 15도에서 시작)
+    'distance': 2.0,           # 이만큼 곧게 간 뒤 차선 따라가기로 [m] (그 전에 AVOID_STATIC 등으로 넘어가면 거기서 끝)
+    'abort_deg': 40.0,         # 도중에 이만큼 넘게 틀어지면 그만
+    'k_yaw': 1.5,              # 조향 = k_yaw x 방향 오차
+    'lane_blend': 0.0,         # 차선 보정을 섞는 비율 (0 = 방향만). (11/19) 1.0 + lane_max 시험 -> (11/19 오전 사용자) 0: 차선 노드가 입구에서 맨 오른쪽 차로 기준 값을 내서 (차선 팀원) 오른쪽으로 끌림. 차선 노드가 가운데 차로 기준이 되면 1.0
+    'lane_max': 0.1,           # (11/19) 차선 몫 한계 [rad 조향]. 0 = 한계 없음
+    'max_speed': 0.3,          # 이 동안 속도 상한 [m/s]
+}
+
+PARAM_DEFAULTS['ab_vote'] = {
+    # (11/19 사용자·YOLO 팀원) A/B 표지판 다수결. 1118 comp_lap14 127.4초: AVOID_STATIC 으로 크게 도는 중 A 를 받아 바로 확정 (실제는 B).
+    #   (1) 차가 max_turn_dps 넘게 도는 중엔 표를 안 세고 확정도 안 함 (AVOID_STATIC -> LEFT_A_RIGHT_B 도 안 넘어감)
+    #   (2) 최근 window 초 안 표가 min_frames 장 이상이고 한쪽이 min_ratio 이상이면 그쪽
+    #   (3) 표는 있는데 못 정했으면 3차선·갈림길 속도를 undecided_speed 까지 줄이고 더 봄.
+    #       표지판이 fallback_distance 안으로 오거나 못 정한 채 fallback_sec 지나면 갈림길에서 받은 표 전부의 다수 (같으면 마지막 것)
+    'use': True,
+    'window': 1.0,             # [s]
+    'min_frames': 5,
+    'min_ratio': 0.7,
+    'max_turn_dps': 15.0,      # [도/s]
+    'undecided_speed': 0.15,   # [m/s]
+    'fallback_distance': 0.8,  # [m] 표지판이 이 안이면 그때까지 표로 정함 (= left_a_right_b.trigger_distance)
+    'fallback_sec': 4.0,       # [s] LEFT_A_RIGHT_B 안에서 이만큼 못 정하면 그때까지 표로 정함
+    # (11/19 사용자·YOLO 팀원) A/B 표지판은 판단을 켠 뒤 AVOID_STATIC 이 한 번 시작된 뒤에만 받음 (1119 모델: 37초 서행·보행자 표지판을
+    #   B 0.88 로 봄). 중간(3차선 뒤)부터 켜서 시험할 땐 false. 판단 다시 켜면 처음부터
+    'after_static': True,
+    # (11/19 n1119) 표지판이 이 거리보다 멀면 표로 안 셈 (보였다는 것만 기억해 천천히 감). 1119 실차 모델이 B 표지판을 1.4 m 넘게
+    #   멀면 A 0.7~0.88 로 봄: comp_lap21·30·31 셋 다 실제 B 인데 1.9~2.2 m 에서 A 로 확정. 1.2 m 안 표만 세면 넷 다 맞음
+    #   (lap20 A: A 47 / B 0, lap21 B: A 0 / B 28, lap30 B: A 1 / B 6, lap31 B: A 0 / B 8). 0 = 거리 안 봄
+    'max_dist': 1.7,           # [m] (11/19 12:32 사용자 1.2 -> 12:58 YOLO 1121 + 노드 28 px 밖 버림(약 1.6 m) 와서 1.7 = YOLO 거르기와 같은 거리,
+                               #   YOLO 거르기가 꺼져도(ab_min_box_h 0) 먼 오인식 막음. 1121 n1119: 28 px 이상 lap20 A 6/B 0, lap21 B 20/A 0,
+                               #   lap30 B 14/A 0, lap31 B 13/A 1, 28 px 미만 lap30 A 43/B 9)
+    'far_slow_margin': 0.6,    # [m] 표지판이 max_dist + 이 안이면 (표로 안 세도) undecided_speed 로 줄여 1.2 m 안 표를 모음
+}
+
+PARAM_DEFAULTS['after_ab'] = {
+    # (11/19 사용자·차선 팀원) 갈림길(LEFT_A_RIGHT_B) 이 끝난 뒤 라바콘(AVOID_CONE) 전까지 (또는 max_distance m 갈 때까지):
+    #   차선 주행 속도 speed_cap 까지 (1118 comp_lap14 142~143초 0.37 m/s 로 C3 코너 들어감),
+    #   차선을 놓쳤는데 방향 값도 없으면 오른쪽으로 course_turn_deg 까지 돎 (코스상 다음 코너가 오른쪽, course_right)
+    'speed_cap': 0.3,          # [m/s]. 0 = 끔
+    'max_distance': 6.0,       # [m] 갈림길 끝난 자리에서 이만큼 (직선거리) 멀어지면 끝
+    'course_right': True,      # (사용자: 실차에서 이걸로 한 번이라도 문제 생기면 false)
+    'course_turn_deg': 90.0,
+    # (11/19 차선 팀원) 갈림길 끝 ~ 라바콘 전(또는 max_distance)엔 차선 노드에 '왼쪽 선만 따라가기' 를 보냄: /perception/lane_follow
+    #   'left:<값>' (왼쪽 선에서 이만큼 오른쪽을 가운데로), 5 Hz. 끝나면 'auto'. 길이 모인 뒤 조향 문제 (lap11 93.3~94초).
+    #   왼쪽 선이 안 보이면 차선 노드가 valid=false -> 차선 놓침 대응. 0 = 끔
+    'left_follow': 0.0,        # [m] (11/19 13:00 차선 팀원: 끔. 재생에서 valid 줄고 lap24 합류 뒤 코너에서 오른쪽 선을 왼쪽으로 잡음,
+                               #   리모 차선 노드는 이 기능 없는 race-1119 로 고정)
+}
+
+PARAM_DEFAULTS['after_cone'] = {
+    # (11/20 사용자 A안) 라바콘(AVOID_CONE) 이 끝난 뒤 차선 따라가기에서, 차선을 '찾을' 때까지(차선 방향 |found_head_deg| 안 +
+    #   확신도 found_conf 이상이 found_count 번) 오른쪽으로 돌아 다음 직선 방향(콘 구간 트랙 축 - turn_deg)을 맞추고 유지.
+    #   실차 n1119: 콘 끝나고 왼쪽을 본 채 나와 오른쪽 코너 차선이 조금만 보여 직진·옆 차선 (lap1 599·626, lap2, lap5 ...),
+    #   차선 팀원 lap11 은 23.3~25초에 초당 25도로 오른쪽으로 꺾어 성공. max_distance m 또는 max_sec 초 지나면 끝
+    'use': True,
+    'turn_deg': 90.0,          # 콘 구간 방향에서 오른쪽으로 [도]
+    'axis_max_deg': 20.0,      # 콘 구간 방향(중간값)이 트랙 축에서 이 안이면 트랙 축 기준, 아니면 콘 구간 방향 그대로 [도]
+    'found_head_deg': 15.0,
+    'found_conf': 0.5,
+    'found_count': 3,
+    'speed': 0.25,             # [m/s] (lap11 0.23)
+    'k_yaw': 1.5,              # 조향 = k_yaw x 방향 오차 (failsafe.head_k_yaw 와 같음, 12.6도 넘으면 끝까지)
+    'max_distance': 3.0,       # [m] 콘 끝난 자리에서 (직선거리)
+    'max_sec': 10.0,
+}
+
+PARAM_DEFAULTS['axis_auto'] = {
+    # (11/18 사용자) 트랙 방향 자동 보정. 대회장 comp_lap1: 카메라 차선 방향이 판단의 트랙 축(start_yaw_deg 기준 0/-90/180)과
+    #   한 바퀴 내내 +7~8도 차이 (판단 켤 때 차가 출발 직선과 비뚤게 놓임) -> 3차선 기준 좌표가 틀어져 바깥 노란선 위로 감.
+    #   차선 따라가기 중 직선에서 '차 방향 + 카메라 차선 각도' 를 모아 그 중간값만큼 트랙 축을 돌림 (start_yaw_deg 에 더하는 셈).
+    #   차 위치(odom_pose) 방향은 안 바꿈 -> 3차선·흰 점선·횡단보도·입구 직진이 쓰는 축만 바뀜.
+    'use': True,
+    'states': 'LANE_FOLLOWING,SLOW,BUMP',  # 이 상태에서만 모음 (미션 중엔 차선 노드가 다른 선을 볼 수 있음). BUMP 넣으면 comp_lap1 15초에 정해짐 (빼면 65초)
+    'min_confidence': 0.3,     # 카메라 차선 확신도
+    'two_lines_only': True,    # 양쪽 선을 다 본 값만 (한 선 추정은 안 씀)
+    'max_heading_deg': 15.0,   # 카메라 차선 각도가 이 안일 때만 (차가 차선과 거의 나란할 때)
+    'max_curvature': 0.5,      # [1/m] 곡선 구간 빼기
+    'max_rate_dps': 10.0,      # 차가 이보다 빨리 돌고 있으면 안 모음 [도/s]
+    'max_deg': 15.0,           # 보정 한계 (트랙 축에서 이만큼 넘게 다른 값은 버림) [도]
+    'window': 400,             # 최근 관측 수 (카메라 30 Hz 면 약 13초 분량)
+    'min_samples': 60,         # 이만큼 모여야 씀
+    'max_spread_deg': 4.0,     # 관측 사분위 폭(IQR)이 이 안일 때만 바꿈
+    'min_speed': 0.1,          # (11/19 사용자) /odom 속도가 이보다 느리면 안 모음 [m/s] (서 있을 때 출발 자세로 정해지지 않게). 0 = 예전
+}
+
+# (11/17 사용자) 판단 켠 자리에서 몇 m 가기 전엔 무시하는 이벤트 -> (거리 파라미터 그룹, 로그 이름). 켜고 끄기는 ignore_start
+START_IGNORE = {
+    'traffic_light': ('traffic_light', '신호등'),
+    'parking_sign': ('parking', '주차 표지판'),
+}
+
 # 파라미터 그룹 -> 노드 속성 이름 (다른 경우만)
 GROUP_ATTR = {'lane': 'lane_gains'}
+
+# (11/14) 켤 때만 읽는 값. 실행 중 ros2 param set 으로 바꾸면 거절 (판단을 다시 켜야 적용).
+#   나머지는 매번 dict 에서 읽어서 바로 적용 (미션 시작 때 복사해 두는 값은 다음 미션부터).
+INIT_ONLY_PARAMS = {
+    'control_rate',            # 제어 타이머 주기
+    'cmd_output', 'ackermann_topic',          # 명령 publisher 종류·토픽
+    'odom_heading_source', 'imu_topic',       # /imu 구독 여부·토픽
+    'perception.stale_sec', 'yolo.hold_sec',  # 인지 버퍼 만들 때 씀
+    'perception.debounce_count',              # Debouncer 만들 때 씀
+    'axis_auto.window',                       # (11/18) 관측 모음 크기
+}
 
 
 # ----------------------------------------------------------------------
@@ -542,12 +900,32 @@ class MissionSupervisor(Node):
         stale = self.perception['stale_sec']
         self.buf = dict((k, Buffer(stale)) for k in self.BUFFER_KEYS)
         self.yaw_hist = collections.deque(maxlen=80)   # (수신 시각, yaw) - 회전 속도 계산용 (11/12)
+        self.axis_offset = 0.0                    # (11/18) 트랙 방향 자동 보정 [rad] (트랙 축 = 설정 축 + 이 값)
+        self.axis_samples = collections.deque(maxlen=int(self.axis_auto['window']))
+        self.axis_logged = None
         self._defer_log = None
+        self.heading_handoff = None     # (11/16) SLOW_ZONE -> CROSSWALK_STOP 으로 넘기는 고정 헤딩 (yaw, 시각)
         for k in self.YOLO_KEYS:
             self.buf[k].stale_sec = max(stale, self.yolo['hold_sec'])
         self._yolo_streak = {}
+        self.ab_last_seen = -1e9                            # (11/19) 마지막으로 A/B 표지판 본 시각 (멀어서 안 센 것도)
+        self.ab_votes = collections.deque(maxlen=200)       # (11/19) (시각, 'A'/'B') 다수결용
+        self.static_started = False     # (11/19) 판단 켠 뒤 AVOID_STATIC 이 시작된 적 있는지 (A/B 는 그 뒤에만)
+        self.after_ab_at = None         # (11/19) 갈림길 끝난 (시각, x, y). 라바콘 들어가면 None
+        self.after_cone_at = None       # (11/20 A안) 라바콘 끝난 (시각, x, y, 목표 방향)
+        self._ab_before_logged = False
+        self.ab_votes_all = collections.deque(maxlen=2000)
         self.stopline = StopLineTracker(self)     # 정지선 거리 추정 (State 들이 공유)
         self.three_lane = ThreeLanePlanner(self)  # 3차선 좌표·차선 번호 (AVOID_STATIC -> LEFT_A_RIGHT_B)
+        self.white_lines = WhiteLines(self)       # (11/16) 흰 점선 관측 모음 (몇 번 차선인지 확인용)
+        self.entry_armed = True                   # (11/16) 3차선 입구 직진을 다음에 할 수 있는지
+        self.entry_done = False                   # (11/20 F1) 3차선·갈림길이 한 번 시작됐으면 True -> 3차선 입구 직진 안 함 (리셋 때 False)
+        self.start_xy = None                      # (11/17) 판단 켠 자리 (출발 쪽 신호등·주차 표지판 무시용, 지금은 기록만)
+        self.start_t = None
+        self.travelled_total = 0.0                # (11/17 full_1117_2) 켠 뒤 /odom 으로 실제 간 거리 [m]
+        self._travel_last = None
+        self.start_ignore_done = set()            # 무시가 끝난 이벤트 (한 번 끝나면 판단을 다시 켤 때까지 그대로)
+        self.start_ignore_logged = set()
 
         # --- 구독 ---
         store = self._store
@@ -561,6 +939,7 @@ class MissionSupervisor(Node):
         sub(ObstacleArray, '/perception/obstacles',
             store('obstacles', lambda m: list(m.obstacles)), 10)
         sub(Odometry, '/odom', self._cb_odom, 10)
+        sub(String, '/perception/white_status', self._cb_white, 10)
         self._imu_yaw = None       # IMU 방향 (판단 켤 때 0) [rad]
         self._imu_yaw0 = None
         self._dr = None            # odom 속도 + IMU 방향 적분 [x, y, yaw, stamp]
@@ -568,7 +947,8 @@ class MissionSupervisor(Node):
         if self.odom_heading_source == 'imu':
             from sensor_msgs.msg import Imu
             sub(Imu, self.imu_topic, self._cb_imu, 10)
-            self.get_logger().info('차 위치: /odom 속도 + %s 방향 (판단 켤 때 방향 0)' % self.imu_topic)
+            self.get_logger().info('차 위치: /odom 속도 + %s 방향 (판단 켤 때 방향 %.0f도)'
+                                   % (self.imu_topic, self.start_yaw_deg))
         elif self.odom_heading_source != 'odom':
             self.get_logger().warn('odom_heading_source=%r 모름 - /odom 그대로 씀' % self.odom_heading_source)
             self.odom_heading_source = 'odom'
@@ -581,6 +961,10 @@ class MissionSupervisor(Node):
         self._lock = threading.Lock()
 
         self.create_timer(0.5, self._publish_state_tick)
+        self.lane_follow_pub = self.create_publisher(String, '/perception/lane_follow', 10)   # (11/19) 차선 노드 왼쪽 선만 모드
+        self._lf_on = False
+        self._lf_auto_left = 0
+        self.create_timer(0.2, self._lane_follow_tick)
         self.get_logger().info('mission_supervisor 준비 완료 (%.1f Hz)'
                                % self.control_rate)
 
@@ -601,6 +985,47 @@ class MissionSupervisor(Node):
                     setattr(self, key, value)
 
         self.control_period = 1.0 / self.control_rate
+        # (11/14) 실행 중 ros2 param set 반영 (선언 뒤에 등록해야 선언 때 안 불림)
+        self.add_on_set_parameters_callback(self._on_set_params)
+
+    def _check_params(self, params):
+        """바꿀 수 있는지만 봄. 문제 있으면 이유 글, 없으면 None."""
+        for p in params:
+            group, _, key = p.name.rpartition('.')
+            items = PARAM_DEFAULTS.get(group)
+            if items is None or key not in items:
+                return '판단에 없는 파라미터: %s' % p.name
+            if p.name in INIT_ONLY_PARAMS:
+                return '%s 는 켤 때만 읽음 - 판단을 다시 켜야 적용' % p.name
+            default = items[key]
+            try:
+                if isinstance(default, bool) and not isinstance(p.value, bool):
+                    raise ValueError
+                type(default)(p.value)
+            except (TypeError, ValueError):
+                return '%s: %s 값이어야 함 (예: 3 이 아니라 3.0)' % (p.name, type(default).__name__)
+        return None
+
+    def _on_set_params(self, params):
+        """(11/14) ros2 param set /mission_supervisor lane.pd_kp 3.0 같은 걸 실행 중 바로 반영.
+        전부 바꿀 수 있을 때만 한꺼번에 바꿈. 켤 때만 읽는 값(INIT_ONLY_PARAMS)·없는 이름·틀린 형식은 거절."""
+        from rcl_interfaces.msg import SetParametersResult
+        why = self._check_params(params)
+        if why is not None:
+            self.get_logger().warn('파라미터 안 바꿈: %s' % why)
+            return SetParametersResult(successful=False, reason=why)
+        for p in params:
+            group, _, key = p.name.rpartition('.')
+            value = type(PARAM_DEFAULTS[group][key])(p.value)
+            if group:
+                d = getattr(self, GROUP_ATTR.get(group, group))
+                old = d.get(key)
+                d[key] = value
+            else:
+                old = getattr(self, key, None)
+                setattr(self, key, value)
+            self.get_logger().info('파라미터 바뀜: %s %s -> %s' % (p.name, old, value))
+        return SetParametersResult(successful=True)
 
     # ------------------------------------------------------------------
     # 콜백
@@ -610,8 +1035,9 @@ class MissionSupervisor(Node):
         yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         if self._imu_yaw0 is None:
             self._imu_yaw0 = yaw
-            self.get_logger().info('%s 들어옴 - 지금 방향을 0 으로 하고 위치 계산 시작' % self.imu_topic)
-        d = yaw - self._imu_yaw0
+            self.get_logger().info('%s 들어옴 - 지금 방향을 %.0f도(start_yaw_deg)로 하고 위치 계산 시작'
+                                   % (self.imu_topic, self.start_yaw_deg))   # (11/17) 예전 글은 늘 '0' 이라 헷갈림
+        d = yaw - self._imu_yaw0 + math.radians(self.start_yaw_deg)   # (11/16) 켤 때 방향 = start_yaw_deg
         self._imu_yaw = math.atan2(math.sin(d), math.cos(d))
 
     def _dead_reckon(self, msg):
@@ -638,12 +1064,27 @@ class MissionSupervisor(Node):
 
     def _cb_odom(self, msg):
         self._odom_raw = _pose_from_odom(msg)
+        self.odom_speed = float(msg.twist.twist.linear.x)     # (11/19) 축 보정은 움직일 때만
+        # (11/17 full_1117_2) 켠 뒤 실제로 간 거리 (출발 쪽 무시용). 직선거리로 재면 한 바퀴 돌아 켠 자리 근처에 오면
+        #   다시 '출발 직후' 가 돼서 마지막 주차 표지판을 무시했음
+        raw = self._odom_raw
+        if self._travel_last is not None:
+            step = math.hypot(raw[0] - self._travel_last[0], raw[1] - self._travel_last[1])
+            if step < 0.5:                          # odom 리셋·튐은 안 셈
+                self.travelled_total += step
+        self._travel_last = (raw[0], raw[1])
         if self.odom_heading_source == 'imu':
             pose = self._dead_reckon(msg)
             if pose is None:
                 return
         else:
             pose = _pose_from_odom(msg)
+            if self.start_yaw_deg:
+                # (11/16) /odom 을 start_yaw_deg 만큼 돌려서 씀 (켤 때 방향 = start_yaw_deg)
+                a = math.radians(self.start_yaw_deg)
+                c, s = math.cos(a), math.sin(a)
+                pose = (c * pose[0] - s * pose[1], s * pose[0] + c * pose[1],
+                        math.atan2(math.sin(pose[2] + a), math.cos(pose[2] + a)))
         off = self.odom_center_offset_x
         if off:
             # (11/13) odom 점(WeGo 아커만: 뒷바퀴 축) -> 판단 기준점(몸통 가운데)
@@ -651,6 +1092,75 @@ class MissionSupervisor(Node):
         now = self.clock_sec()
         self.buf['odom'].set(pose, now)
         self.yaw_hist.append((now, pose[2]))
+
+    def _axis_learn(self, msg, now):
+        """(11/18) 트랙 방향 자동 보정: 직선에서 '차 방향 + 카메라 차선 각도' 와 가장 가까운 설정 축의 차이를 모아 중간값을 axis_offset 으로."""
+        cfg = self.axis_auto
+        if not cfg['use']:
+            return
+        states = [x.strip() for x in str(cfg['states']).split(',') if x.strip()]
+        if self.current_label not in states:
+            return
+        if cfg['two_lines_only'] and bool(msg.single_lane_estimated):
+            return
+        if float(msg.confidence) < cfg['min_confidence']:
+            return
+        hd = float(msg.heading_error_rad)
+        if abs(hd) > math.radians(cfg['max_heading_deg']) or abs(float(msg.curvature)) > cfg['max_curvature']:
+            return
+        pose = self._latest('odom')
+        rate = self.turn_rate(now)
+        if pose is None or rate is None or abs(rate) > math.radians(cfg['max_rate_dps']):
+            return
+        if abs(getattr(self, 'odom_speed', 0.0)) < cfg['min_speed']:
+            return      # (11/19 사용자) 서 있을 땐 안 모음 (1118: 켜고 2~3초 만에 출발 자세 하나로 정해짐, 녹화마다 -5.5~+5.3도)
+        lane = pose[2] + hd
+        ref = math.radians(self.avoid_static['axis_ref_deg'])
+        rel = math.atan2(math.sin(lane - ref), math.cos(lane - ref))
+        base = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
+        dev = math.atan2(math.sin(lane - base), math.cos(lane - base))
+        if abs(dev) > math.radians(cfg['max_deg']):
+            return
+        self.axis_samples.append(dev)
+        n = len(self.axis_samples)
+        if n < cfg['min_samples']:
+            return
+        vals = sorted(self.axis_samples)
+        med = vals[n // 2]
+        iqr = vals[(3 * n) // 4] - vals[n // 4]
+        self.dbg('axis/spread_deg', math.degrees(iqr))
+        if iqr > math.radians(cfg['max_spread_deg']):
+            return
+        self.axis_offset = med
+        self.dbg('axis/offset_deg', math.degrees(med))
+        if self.axis_logged is None or abs(med - self.axis_logged) >= math.radians(1.0):
+            self.get_logger().info('[축 보정] 카메라 차선 방향이 트랙 축에서 %+.1f도 (관측 %d개, 폭 %.1f도) - 트랙 축을 그만큼 돌려 씀'
+                                   % (math.degrees(med), n, math.degrees(iqr)))
+            self.axis_logged = med
+
+    def axis_rad(self, deg):
+        """(11/18) 설정 축 [도] + 자동 보정 -> [rad] (-pi~pi)."""
+        a = math.radians(deg) + self.axis_offset
+        return math.atan2(math.sin(a), math.cos(a))
+
+    def known_lane_axis(self, yaw):
+        """(11/16 A안) 3차선 직선 방향을 쓸 수 있으면 (방향, 차 방향 - 그 방향) [rad], 아니면 None."""
+        cfg = self.avoid_static
+        if not cfg['three_lane_axis_use']:
+            return None
+        axis = self.axis_rad(cfg['three_lane_axis_deg'])
+        err = math.atan2(math.sin(yaw - axis), math.cos(yaw - axis))
+        if abs(err) > math.radians(cfg['three_lane_axis_max_deg']):
+            return None
+        return axis, err
+
+    def track_axis(self, yaw):
+        """(11/16) yaw 에서 가장 가까운 트랙 축(avoid_static.axis_ref_deg + 90도 단위, + 자동 보정)과 그 차이 (축, 차이) [rad]."""
+        ref = self.axis_rad(self.avoid_static['axis_ref_deg'])
+        rel = math.atan2(math.sin(yaw - ref), math.cos(yaw - ref))
+        axis = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
+        axis = math.atan2(math.sin(axis), math.cos(axis))
+        return axis, math.atan2(math.sin(yaw - axis), math.cos(yaw - axis))
 
     def turn_rate(self, now, window=0.4):
         """odom 으로 구한 최근 window 초 회전 속도 [rad/s] (왼쪽 +). 기록이 모자라면 None."""
@@ -692,6 +1202,9 @@ class MissionSupervisor(Node):
         return x_m - self.last_v * age, age
 
     def _cb_lane(self, msg):
+        if msg.valid and float(msg.confidence) < self.lane_gains['min_confidence']:
+            self.dbg('lane/low_conf', float(msg.confidence))
+            return                                # (11/14) 확신도 낮은 값은 버리고 직전 값 유지
         if msg.valid:
             now = self.clock_sec()
             stamp = _stamp_sec(msg.header)
@@ -701,14 +1214,26 @@ class MissionSupervisor(Node):
                                   float(msg.heading_error_rad),
                                   float(msg.confidence), stamp,
                                   bool(msg.single_lane_estimated)), now)
+            self._axis_learn(msg, now)
         else:
             self.buf['lane'].value = None        # 차선 유실 -> 페일세이프
+
+    def _cb_white(self, msg):
+        """(11/16) 차선 팀원 흰 점선 노드. 관측만 모아 두고, 쓰는 건 3차선 진입 뒤 (three_lane._ident_step)."""
+        if not self.white['use']:
+            return
+        got = self.white_lines.on_message(msg.data, self.clock_sec(), self.odom_pose())
+        if got is not None:
+            self.dbg('white/left', -1.0 if got[0] is None else got[0])
+            self.dbg('white/right', -1.0 if got[1] is None else got[1])
 
     def _cb_reset(self, msg):
         if msg.data:
             with self._lock:
                 self._reset_flag = True
             self.lockout.clear()
+            self.entry_armed = True
+            self.entry_done = False
             self.get_logger().warn('외부 리셋 요청 수신')
 
     def _cb_mission_objects(self, msg):
@@ -717,24 +1242,38 @@ class MissionSupervisor(Node):
         rng = self.yolo['event_range']
         ped_rng = self.yolo['pedestrian_range']
 
+        # (11/18 주최측 공지) 방지턱 앞 표지판 = 서행 표지판 -> SLOW 를 안 쓰면 서행 표지판을 방지턱 표지판처럼 (BUMP 진입·끝 거리)
+        slow_as_bump = bool(self.bump.get('slow_sign', False)) and not self.slow['use']
         best = {}                                    # 클래스별 가장 확실한 1개
         for o in msg.objects:
             if not self._yolo_lateral_ok(o):
                 continue                             # 옆 길 표지판 (11/05)
-            prev = best.get(o.class_id)
+            cid = o.class_id
+            if slow_as_bump and cid == MissionObject.SLOW_SIGN:
+                cid = MissionObject.BUMP_SIGN
+            prev = best.get(cid)
             if prev is None or o.confidence > prev.confidence:
-                best[o.class_id] = o
+                best[cid] = o
 
         st = self.avoid_static
+        x_off = float(self.yolo['x_offset'])
+
+        def X(o):
+            # (11/16) YOLO 기준점 -> 판단 기준점(몸통 가운데)
+            return float(o.x_m) + x_off
 
         def near(o):
             if o.class_id == MissionObject.LIMO:
                 # 진행 경로 앞에 있는 LIMO 만 (주차 구역처럼 옆에 선 LIMO 는 무시)
-                return (o.position_valid and o.x_m <= st['yolo_range']
+                return (o.position_valid and X(o) <= st['yolo_range']
                         and abs(o.y_m) <= st['trigger_half_width'])
             # 위치를 못 구했으면 거리 조건 없이 인정 (가까워서 화면 밖일 수 있음)
             limit = ped_rng if o.class_id == MissionObject.PEDESTRIAN_SIGN else rng
-            return (not o.position_valid) or o.x_m <= limit
+            if o.class_id == MissionObject.PARKING_SIGN and self.yolo['parking_range'] > 0.0:
+                limit = self.yolo['parking_range']      # (11/19) P 는 가까이서만
+            if o.class_id == MissionObject.SLOW_SIGN and self.yolo['slow_range'] > 0.0:
+                limit = self.yolo['slow_range']         # (11/19 오전) 서행 표지판도 가까이서만
+            return (not o.position_valid) or X(o) <= limit
 
         # 이번 프레임에 보이는 이벤트들 -> 연속 프레임 수 갱신
         seen = set()
@@ -742,6 +1281,8 @@ class MissionSupervisor(Node):
             name = YOLO_EVENT.get(cls)
             if cls == MissionObject.LIMO:
                 continue                         # LIMO 는 여러 대 중 하나라도 경로 앞이면 (아래)
+            if cls == MissionObject.SLOW_SIGN and not self.slow['use']:
+                continue                         # (11/18 사용자) 서행 표지판 안 씀
             if name is not None and near(o):
                 seen.add(name)
         if any(o.class_id == MissionObject.LIMO and near(o) for o in msg.objects):
@@ -764,27 +1305,26 @@ class MissionSupervisor(Node):
         # 위치를 못 구한 프레임(가까워서 박스 아래가 화면 밖 등)은 버리고, 판단이 odom 으로 이어서 추정한다.
         cw = best.get(MissionObject.CROSSWALK)
         if cw is not None and cw.position_valid:
-            line_x = float(cw.x_m) - self.yolo['crosswalk_to_stopline']
+            trust = float(self.yolo['crosswalk_trust_x'])
+            close = trust > 0.0 and float(cw.x_m) < trust   # (11/16) 가까운 측정 = 덜 정확
+            line_x = X(cw) - self.yolo['crosswalk_to_stopline']
             dist, age = self._latency_compensated(line_x, msg.header, now)
-            self.buf['stopline'].set(dist, now)
+            self.buf['stopline'].set((dist, close), now)
             self.dbg('stopline/age', age)
 
         for cls, key in ((MissionObject.PEDESTRIAN_SIGN, 'ped_dist'),
                          (MissionObject.SLOW_GUIDE_LINE, 'slowline_dist')):
             o = best.get(cls)
             if o is not None and o.position_valid:
-                dist, _ = self._latency_compensated(float(o.x_m), msg.header, now)
+                dist, _ = self._latency_compensated(X(o), msg.header, now)
                 self.buf[key].set(dist, now)
 
         # 방지턱·서행 표지판까지 거리 -> BUMP 가 서행을 끝낼 곳을 정할 때 씀 (11/05).
         # 옆으로 먼 검출은 위 _yolo_lateral_ok 에서 이미 빠짐 (lane_yolo_run1: 왼쪽 2.2 m 오검출 1번).
-        # 둘 다 보이면 먼 쪽 (서행을 더 길게 = 안전한 쪽)
-        bump_signs = [o for o in (best.get(MissionObject.BUMP_SIGN),
-                                  best.get(MissionObject.SLOW_SIGN))
-                      if o is not None and o.position_valid]
-        if bump_signs:
-            far = max(bump_signs, key=lambda o: o.x_m)
-            dist, _ = self._latency_compensated(float(far.x_m), msg.header, now)
+        # (11/17 사용자) 방지턱 표지판만. 서행 표지판은 이제 SLOW 라 BUMP 끝을 늘리지 않음 (예전: 둘 다 보면 먼 쪽)
+        bs = best.get(MissionObject.BUMP_SIGN)
+        if bs is not None and bs.position_valid:
+            dist, _ = self._latency_compensated(X(bs), msg.header, now)
             self.buf['bump_dist'].set(dist, now)
 
         light = best.get(MissionObject.TRAFFIC_LIGHT)
@@ -797,9 +1337,11 @@ class MissionSupervisor(Node):
             sign = max(signs, key=lambda o: o.confidence)
             self.buf['marker_type'].set(
                 'A' if sign.class_id == MissionObject.SIGN_A else 'B', now)
+            dist = None
             if sign.position_valid:
-                dist, _ = self._latency_compensated(float(sign.x_m), msg.header, now)
+                dist, _ = self._latency_compensated(X(sign), msg.header, now)
                 self.buf['marker_dist'].set(dist, now)
+            self._ab_add_vote('A' if sign.class_id == MissionObject.SIGN_A else 'B', now, dist)
 
         stamp = _stamp_sec(msg.header)
         self.dbg('yolo/age', max(0.0, now - stamp) if stamp > 0.0 else 0.0)
@@ -855,7 +1397,7 @@ class MissionSupervisor(Node):
 
     def _publish_pose_dbg(self):
         """(11/13) 실차 확인용, 0.5 초마다. ros2 topic echo /supervisor/debug/pose
-        판단이 쓰는 차 위치(몸통 가운데, 판단 켤 때 방향 0)와 비교용 /odom 그대로(드라이버 켤 때 0)를 한 줄 글로.
+        판단이 쓰는 차 위치(몸통 가운데, 판단 켤 때 방향 = start_yaw_deg)와 비교용 /odom 그대로(드라이버 켤 때 0, start_yaw_deg 안 씀)를 한 줄 글로.
         숫자만은 pose/x, pose/y, pose/yaw_deg (rqt_plot 용)."""
         if not self.debug['enabled']:
             return
@@ -871,7 +1413,7 @@ class MissionSupervisor(Node):
             self.dbg('pose', '위치가 오래됨 (/odom 끊김?)')
             return
         x, y, yaw = pose
-        self.dbg('pose', 'x %+.2f  y %+.2f  방향 %+.1f도 (%s) | /odom 그대로: x %+.2f  y %+.2f  방향 %+.1f도'
+        self.dbg('pose', 'x %+.2f  y %+.2f  방향 %+.1f도 (%s, 판단이 씀) | 참고 /odom 그대로 (드라이버 기준, 켤 때 0): x %+.2f  y %+.2f  방향 %+.1f도'
                  % (x, y, math.degrees(yaw), self.odom_heading_source,
                     raw[0], raw[1], math.degrees(raw[2])))
         self.dbg('pose/x', x)
@@ -938,6 +1480,17 @@ class MissionSupervisor(Node):
         path = self._path_event(now, quiet=allowed is not None)
         if path is not None and path not in found:
             found.append(path)
+        self._note_start(now)
+        for ev in START_IGNORE:
+            if ev in found and self._start_ignored(ev, now):
+                found.remove(ev)
+        if 'sign_ab' in found and self.ab_vote['after_static'] and not self.static_started:
+            # (11/19 사용자·YOLO 팀원) A/B 는 AVOID_STATIC 이 한 번 시작된 뒤에만 (지그재그·보행자 구간 가짜 B 로 갈림길 진입 막음)
+            found.remove('sign_ab')
+            self.dbg('ab/before_static', 1.0)
+            if not self._ab_before_logged:
+                self._ab_before_logged = True
+                self.get_logger().info('[A/B] AVOID_STATIC 전이라 A/B 표지판 무시 (ab_vote.after_static, 중간부터 시험할 땐 false)')
         if allowed is not None:
             found = [n for n in found if EVENT_TO_OUTCOME.get(n) in allowed]
         if skip_locked:
@@ -948,6 +1501,41 @@ class MissionSupervisor(Node):
             if name in found:
                 return name
         return found[0]
+
+    def _note_start(self, now):
+        """판단 켠 자리·시각을 기억 (표지판이 처음 보인 자리가 아니라). 매 주기 merged_event 에서 부름."""
+        if self.start_t is None:
+            self.start_t = now
+        if self.start_xy is None:
+            pose = self.odom_pose()
+            if pose is not None:
+                self.start_xy = (pose[0], pose[1])
+
+    def _start_ignored(self, ev, now):
+        """(11/17 사용자) 판단 켠 자리에서 그 미션의 ignore_start_distance 를 가기 전이면 True (그 이벤트 무시).
+        출발선 옆 길 신호등 (신호등 미션은 출발 방향과 같은 곳), 출발 쪽 주차 표지판 (full_1117_1: 켜자마자 PARKING)."""
+        if not self.ignore_start or ev in self.start_ignore_done:
+            return False
+        group, name = START_IGNORE[ev]
+        dist = getattr(self, group)['ignore_start_distance']
+        if self._travel_last is not None:
+            # (11/17 full_1117_2) 켠 자리에서 직선거리가 아니라 실제로 간 거리. 한 바퀴 돌아 켠 자리 근처에 와도 다시 안 켜짐
+            gone = self.travelled_total
+            if gone >= dist:
+                self.start_ignore_done.add(ev)
+                return False
+            what = '켠 뒤 %.1fm 감' % gone
+        else:
+            if now - self.start_t >= self.ignore_start_max_sec:
+                self.start_ignore_done.add(ev)
+                return False
+            what = 'odom 없음, 켠 뒤 %.0f초' % (now - self.start_t)
+        if ev not in self.start_ignore_logged:
+            self.start_ignore_logged.add(ev)
+            self.get_logger().info('[출발] 출발 쪽 %s 무시 (%s, %.1fm 가기 전까지. 끄려면 ignore_start false)'
+                                   % (name, what, dist))
+        self.dbg('start_ignored/' + ev, 1.0)
+        return True
 
     def _path_event(self, now, quiet=False):
         """라이다 장애물이 진행 경로 앞에 있으면 'limo' (AVOID_STATIC 진입용).
@@ -976,7 +1564,40 @@ class MissionSupervisor(Node):
                 self.get_logger().info('[AVOID_STATIC] 코너 도는 중 (초당 %.0f도) - 진입 미룸 (앞 장애물 %.2fm)'
                                        % (math.degrees(abs(rate)), near))
             return None
+        why = self._axis_defer(now, near)
+        if why is not None:
+            self.dbg('avoid/deferred_axis', near)
+            if not quiet and (self._defer_log is None or now - self._defer_log > 1.0):
+                self._defer_log = now
+                self.get_logger().info('[AVOID_STATIC] %s - 진입 미룸 (앞 장애물 %.2fm)' % (why, near))
+            return None
         return 'limo'
+
+    def _axis_defer(self, now, near):
+        """(11/14) 카메라 차선을 기준 좌표로 못 쓰는데 차가 트랙 축에서 많이 틀어져 있으면 미룰 이유 글, 아니면 None."""
+        cfg = self.avoid_static
+        lim = cfg['defer_axis_deg']
+        if lim <= 0.0 or not cfg['axis_snap'] or near <= cfg['defer_min_distance']:
+            return None
+        lane, _ = self.lane_for_frame(now)
+        if lane is not None:
+            return None                       # 카메라로 기준 좌표를 잡을 수 있음
+        pose = self._latest('odom')
+        if pose is None:
+            return None
+        known = self.known_lane_axis(pose[2])     # (11/16 A안) 3차선 방향을 알면 그 방향 기준
+        if known is not None:
+            err = known[1]
+        else:
+            ref = self.axis_rad(cfg['axis_ref_deg'])
+            rel = math.atan2(math.sin(pose[2] - ref), math.cos(pose[2] - ref))
+            axis = ref + round(rel / (math.pi / 2.0)) * (math.pi / 2.0)
+            err = math.atan2(math.sin(pose[2] - axis), math.cos(pose[2] - axis))
+        if abs(err) <= math.radians(lim) or abs(err) > math.radians(cfg['axis_snap_max_deg']):
+            # 거의 맞음, 또는 많이 틀어짐 (차선 추종이 엉뚱한 선에 붙어 안 도는 중일 수 있음 -> 기다려도 안 맞음, stop_run3)
+            return None
+        return '카메라 차선 못 씀 + %s에서 %.0f도 틀어짐' % ('3차선 방향' if known is not None else '트랙 축',
+                                                    math.degrees(abs(err)))
 
     def _locked(self, event, now):
         outcome = EVENT_TO_OUTCOME.get(event)
@@ -1010,10 +1631,11 @@ class MissionSupervisor(Node):
 
     def stopline_distance(self):
         """base_link -> 정지선 앞쪽 가장자리 거리 [m] (지연 보정됨) 또는 None."""
-        return self._latest('stopline')
+        v = self._latest('stopline')
+        return v[0] if isinstance(v, tuple) else v
 
     def stopline_measurement(self):
-        """(거리, 수신 시각) 또는 None. 같은 측정을 두 번 쓰지 않게 시각도 준다."""
+        """((거리, 가까운 측정인지), 수신 시각) 또는 None. 같은 측정을 두 번 쓰지 않게 시각도 준다."""
         return self.buf['stopline'].get_with_stamp(self.clock_sec())
 
     def slow_line_distance(self):
@@ -1045,6 +1667,155 @@ class MissionSupervisor(Node):
     def marker_distance(self):
         return self._latest('marker_dist')
 
+    # ---- (11/19 사용자·차선 팀원) 갈림길 뒤 ~ 라바콘 전 ----
+    def mark_after_ab(self, now):
+        pose = self.odom_pose()
+        self.after_ab_at = (now, pose[0], pose[1]) if pose is not None else (now, None, None)
+
+    def _lane_follow_tick(self):
+        """(11/19 차선 팀원) 갈림길 뒤면 'left:<값>' 를 5 Hz 로, 끝나면 'auto' 3번 (차선 노드는 1초 안 오면 auto)."""
+        val = float(self.after_ab.get('left_follow', 0.0))
+        on = val > 0.0 and self.after_ab_active()
+        m = String()
+        if on:
+            m.data = 'left:%.2f' % val
+            self.lane_follow_pub.publish(m)
+            if not self._lf_on:
+                self.get_logger().info('[A/B 뒤] 차선 노드에 왼쪽 선만 따라가기 (%s)' % m.data)
+            self._lf_on = True
+            self._lf_auto_left = 3
+        elif self._lf_auto_left > 0:
+            m.data = 'auto'
+            self.lane_follow_pub.publish(m)
+            if self._lf_on:
+                self.get_logger().info('[A/B 뒤] 차선 노드 왼쪽 선만 끝 - auto')
+            self._lf_on = False
+            self._lf_auto_left -= 1
+        self.dbg('lane/left_follow', 1.0 if on else 0.0)
+
+    def after_ab_active(self):
+        if self.after_ab_at is None:
+            return False
+        _, x0, y0 = self.after_ab_at
+        pose = self.odom_pose()
+        if x0 is not None and pose is not None and math.hypot(pose[0] - x0, pose[1] - y0) > self.after_ab['max_distance']:
+            self.after_ab_at = None
+            self.get_logger().info('[A/B 뒤] %.1f m 지남 - 속도 상한·오른쪽 대비 끝' % self.after_ab['max_distance'])
+            return False
+        return True
+
+    # ---- (11/20 사용자 A안) 라바콘 뒤 오른쪽 코너 ----
+    def mark_after_cone(self, now, corridor_yaw):
+        """AVOID_CONE 이 끝날 때. corridor_yaw = 콘 구간 동안 차 방향 중간값 (None 이면 지금 방향)."""
+        cfg = self.after_cone
+        pose = self.odom_pose()
+        if not cfg['use'] or pose is None:
+            self.after_cone_at = None
+            return
+        base = pose[2] if corridor_yaw is None else corridor_yaw
+        axis, dev = self.track_axis(base)
+        how = '콘 구간 방향 %.0f도' % math.degrees(base)
+        if abs(dev) <= math.radians(cfg['axis_max_deg']):
+            base = axis
+            how += ' -> 트랙 축 %.0f도' % math.degrees(axis)
+        tgt = base - math.radians(cfg['turn_deg'])
+        tgt = math.atan2(math.sin(tgt), math.cos(tgt))
+        self.after_cone_at = (now, pose[0], pose[1], tgt)
+        self.get_logger().info('[콘 뒤] %s, 다음 직선 %.0f도 (지금 %.0f도) - 차선 찾을 때까지 그 방향으로'
+                               % (how, math.degrees(tgt), math.degrees(pose[2])))
+
+    def after_cone_active(self):
+        if self.after_cone_at is None:
+            return False
+        t0, x0, y0, _ = self.after_cone_at
+        cfg = self.after_cone
+        pose = self.odom_pose()
+        if self.clock_sec() - t0 > cfg['max_sec']:
+            self.end_after_cone('%.0f초 지남' % cfg['max_sec'])
+            return False
+        if pose is not None and math.hypot(pose[0] - x0, pose[1] - y0) > cfg['max_distance']:
+            self.end_after_cone('%.1f m 지남' % cfg['max_distance'])
+            return False
+        return True
+
+    def mark_entry_done(self, why):
+        """(11/20 F1) 3차선(AVOID_STATIC)·갈림길(LEFT_A_RIGHT_B) 이 시작되면 이 바퀴엔 3차선 입구 직진(entry_hold) 안 함.
+        real_real3 167.35초: 갈림길 B 끝나고 합류하며 방향이 3차선 방향(180도) 8도 안으로 들어와 입구 직진이 켜짐 -> 차선 안 따라가고 직진."""
+        if not self.entry_done:
+            self.entry_done = True
+            self.get_logger().info('[LANE] %s 시작 - 3차선 입구 직진은 이제 안 함 (리셋 때 다시)' % why)
+
+    def end_after_cone(self, why):
+        if self.after_cone_at is not None:
+            self.get_logger().info('[콘 뒤] 끝 - %s' % why)
+        self.after_cone_at = None
+
+    # ---- (11/19 사용자·YOLO 팀원) A/B 다수결 ----
+    def _ab_turning(self, now):
+        rate = self.turn_rate(now)
+        return rate is not None and abs(rate) > math.radians(self.ab_vote['max_turn_dps'])
+
+    def _ab_add_vote(self, kind, now, dist=None):
+        self.ab_last_seen = now
+        lim = self.ab_vote['max_dist']
+        if lim > 0.0 and dist is not None and dist > lim:
+            self.dbg('ab/vote_skip_far', dist)
+            return                                  # 멀면 안 셈 (멀리선 B 를 A 로 봄)
+        if self._ab_turning(now):
+            self.dbg('ab/vote_skip_turn', 1.0)
+            return                                  # 크게 도는 중엔 안 셈
+        self.ab_votes.append((now, kind))
+        self.ab_votes_all.append((now, kind))
+
+    def ab_counts(self, now, since=None):
+        """(A 수, B 수). since 가 없으면 최근 ab_vote.window 초."""
+        t0 = now - self.ab_vote['window'] if since is None else since
+        votes = [k for t, k in (self.ab_votes if since is None else self.ab_votes_all) if t0 <= t <= now + 1e-6]
+        return votes.count('A'), votes.count('B')
+
+    def ab_decision(self, now=None):
+        """'A' / 'B' / None (아직 못 정함). ab_vote.use false 면 예전처럼 마지막 표지판."""
+        if now is None:
+            now = self.clock_sec()
+        cfg = self.ab_vote
+        if not cfg['use']:
+            return self.marker_type()
+        if self._ab_turning(now):
+            return None
+        na, nb = self.ab_counts(now)
+        n = na + nb
+        self.dbg('ab/votes_a', float(na))
+        self.dbg('ab/votes_b', float(nb))
+        if n < cfg['min_frames']:
+            return None
+        if na >= cfg['min_ratio'] * n:
+            return 'A'
+        if nb >= cfg['min_ratio'] * n:
+            return 'B'
+        return None
+
+    def ab_seen(self, now=None):
+        """최근 window 초 안에 A/B 표가 하나라도 있는지 (못 정했으면 천천히 가려고)."""
+        if now is None:
+            now = self.clock_sec()
+        # (11/19) 멀어서 안 센 표지판은 max_dist + far_slow_margin 안일 때만 침 (2.5 m 부터 0.15 m/s 면 10초 넘게 기어감,
+        #   아예 안 치면 가짜 인지 3차선에서 1.2 m 안 표를 못 모으고 지나감)
+        if sum(self.ab_counts(now)) > 0:
+            return True
+        d = self._latest('marker_dist')
+        lim = self.ab_vote['max_dist']
+        return (lim > 0.0 and now - self.ab_last_seen <= self.ab_vote['window'] and d is not None
+                and d <= lim + self.ab_vote['far_slow_margin'])
+
+    def ab_fallback(self, since, now=None):
+        """since 이후 받은 표 전부의 다수 (같으면 마지막 표지판). 표가 없으면 None."""
+        if now is None:
+            now = self.clock_sec()
+        na, nb = self.ab_counts(now, since=since)
+        if na == nb:
+            return self.marker_type() if na else None
+        return 'A' if na > nb else 'B'
+
     def odom_pose(self):
         """(x, y, yaw) 또는 None."""
         return self._latest('odom')
@@ -1052,6 +1823,10 @@ class MissionSupervisor(Node):
     def odom_yaw(self):
         pose = self._latest('odom')
         return None if pose is None else pose[2]
+
+    def latest_scan(self):
+        """(11/18) 최근 /scan (LaserScan) 또는 None. 주차 격자 찾기용."""
+        return self._latest('scan')
 
     def forward_scan_points(self, max_range):
         """전방 스캔을 (각도, 거리) 목록으로. Follow the Gap 용."""
@@ -1112,6 +1887,13 @@ class MissionSupervisor(Node):
         msg.steering_angle = float(self.ackermann_steer(v, omega))
         self.cmd_pub.publish(msg)
         self.last_v = float(v)
+
+    def publish_steer_hold(self, steer):
+        """(11/16) 서 있는 채로 바퀴 조향만 맞춰 둠 (자전거 모델 조향각 steer). 애커만 출력일 때만, Twist 면 그냥 정지."""
+        if self.ack_msg_type is not None:
+            lim = self.ackermann_max_steer
+            self.last_ack_steer = max(-lim, min(lim, float(steer) * self.ackermann_steer_scale))
+        self.publish_stop()
 
     def publish_stop(self):
         if self.ack_msg_type is not None:

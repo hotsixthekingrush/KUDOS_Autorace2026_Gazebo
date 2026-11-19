@@ -8,6 +8,9 @@ CROSSWALK_STOP 으로 바로 넘어가도 추정값이 끊기지 않는다.
 횡단보도가 가까워져 위치를 못 구하면 마지막 측정값에서 주행 거리를 빼서 추정한다.
 주행 거리는 odom 위치 변화로 구하고, odom 이 없으면 명령 속도 x 시간으로 대신한다.
 
+(11/16 YOLO 팀원) 횡단보도가 가까우면(yolo.crosswalk_trust_x 안) 거리가 약 5 cm 짧게 나옴 -> 먼 측정을 한 번이라도
+받았으면 가까운 측정은 버리고 odom 으로 이어감 (dbg stopline/near_skipped). 가까운 측정만 있으면 crosswalk_near_bias 를 더해 씀.
+
 규정 판정 기준점은 차량의 앞바퀴이므로, 정지 판단은 "앞바퀴 ~ 정지선" 거리(gap)로 한다.
     gap = (base_link ~ 정지선 거리) - front_wheel_x
 """
@@ -31,6 +34,8 @@ class StopLineTracker(object):
         self.last_pose = None
         self.last_time = None
         self.last_speed = 0.0
+        self.trusted = False        # (11/16) 먼(정확한) 측정을 받은 적 있는지
+        self.n_meas = 0             # (11/18) 받아들인 측정 횟수 (SLOW_ZONE 바닥 횡단보도 전환용)
 
     def begin(self, now):
         """State 진입 시 호출. 바로 앞 State 가 쓰던 추정이 있으면 이어받고, 아니면 새로 시작."""
@@ -47,8 +52,15 @@ class StopLineTracker(object):
 
         fresh = meas is not None and meas[1] != self.last_stamp
         if fresh:
-            dist, stamp = meas
+            val, stamp = meas
+            dist, close = val if isinstance(val, tuple) else (val, False)
             self.last_stamp = stamp
+            if close and self.trusted and self.est is not None:
+                node.dbg('stopline/near_skipped', dist)     # (11/16) 먼 값으로 잡은 추정을 odom 으로 이어감
+                fresh = False
+            elif close:
+                dist += float(node.yolo['crosswalk_near_bias'])
+        if fresh:
             # 새 측정: 수신 이후 지금까지 이동한 만큼 빼서 반영
             dist -= self.last_speed * max(0.0, now - stamp)
             jumped = (self.est is not None and self.est < JUMP_GUARD_NEAR
@@ -58,6 +70,9 @@ class StopLineTracker(object):
                 fresh = False
             else:
                 self.est = dist
+                self.n_meas += 1
+                if not close:
+                    self.trusted = True
 
         if not fresh and self.est is not None:
             if pose is not None and self.last_pose is not None:

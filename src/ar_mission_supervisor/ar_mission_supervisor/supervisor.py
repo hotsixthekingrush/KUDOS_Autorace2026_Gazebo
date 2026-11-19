@@ -200,10 +200,12 @@ PARAM_DEFAULTS = {
         'pd_fast_ref': 0.4,        # [m/s]
         'pd_fast_exp': 0.5,
         # (11/19 차선 팀원 제안) |차선 방향| 이 pd_head_dead_deg 넘으면 넘은 만큼 x pd_head_k 더 돎 (+-pd_head_max). 0 = 끔
-        'pd_head_k': 0.0,          # [rad/s per rad]
-        'pd_head_dead_deg': 10.0,
+        #   (11/19 사용자: 팀 속도 0.5~1.0 이라 켬) |옆오차| 0.1 안 + |방향| 20도 넘을 때만, k 2.0. 시뮬(차선 팀원 실측 지연):
+        #   0.5 m/s R0.5 왼쪽 최대 벗어남 0.132 -> 0.116, 0.6 m/s R0.6 0.242 -> 0.173~0.188, 직선 같음. 0.3 m/s 는 나빠짐 (0.067 -> 0.134~0.160)
+        'pd_head_k': 2.0,          # [rad/s per rad]. 0 = 끔
+        'pd_head_dead_deg': 20.0,
         'pd_head_max': 0.5,        # [rad/s]
-        'pd_head_lat_max': 0.0,    # (11/19 차선 팀원 제안) |옆오차| 가 이 안일 때만 방향 항 [m]. 0 = 상관없이
+        'pd_head_lat_max': 0.1,    # (11/19 차선 팀원 제안) |옆오차| 가 이 안일 때만 방향 항 [m]. 0 = 상관없이
         # speed_by_lateral: LANE_FOLLOWING 속도 = base_speed * max(min_ratio, 1 - |lateral| / slow_lat),
         #   한 선 추정 프레임은 min_ratio. 최저 min_speed. 가속 accel_max, 감속 decel_max 까지.
         #   켜면 위 corner_* 감속은 안 씀 (겹치지 않게). false = corner_* 감속 (11/10)

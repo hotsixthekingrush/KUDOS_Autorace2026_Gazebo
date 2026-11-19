@@ -509,17 +509,27 @@ class AvoidCone(SafeState):
 
         best = None          # (score, offset, first_steer, end, margin, lookahead)
         fallback = None      # 다 닿으면: 여유가 가장 큰 것
+        fb_key = None
+        far_first = cfg.get('tight_pick_far', False)
         for off in offsets:
             path = self._shift(gates, off)
             for la in las:
                 first, end, margin = self._roll(path, self.steer_model, per_m, wb, ms, obs, cfg, la)
+                hit_s, pre = self._roll_hit
                 cand = (off, first, end, margin, la)
-                if fallback is None or margin > fallback[3]:
+                score = (-cfg['w_offset'] * abs(off) - cfg['w_lookahead'] * abs(la - cfg['lookahead'])
+                         + cfg['w_margin'] * min(margin, cfg['margin_cap']))
+                if far_first:
+                    # (11/19 real_lap1) 다 닿을 때: 처음 닿기까지 멀리 가는 것 -> 닿기 전 여유 -> 평소 점수.
+                    #   예전(가장 큰 여유)은 0.5~1 m 앞 콘 하나에 후보가 다 닿아 동점 평균 7개, 목록 첫 후보를 골라 조향이 좌우로 뒤집힘
+                    #   tight_safe_dist 넘어서 닿는 건 같게 봄 (멀리 닿는 걸 조금 더 미루려고 가까운 콘에 붙지 않게, run.py 급커브 콘 놓침)
+                    key = (round(min(hit_s, cfg.get('tight_safe_dist', 0.5)), 3), round(min(pre, cfg['margin_cap']), 3), score)
+                    if fb_key is None or key > fb_key:
+                        fb_key, fallback = key, cand
+                elif fallback is None or margin > fallback[3]:
                     fallback = cand
                 if margin < 0.0:
                     continue
-                score = (-cfg['w_offset'] * abs(off) - cfg['w_lookahead'] * abs(la - cfg['lookahead'])
-                         + cfg['w_margin'] * min(margin, cfg['margin_cap']))
                 if best is None or score > best[0]:
                     best = (score,) + cand
 
@@ -531,6 +541,8 @@ class AvoidCone(SafeState):
         else:
             off, steer, end, margin, la = fallback
             node.dbg('cone/mode', 'roll_tight')
+            if fb_key is not None:
+                node.dbg('cone/hit_s', fb_key[0])
             v = cfg['tight_speed']
             if self.warned_at is None or now - self.warned_at > 1.0:
                 node.get_logger().warn('[CONE] 안 닿는 길을 못 찾음 - 여유가 가장 큰 쪽으로 천천히 (여유 %.3fm)'
@@ -575,7 +587,10 @@ class AvoidCone(SafeState):
         reach = math.hypot(hl, hw)
         margin = 9.0
         first = None
-        for _ in range(max(1, int(round(cfg['horizon'] / ds)))):
+        hit_s = None          # (11/19) 처음 닿는 거리 [m]
+        pre = 9.0             # 처음 닿기 전까지 가장 작은 여유
+        nstep = max(1, int(round(cfg['horizon'] / ds)))
+        for k in range(nstep):
             sp, _ = self._project(path, x, y)
             tx, ty = self._point_at(path, sp + la)
             c, s = math.cos(yaw), math.sin(yaw)
@@ -602,6 +617,12 @@ class AvoidCone(SafeState):
                 d = math.hypot(max(abs(qx) - hl, 0.0), max(abs(qy) - hw, 0.0)) - rr
                 if d < margin:
                     margin = d
+                if hit_s is None:
+                    if d < 0.0:
+                        hit_s = (k + 1) * ds
+                    elif d < pre:
+                        pre = d
+        self._roll_hit = (hit_s if hit_s is not None else (nstep + 1) * ds, pre)
         return first, (x, y), margin
 
     @staticmethod

@@ -661,6 +661,9 @@ mission_supervisor:
       max_distance: 6.0
       course_right: true
       course_turn_deg: 90.0
+      # (11/19 차선 팀원) 갈림길 끝 ~ 라바콘 전(또는 6 m): 차선 노드에 /perception/lane_follow 'left:0.25' 5 Hz (왼쪽 선에서 0.25 m 오른쪽을
+      #   가운데로, 길 모인 뒤 조향 문제). 끝나면 'auto'. 왼쪽 선 안 보이면 차선 노드 valid=false -> 차선 놓침 대응. 0 = 끔
+      left_follow: 0.25        # [m]
 
     # (11/18 사용자) 트랙 방향 자동 보정. 대회장 comp_lap1: 카메라 차선 방향이 판단 트랙 축(start_yaw_deg 기준 0/-90/180)과
     #   한 바퀴 내내 +7~8도 차이 (켤 때 차가 출발 직선과 비뚤게 놓임) -> 3차선 기준 좌표가 틀어져 바깥 노란선 위로 감, 6.8초 막힘.

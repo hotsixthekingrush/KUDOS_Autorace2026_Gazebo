@@ -688,6 +688,10 @@ PARAM_DEFAULTS['after_ab'] = {
     'max_distance': 6.0,       # [m] 갈림길 끝난 자리에서 이만큼 (직선거리) 멀어지면 끝
     'course_right': True,      # (사용자: 실차에서 이걸로 한 번이라도 문제 생기면 false)
     'course_turn_deg': 90.0,
+    # (11/19 차선 팀원) 갈림길 끝 ~ 라바콘 전(또는 max_distance)엔 차선 노드에 '왼쪽 선만 따라가기' 를 보냄: /perception/lane_follow
+    #   'left:<값>' (왼쪽 선에서 이만큼 오른쪽을 가운데로), 5 Hz. 끝나면 'auto'. 길이 모인 뒤 조향 문제 (lap11 93.3~94초).
+    #   왼쪽 선이 안 보이면 차선 노드가 valid=false -> 차선 놓침 대응. 0 = 끔
+    'left_follow': 0.25,       # [m]
 }
 
 PARAM_DEFAULTS['axis_auto'] = {
@@ -907,6 +911,10 @@ class MissionSupervisor(Node):
         self._lock = threading.Lock()
 
         self.create_timer(0.5, self._publish_state_tick)
+        self.lane_follow_pub = self.create_publisher(String, '/perception/lane_follow', 10)   # (11/19) 차선 노드 왼쪽 선만 모드
+        self._lf_on = False
+        self._lf_auto_left = 0
+        self.create_timer(0.2, self._lane_follow_tick)
         self.get_logger().info('mission_supervisor 준비 완료 (%.1f Hz)'
                                % self.control_rate)
 
@@ -1612,6 +1620,27 @@ class MissionSupervisor(Node):
     def mark_after_ab(self, now):
         pose = self.odom_pose()
         self.after_ab_at = (now, pose[0], pose[1]) if pose is not None else (now, None, None)
+
+    def _lane_follow_tick(self):
+        """(11/19 차선 팀원) 갈림길 뒤면 'left:<값>' 를 5 Hz 로, 끝나면 'auto' 3번 (차선 노드는 1초 안 오면 auto)."""
+        val = float(self.after_ab.get('left_follow', 0.0))
+        on = val > 0.0 and self.after_ab_active()
+        m = String()
+        if on:
+            m.data = 'left:%.2f' % val
+            self.lane_follow_pub.publish(m)
+            if not self._lf_on:
+                self.get_logger().info('[A/B 뒤] 차선 노드에 왼쪽 선만 따라가기 (%s)' % m.data)
+            self._lf_on = True
+            self._lf_auto_left = 3
+        elif self._lf_auto_left > 0:
+            m.data = 'auto'
+            self.lane_follow_pub.publish(m)
+            if self._lf_on:
+                self.get_logger().info('[A/B 뒤] 차선 노드 왼쪽 선만 끝 - auto')
+            self._lf_on = False
+            self._lf_auto_left -= 1
+        self.dbg('lane/left_follow', 1.0 if on else 0.0)
 
     def after_ab_active(self):
         if self.after_ab_at is None:

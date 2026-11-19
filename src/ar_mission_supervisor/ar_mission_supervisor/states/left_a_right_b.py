@@ -68,6 +68,7 @@ class LeftARightB(SafeState):
         self.reached_s = None
         self.bend_since = None      # (11/19) 도착 뒤 길이 휜다고 본 시각
         self.bend_hd = 0.0
+        self.pass_s = None          # (11/19) 이 s 를 지나야 끝냄 (A/B 정할 때 표지판 거리 + odom_end_pass_sign)
         self.lane_shift = 0
         self._cam_prev = None
         self.waiting_jump = False
@@ -306,6 +307,15 @@ class LeftARightB(SafeState):
         if res.blocked:
             return False                        # 길이 없음 - 정지한 채로 다시 계산
 
+        if self.goal_lane is not None and self.pass_s is None and cfg['odom_end_pass_sign'] >= 0.0:
+            dist = node.marker_distance()
+            known = dist is not None and 0.0 < dist < 3.0
+            self.pass_s = res.s + (dist if known else cfg['odom_end_pass_default']) + cfg['odom_end_pass_sign']
+            node.get_logger().info('[LEFT_A_RIGHT_B] 표지판(섬 끝) %s - %.2f m 더 가야 차선 따라가기로 넘김'
+                                   % ('%.2fm 앞' % dist if known else '거리 모름', self.pass_s - res.s))
+        passed = self.pass_s is None or res.s >= self.pass_s
+        node.dbg('ab/to_pass', 0.0 if self.pass_s is None else self.pass_s - res.s)
+
         arrived = (self.goal_lane is not None and plan.lane == self.goal_lane
                    and not plan.changing)
         if arrived and plan.free_ahead(plan.lane, res.s) > cfg['odom_hold_distance']:
@@ -313,12 +323,12 @@ class LeftARightB(SafeState):
                 self.reached_s = res.s
                 node.get_logger().info('[LEFT_A_RIGHT_B] %s 차선 도착 (d=%.2fm)'
                                        % (plan.name(plan.lane), res.d))
-            if res.s - self.reached_s >= cfg['odom_end_after'] and self._end_clear(plan, res.s, cfg):
+            if passed and res.s - self.reached_s >= cfg['odom_end_after'] and self._end_clear(plan, res.s, cfg):
                 node.get_logger().info('[LEFT_A_RIGHT_B] %s 경로 진입 완료 - 복귀'
                                        % ('A(좌)' if self.goal_lane == cfg['a_lane'] else 'B(우)'))
                 self._ab_done()
                 return True
-            if self._bend(now, cfg):
+            if passed and self._bend(now, cfg):
                 node.get_logger().info('[LEFT_A_RIGHT_B] %s 차선 도착 뒤 카메라가 길이 휜다고 봄 (방향 %.0f도, %.1f초) - 차선 따라가기로 복귀'
                                        % (plan.name(plan.lane), math.degrees(self.bend_hd), cfg['odom_bend_sec']))
                 self._ab_done()

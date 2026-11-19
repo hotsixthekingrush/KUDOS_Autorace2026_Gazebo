@@ -58,6 +58,8 @@ class LeftARightB(SafeState):
 
     def on_enter(self):
         node = self.node
+        if hasattr(node, 'mark_entry_done'):
+            node.mark_entry_done('LEFT_A_RIGHT_B')   # (11/20 F1)
         self.driver.reset()
         self.phase = self.APPROACH
         self.entered_at = node.clock_sec()

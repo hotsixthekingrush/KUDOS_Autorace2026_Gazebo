@@ -280,7 +280,7 @@ PARAM_DEFAULTS = {
         'approach_speed': 0.2,
         'min_speed': 0.08,
         'slowdown_distance': 0.0,  # >0 이면 정지 직전 이 거리부터 감속 (0 = 끝까지 approach_speed)
-        'stop_gap': 0.10,          # (11/17 사용자) 0.03 -> 0.08: full_1117_1 아슬아슬. (11/19) 0.13: 1118 comp_lap11 0.074 에서 5 cm 뒤로. (11/19 오전 사용자) 0.10: n1119 0.121~0.130 에서 3 cm 앞으로
+        'stop_gap': 0.07,          # (11/17 사용자) 0.03 -> 0.08: full_1117_1 아슬아슬. (11/19) 0.13: 1118 comp_lap11 0.074 에서 5 cm 뒤로. (11/19 오전 사용자) 0.10: n1119 0.121~0.130 에서 3 cm 앞으로. (11/20 04:36 사용자) 0.07
         'green_confirm_sec': 0.3,  # 정지 후 초록불이 이 시간 이상 유지되면 출발
         'approach_timeout': 25.0,  # 정지선 거리를 끝내 못 받으면 이 시간 뒤 현 위치에서 판정
         'max_wait_sec': 90.0,      # 정지 후 이 시간 안에 초록불을 못 보면 출발 (0 = 무한 대기). (11/19 사용자) 10 -> 90: 대회 신호등 자동, 빨간불만 약 45초
@@ -919,6 +919,7 @@ class MissionSupervisor(Node):
         self.three_lane = ThreeLanePlanner(self)  # 3차선 좌표·차선 번호 (AVOID_STATIC -> LEFT_A_RIGHT_B)
         self.white_lines = WhiteLines(self)       # (11/16) 흰 점선 관측 모음 (몇 번 차선인지 확인용)
         self.entry_armed = True                   # (11/16) 3차선 입구 직진을 다음에 할 수 있는지
+        self.entry_done = False                   # (11/20 F1) 3차선·갈림길이 한 번 시작됐으면 True -> 3차선 입구 직진 안 함 (리셋 때 False)
         self.start_xy = None                      # (11/17) 판단 켠 자리 (출발 쪽 신호등·주차 표지판 무시용, 지금은 기록만)
         self.start_t = None
         self.travelled_total = 0.0                # (11/17 full_1117_2) 켠 뒤 /odom 으로 실제 간 거리 [m]
@@ -1232,6 +1233,7 @@ class MissionSupervisor(Node):
                 self._reset_flag = True
             self.lockout.clear()
             self.entry_armed = True
+            self.entry_done = False
             self.get_logger().warn('외부 리셋 요청 수신')
 
     def _cb_mission_objects(self, msg):
@@ -1735,6 +1737,13 @@ class MissionSupervisor(Node):
             self.end_after_cone('%.1f m 지남' % cfg['max_distance'])
             return False
         return True
+
+    def mark_entry_done(self, why):
+        """(11/20 F1) 3차선(AVOID_STATIC)·갈림길(LEFT_A_RIGHT_B) 이 시작되면 이 바퀴엔 3차선 입구 직진(entry_hold) 안 함.
+        real_real3 167.35초: 갈림길 B 끝나고 합류하며 방향이 3차선 방향(180도) 8도 안으로 들어와 입구 직진이 켜짐 -> 차선 안 따라가고 직진."""
+        if not self.entry_done:
+            self.entry_done = True
+            self.get_logger().info('[LANE] %s 시작 - 3차선 입구 직진은 이제 안 함 (리셋 때 다시)' % why)
 
     def end_after_cone(self, why):
         if self.after_cone_at is not None:

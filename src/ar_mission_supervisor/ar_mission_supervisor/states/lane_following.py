@@ -118,8 +118,8 @@ class LaneFollowing(SafeState):
         """(11/16) 3차선 입구 직진. 이번 주기 명령을 여기서 보냈으면 True."""
         node = self.node
         cfg = getattr(node, 'entry_hold', None)
-        if cfg is None or not cfg['enable'] or not node.avoid_static['three_lane_axis_use']:
-            self.hold = None
+        if cfg is None or not cfg['enable'] or not node.avoid_static['three_lane_axis_use'] or getattr(node, 'entry_done', False):
+            self.hold = None            # (11/20 F1) 3차선·갈림길 뒤엔 안 함
             return False
         pose = node.odom_pose()
         if pose is None:

@@ -40,6 +40,8 @@ class AvoidStatic(SafeState):
         node = self.node
         self.ab_wait_logged = False
         node.static_started = True      # (11/19) 이제부터 A/B 표지판 받음 (ab_vote.after_static)
+        if hasattr(node, 'mark_entry_done'):
+            node.mark_entry_done('AVOID_STATIC')   # (11/20 F1)
         self.entered_at = node.clock_sec()
         cfg = node.avoid_static
         # (11/16 static_1116_2) 3차선에서 끝난 지 얼마 안 됐으면 기준 좌표를 새로 잡지 않고 이어 씀.

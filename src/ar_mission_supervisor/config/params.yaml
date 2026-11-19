@@ -533,6 +533,11 @@ mission_supervisor:
       end_ahead_max_y: 0.7       # (11/18 사용자) 남은 콘은 차에서 옆으로 이 안의 것만 셈 [m]. comp_lap1: 콘 왼쪽 0.9 m 벽이 세져서
                                  #   1.0 이면 이 규칙이 안 맞음. 녹화로 돌려 보니 0.7 = 마지막 콘 지나고 0.1초 뒤 끝, 0.6 은 오른쪽 콘(-0.6)이 경계
       end_min_cones: 4
+      # (11/20 E1) 차 앞 ghost_x_min~ghost_x_max, 옆 end_ahead_max_y 안 기억 콘이 ghost_sec 초 동안 한 번도 다시 안 보이면
+      #   '앞 콘' 수·기억 길에서 뺌 (벽 조각을 한 번 콘으로 받아 끝까지 남던 것). 0 = 끔
+      ghost_sec: 0.0
+      ghost_x_min: 0.45
+      ghost_x_max: 1.5
       hold_steer_zero: true      # 콘이 안 보이는데 아직 안 끝낼 때 조향 0 (예전: 마지막 조향 유지 -> 최대 조향 1.7초 유지해 43도 더 돎)
 
     # 미션 4 - T자 주차 (2026: 진행방향 오른쪽 칸, 양옆 LIMO, 전면 진입)
@@ -689,6 +694,21 @@ mission_supervisor:
       # (11/19 차선 팀원) 갈림길 끝 ~ 라바콘 전(또는 6 m): 차선 노드에 /perception/lane_follow 'left:0.25' 5 Hz (왼쪽 선에서 0.25 m 오른쪽을
       #   가운데로, 길 모인 뒤 조향 문제). 끝나면 'auto'. 왼쪽 선 안 보이면 차선 노드 valid=false -> 차선 놓침 대응. 0 = 끔
       left_follow: 0.0         # [m] (13:00 차선 팀원: 끔 - valid 줄고 lap24 합류 뒤 코너 오른쪽 선을 왼쪽으로 잡음, 차선 노드 race-1119 고정)
+
+    # (11/20 사용자 A안) 라바콘 끝난 뒤 차선 따라가기에서 차선을 '찾을' 때까지 (방향 |found_head_deg| 안 + 확신도 found_conf 이상
+    #   found_count 번) 다음 직선 방향(콘 구간 트랙 축 - turn_deg)으로 돌아 유지. n1119: 콘 끝나고 왼쪽 보고 나와 코너 차선 조금만 보여
+    #   직진·옆 차선 (lap1 599·626, lap2, lap5), 차선 팀원 lap11 은 초당 25도로 오른쪽 꺾어 성공. max_distance m / max_sec 초면 끝
+    after_cone:
+      use: true
+      turn_deg: 90.0
+      axis_max_deg: 20.0         # 콘 구간 방향이 트랙 축에서 이 안이면 트랙 축 기준 [도]
+      found_head_deg: 15.0
+      found_conf: 0.5
+      found_count: 3
+      speed: 0.25
+      k_yaw: 1.5
+      max_distance: 3.0
+      max_sec: 10.0
 
     # (11/18 사용자) 트랙 방향 자동 보정. 대회장 comp_lap1: 카메라 차선 방향이 판단 트랙 축(start_yaw_deg 기준 0/-90/180)과
     #   한 바퀴 내내 +7~8도 차이 (켤 때 차가 출발 직선과 비뚤게 놓임) -> 3차선 기준 좌표가 틀어져 바깥 노란선 위로 감, 6.8초 막힘.

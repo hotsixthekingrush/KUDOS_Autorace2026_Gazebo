@@ -58,7 +58,7 @@ class AvoidCone(SafeState):
         self.miss = 0
         self.entered_at = None
         self.last_steer = 0.0
-        self.memory = []          # [[ox, oy, r]] odom 기준 콘 기억
+        self.memory = []          # [[ox, oy, r, 마지막으로 본 시각]] odom 기준 콘 기억
         self.steer_model = 0.0    # 실제 바퀴 조향 추정 (steer_rate_deg > 0 일 때)
         self.last_time = None
         self.warned_at = None
@@ -72,6 +72,7 @@ class AvoidCone(SafeState):
         self.last_path_t = None
         self.kind = None          # (11/19) 지금 방식 'gate' / 'side'
         self.kind_since = None
+        self.yaws = []            # (11/20 A안) 콘 구간 동안 차 방향 (끝날 때 중간값 -> 콘 뒤 오른쪽 코너 기준)
 
     def on_enter(self):
         self.node.after_ab_at = None    # (11/19) 갈림길 뒤 속도 상한·오른쪽 대비 끝
@@ -92,8 +93,33 @@ class AvoidCone(SafeState):
         self.last_path_t = None
         self.kind = None
         self.kind_since = None
+        self.yaws = []
 
     def run(self):
+        out = self._run()
+        mark = getattr(self.node, 'mark_after_cone', None)     # (시험용 가짜 노드엔 없음)
+        if out == 'done' and mark is not None:
+            mark(self.node.clock_sec(), self._corridor_yaw())
+        return out
+
+    def _corridor_yaw(self):
+        """(11/20 A안) 콘 구간 동안 차 방향 중간값 (첫 값 기준으로 펴서). 없으면 None."""
+        if not self.yaws:
+            return None
+        a0 = self.yaws[0]
+        rel = sorted(math.atan2(math.sin(a - a0), math.cos(a - a0)) for a in self.yaws)
+        m = a0 + rel[len(rel) // 2]
+        return math.atan2(math.sin(m), math.cos(m))
+
+    def _ghost(self, m, bx, by, cfg, now):
+        """(11/20 E1) 라이다가 잘 보는 자리에 있는데 ghost_sec 동안 다시 안 보인 기억 콘."""
+        lim = cfg.get('ghost_sec', 0.0)
+        if lim <= 0.0 or len(m) < 4:
+            return False
+        side = min(cfg['roi_max_y'], cfg.get('end_ahead_max_y', cfg['roi_max_y']))
+        return (cfg['ghost_x_min'] <= bx <= cfg['ghost_x_max'] and abs(by) <= side and now - m[3] > lim)
+
+    def _run(self):
         node = self.node
         cfg = node.cone
 
@@ -109,6 +135,8 @@ class AvoidCone(SafeState):
             cones = self._collect_cones()
             node.dbg('cone/count', len(cones))
             pose = node.odom_pose()
+            if pose is not None:
+                self.yaws.append(pose[2])
             if cones and pose is not None:
                 self._remember(pose, cfg)
             if self._few_ahead(cones, pose, cfg):
@@ -256,10 +284,11 @@ class AvoidCone(SafeState):
             x, y, yaw = pose
             c, s = math.cos(yaw), math.sin(yaw)
             xs = []
+            now = self.node.clock_sec()
             for m in self.memory:
                 bx = c * (m[0] - x) + s * (m[1] - y)
                 by = -s * (m[0] - x) + c * (m[1] - y)
-                if bx > lim and abs(by) <= side:
+                if bx > lim and abs(by) <= side and not self._ghost(m, bx, by, cfg, now):
                     xs.append(bx)
         else:
             xs = [o.x for o in cones if o.x > lim and abs(o.y) <= side]
@@ -291,10 +320,12 @@ class AvoidCone(SafeState):
         x, y, yaw = pose
         c, s = math.cos(yaw), math.sin(yaw)
         out = []
+        now = self.node.clock_sec()
         for m in self.memory:
             bx = c * (m[0] - x) + s * (m[1] - y)
             by = -s * (m[0] - x) + c * (m[1] - y)
-            if cfg['roi_min_x'] <= bx <= cfg['roi_max_x'] and abs(by) <= cfg['roi_max_y']:
+            if cfg['roi_min_x'] <= bx <= cfg['roi_max_x'] and abs(by) <= cfg['roi_max_y'] \
+                    and not self._ghost(m, bx, by, cfg, now):
                 out.append(_MemCone(bx, by, m[2]))
         return out
 
@@ -546,6 +577,7 @@ class AvoidCone(SafeState):
         x, y, yaw = pose
         c, s = math.cos(yaw), math.sin(yaw)
         merge = cfg['memory_merge']
+        now = node.clock_sec()
         for o in node.obstacles() or ():
             if o.is_dynamic or o.radius > cfg['max_radius']:
                 continue
@@ -559,12 +591,13 @@ class AvoidCone(SafeState):
                 if d <= best_d:
                     best, best_d = m, d
             if best is None:
-                self.memory.append([ox, oy, float(o.radius)])
+                self.memory.append([ox, oy, float(o.radius), now])   # (11/20) 마지막으로 본 시각
                 self.n_seen += 1
             else:
                 best[0] += 0.3 * (ox - best[0])
                 best[1] += 0.3 * (oy - best[1])
                 best[2] += 0.3 * (float(o.radius) - best[2])
+                best[3] = now
         # 차 뒤로 충분히 지나간 콘은 지움
         keep = []
         for m in self.memory:

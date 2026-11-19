@@ -570,6 +570,11 @@ PARAM_DEFAULTS = {
         'end_one_x': 0.30,         # 남은 콘이 있으면 그 콘도 이 거리 안이어야 끝 (한쪽 줄을 못 볼 때 한 줄 일찍 끝나지 않게) [m]
         'end_ahead_max_y': 0.7,    # (11/18 사용자) 남은 콘은 차에서 옆으로 이 안의 것만 셈 (벽 빼기, comp_lap1 녹화로 고름) [m]
         'end_min_cones': 4,
+        # (11/20 E1) 라이다가 잘 보는 자리(차 앞 ghost_x_min~ghost_x_max, 옆 end_ahead_max_y 안)에 있는 기억 콘이 ghost_sec 초 동안
+        #   한 번도 다시 안 보이면 '앞 콘' 수와 기억으로 만드는 길에서 뺌 (벽 조각을 한 번 콘으로 받아 끝까지 남던 것). 0 = 끔
+        'ghost_sec': 0.0,
+        'ghost_x_min': 0.45,
+        'ghost_x_max': 1.5,
         'hold_steer_zero': True,   # 콘이 안 보이는데 아직 안 끝낼 때 조향 0 (false = 예전처럼 마지막 조향 유지)
     },
     'parking': {
@@ -718,6 +723,23 @@ PARAM_DEFAULTS['after_ab'] = {
     #   왼쪽 선이 안 보이면 차선 노드가 valid=false -> 차선 놓침 대응. 0 = 끔
     'left_follow': 0.0,        # [m] (11/19 13:00 차선 팀원: 끔. 재생에서 valid 줄고 lap24 합류 뒤 코너에서 오른쪽 선을 왼쪽으로 잡음,
                                #   리모 차선 노드는 이 기능 없는 race-1119 로 고정)
+}
+
+PARAM_DEFAULTS['after_cone'] = {
+    # (11/20 사용자 A안) 라바콘(AVOID_CONE) 이 끝난 뒤 차선 따라가기에서, 차선을 '찾을' 때까지(차선 방향 |found_head_deg| 안 +
+    #   확신도 found_conf 이상이 found_count 번) 오른쪽으로 돌아 다음 직선 방향(콘 구간 트랙 축 - turn_deg)을 맞추고 유지.
+    #   실차 n1119: 콘 끝나고 왼쪽을 본 채 나와 오른쪽 코너 차선이 조금만 보여 직진·옆 차선 (lap1 599·626, lap2, lap5 ...),
+    #   차선 팀원 lap11 은 23.3~25초에 초당 25도로 오른쪽으로 꺾어 성공. max_distance m 또는 max_sec 초 지나면 끝
+    'use': True,
+    'turn_deg': 90.0,          # 콘 구간 방향에서 오른쪽으로 [도]
+    'axis_max_deg': 20.0,      # 콘 구간 방향(중간값)이 트랙 축에서 이 안이면 트랙 축 기준, 아니면 콘 구간 방향 그대로 [도]
+    'found_head_deg': 15.0,
+    'found_conf': 0.5,
+    'found_count': 3,
+    'speed': 0.25,             # [m/s] (lap11 0.23)
+    'k_yaw': 1.5,              # 조향 = k_yaw x 방향 오차 (failsafe.head_k_yaw 와 같음, 12.6도 넘으면 끝까지)
+    'max_distance': 3.0,       # [m] 콘 끝난 자리에서 (직선거리)
+    'max_sec': 10.0,
 }
 
 PARAM_DEFAULTS['axis_auto'] = {
@@ -890,6 +912,7 @@ class MissionSupervisor(Node):
         self.ab_votes = collections.deque(maxlen=200)       # (11/19) (시각, 'A'/'B') 다수결용
         self.static_started = False     # (11/19) 판단 켠 뒤 AVOID_STATIC 이 시작된 적 있는지 (A/B 는 그 뒤에만)
         self.after_ab_at = None         # (11/19) 갈림길 끝난 (시각, x, y). 라바콘 들어가면 None
+        self.after_cone_at = None       # (11/20 A안) 라바콘 끝난 (시각, x, y, 목표 방향)
         self._ab_before_logged = False
         self.ab_votes_all = collections.deque(maxlen=2000)
         self.stopline = StopLineTracker(self)     # 정지선 거리 추정 (State 들이 공유)
@@ -1678,6 +1701,45 @@ class MissionSupervisor(Node):
             self.get_logger().info('[A/B 뒤] %.1f m 지남 - 속도 상한·오른쪽 대비 끝' % self.after_ab['max_distance'])
             return False
         return True
+
+    # ---- (11/20 사용자 A안) 라바콘 뒤 오른쪽 코너 ----
+    def mark_after_cone(self, now, corridor_yaw):
+        """AVOID_CONE 이 끝날 때. corridor_yaw = 콘 구간 동안 차 방향 중간값 (None 이면 지금 방향)."""
+        cfg = self.after_cone
+        pose = self.odom_pose()
+        if not cfg['use'] or pose is None:
+            self.after_cone_at = None
+            return
+        base = pose[2] if corridor_yaw is None else corridor_yaw
+        axis, dev = self.track_axis(base)
+        how = '콘 구간 방향 %.0f도' % math.degrees(base)
+        if abs(dev) <= math.radians(cfg['axis_max_deg']):
+            base = axis
+            how += ' -> 트랙 축 %.0f도' % math.degrees(axis)
+        tgt = base - math.radians(cfg['turn_deg'])
+        tgt = math.atan2(math.sin(tgt), math.cos(tgt))
+        self.after_cone_at = (now, pose[0], pose[1], tgt)
+        self.get_logger().info('[콘 뒤] %s, 다음 직선 %.0f도 (지금 %.0f도) - 차선 찾을 때까지 그 방향으로'
+                               % (how, math.degrees(tgt), math.degrees(pose[2])))
+
+    def after_cone_active(self):
+        if self.after_cone_at is None:
+            return False
+        t0, x0, y0, _ = self.after_cone_at
+        cfg = self.after_cone
+        pose = self.odom_pose()
+        if self.clock_sec() - t0 > cfg['max_sec']:
+            self.end_after_cone('%.0f초 지남' % cfg['max_sec'])
+            return False
+        if pose is not None and math.hypot(pose[0] - x0, pose[1] - y0) > cfg['max_distance']:
+            self.end_after_cone('%.1f m 지남' % cfg['max_distance'])
+            return False
+        return True
+
+    def end_after_cone(self, why):
+        if self.after_cone_at is not None:
+            self.get_logger().info('[콘 뒤] 끝 - %s' % why)
+        self.after_cone_at = None
 
     # ---- (11/19 사용자·YOLO 팀원) A/B 다수결 ----
     def _ab_turning(self, now):

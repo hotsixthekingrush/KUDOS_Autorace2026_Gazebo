@@ -43,10 +43,16 @@ class LaneFollowing(SafeState):
         self.v_cmd = None           # speed_by_lateral: 가속·감속 제한을 건 지금 속도
         self.v_time = None
         self.hold = None            # (11/16) 3차선 입구 직진 중이면 (시작 x, 시작 y, 고정 방향)
+        self.ac_found = 0           # (11/20 A안) 라바콘 뒤: 차선 '찾음' 연속 횟수
+        self.ac_stamp = None
+        self.ac_logged = False
 
     def on_enter(self):
         self.driver.reset()
         self.hold = None
+        self.ac_found = 0
+        self.ac_stamp = None
+        self.ac_logged = False
         self.slow_until = None
         self.slow = False
         self.v_cmd = None
@@ -157,6 +163,39 @@ class LaneFollowing(SafeState):
         node.dbg('lane/entry_hold_err', err)
         return True
 
+    def _after_cone(self, now):
+        """(11/20 사용자 A안) 라바콘 끝난 뒤: 차선을 '찾을' 때까지 다음 직선 방향(목표)으로 돌아 유지. 찾으면 False (보통 차선 따라가기)."""
+        node = self.node
+        cfg = node.after_cone
+        pose = node.odom_pose()
+        if pose is None:
+            return False
+        lane = node.lane_error(now)
+        if lane is not None and lane.stamp != self.ac_stamp:
+            self.ac_stamp = lane.stamp
+            good = (abs(lane.heading) <= math.radians(cfg['found_head_deg'])
+                    and lane.confidence >= cfg['found_conf'])
+            self.ac_found = self.ac_found + 1 if good else 0
+        elif lane is None:
+            self.ac_found = 0
+        if self.ac_found >= cfg['found_count']:
+            node.end_after_cone('차선 찾음 (방향 %+.0f도, 확신도 %.2f)' % (math.degrees(lane.heading), lane.confidence))
+            self.driver.reset()
+            return False
+        tgt = node.after_cone_at[3]
+        err = math.atan2(math.sin(tgt - pose[2]), math.cos(tgt - pose[2]))
+        if not self.ac_logged:
+            self.ac_logged = True
+            node.get_logger().info('[콘 뒤] 차선 아직 못 찾음 - 목표 %.0f도로 (지금 %.0f도, 차선 %s)'
+                                   % (math.degrees(tgt), math.degrees(pose[2]),
+                                      '없음' if lane is None else '방향 %+.0f도 확신도 %.2f' % (math.degrees(lane.heading), lane.confidence)))
+        steer = clamp(cfg['k_yaw'] * err, -node.max_steer, node.max_steer)
+        v = cfg['speed']
+        node.dbg('lane/mode', 'after_cone')
+        node.dbg('lane/after_cone_err', math.degrees(err))
+        node.publish_cmd(v, steering_to_omega(v, steer, node.wheel_base))
+        return True
+
     def run(self):
         node = self.node
         while node.ok():
@@ -173,7 +212,9 @@ class LaneFollowing(SafeState):
             if cap > 0.0 and v > cap and node.after_ab_active():
                 v = cap                 # (11/19 사용자·차선 팀원) 갈림길 뒤 ~ 라바콘 전 (C3 코너)
                 node.dbg('lane/after_ab_cap', cap)
-            if not self._entry_hold(now, v):
+            if node.after_cone_active() and self._after_cone(now):
+                pass
+            elif not self._entry_hold(now, v):
                 self.driver.step(v)
             self.sleep()
         return 'aborted'

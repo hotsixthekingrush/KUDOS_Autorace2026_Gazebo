@@ -169,6 +169,10 @@ class LaneFollowing(SafeState):
 
             now = node.clock_sec()
             v = self._speed(now)
+            cap = node.after_ab['speed_cap']
+            if cap > 0.0 and v > cap and node.after_ab_active():
+                v = cap                 # (11/19 사용자·차선 팀원) 갈림길 뒤 ~ 라바콘 전 (C3 코너)
+                node.dbg('lane/after_ab_cap', cap)
             if not self._entry_hold(now, v):
                 self.driver.step(v)
             self.sleep()

@@ -32,6 +32,9 @@ class LaneDriver(object):
         self.last_cmd = (0.0, 0.0)
         self.last_steer = 0.0
         self.lost_kappa = None     # (11/19) 차선을 놓친 순간 IMU(odom 방향)로 잰 곡률 [1/m] (False = 못 잼)
+        self.last_head = None      # (11/19) 마지막 차선 값 (시각, 그때 차 방향, 차선 방향)
+        self.lost_target = None    # (11/19) 놓친 뒤 돌아 갈 방향 (yaw) 과 이유
+        self.lost_logged = False
         self.pd_prev = None        # omega_pd: 직전 차선 값 (평활한 lateral, 찍은 시각, 원래 lateral)
         self.pd_rate = 0.0         # omega_pd: 평활한 lateral 변화율 [m/s]
 
@@ -53,7 +56,31 @@ class LaneDriver(object):
             if self.lost_since is None:
                 self.lost_since = now
                 self.lost_kappa = self._measure_kappa(now)
+                self.lost_target = self._lost_target(now)
+                self.lost_logged = False
             self._failsafe(now - self.lost_since)
+
+    def _lost_target(self, now):
+        """(11/19 사용자·차선 팀원) 놓친 뒤 돌아 갈 방향 (yaw, 이유) 또는 None.
+        (a) 놓치기 직전 head_max_age 초 안 카메라 방향이 |head_min_deg| 넘으면 그때 차 방향 + 차선 방향 (최대 90도)
+        (b) 그 값이 없고 갈림길 뒤 ~ 라바콘 전이면 지금 방향에서 오른쪽 course_turn_deg (코스상 다음 코너가 오른쪽)
+        둘 다 아니면 None (imu_keep -> creep -> stop)."""
+        node = self.node
+        cfg = node.failsafe
+        pose = node.odom_pose()
+        if pose is None:
+            return None
+        lh = self.last_head
+        if cfg['head_follow'] and lh is not None and now - lh[0] <= cfg['head_max_age']:
+            if abs(lh[2]) >= math.radians(cfg['head_min_deg']):
+                hd = clamp(lh[2], -math.pi / 2, math.pi / 2)
+                return (lh[1] + hd, '놓치기 직전 차선 방향 %+.0f도' % math.degrees(lh[2]))
+            return None        # 직전 방향이 거의 직진 -> 그대로 (imu_keep)
+        if node.after_ab_active() and node.after_ab['course_right']:
+            ab = node.after_ab
+            return (pose[2] - math.radians(ab['course_turn_deg']),
+                    '방향 값 없음 + 갈림길 뒤라 오른쪽 %.0f도' % ab['course_turn_deg'])
+        return None
 
     def _measure_kappa(self, now):
         """(11/19 사용자·차선 팀원) 차선을 놓친 순간 직전 imu_rate_window 초 동안 실제로 돈 곡률 = 회전 속도 / 속도.
@@ -93,7 +120,18 @@ class LaneDriver(object):
                     self.pd_rate = (1.0 - a) * self.pd_rate + a * (filt - self.pd_prev[0]) / dt
             self.pd_prev = (filt, stamp, raw)
         lateral = self.pd_prev[0]
-        return clamp(g['pd_kp'] * lateral + g['pd_kd'] * self.pd_rate, -g['pd_max_omega'], g['pd_max_omega'])
+        omega = g['pd_kp'] * lateral + g['pd_kd'] * self.pd_rate
+        k_head = float(g.get('pd_head_k', 0.0))
+        if k_head > 0.0:
+            # (11/19 차선 팀원 제안, 시험 중) |차선 방향| 이 pd_head_dead_deg 넘으면 넘은 만큼 더 돎 (+-pd_head_max).
+            #   1118 comp_lap14 145초: lat 0 인데 방향 -28도 -> 조향 -0.04 로 직진하다 C3 에서 놓침
+            hd = lane[1]
+            dead = math.radians(float(g.get('pd_head_dead_deg', 10.0)))
+            if abs(hd) > dead:
+                extra = k_head * (abs(hd) - dead) * (1.0 if hd > 0 else -1.0)
+                lim = float(g.get('pd_head_max', 0.5))
+                omega += clamp(extra, -lim, lim)
+        return clamp(omega, -g['pd_max_omega'], g['pd_max_omega'])
 
     def lane_steer(self, lane, now, offset=0.0, speed=None):
         """차선 오차 -> 조향각(rad). 발행은 하지 않는다 (다른 제어와 섞을 때 사용).
@@ -158,6 +196,9 @@ class LaneDriver(object):
 
     def _drive(self, lane, now, target_speed, offset=0.0):
         node = self.node
+        pose = node.odom_pose()
+        if pose is not None:
+            self.last_head = (now, pose[2], lane.heading)
         steer = self.lane_steer(lane, now, offset, speed=target_speed)
         if self._pd():
             steer = self._limit_steer(steer, now)
@@ -183,6 +224,22 @@ class LaneDriver(object):
         node = self.node
         cfg = node.failsafe
         node.dbg('lane/lost_sec', lost_sec)
+
+        # (00) (11/19 사용자·차선 팀원) 돌아 갈 방향이 있으면 (놓치기 직전 차선 방향, 또는 갈림길 뒤 오른쪽 90도)
+        #   imu_speed 로 그 방향까지 돌고 그 방향 유지 -> stop_after_sec 에 정지 (그 전에 선을 다시 잡으면 차선 따라가기)
+        tgt = self.lost_target
+        pose = node.odom_pose()
+        if tgt is not None and pose is not None and lost_sec < cfg['stop_after_sec']:
+            if not self.lost_logged:
+                self.lost_logged = True
+                node.get_logger().info('[LANE] 차선 놓침 - %s 로 돌아 감 (목표 %.0f도, 지금 %.0f도)'
+                                       % (tgt[1], math.degrees(tgt[0]), math.degrees(pose[2])))
+            node.dbg('lane/mode', 'head')
+            err = math.atan2(math.sin(tgt[0] - pose[2]), math.cos(tgt[0] - pose[2]))
+            steer = clamp(cfg['head_k_yaw'] * err, -node.max_steer, node.max_steer)
+            v = min(max(abs(self.last_cmd[0]), cfg['creep_speed']), cfg['imu_speed'])
+            node.publish_cmd(v, steering_to_omega(v, steer, node.wheel_base))
+            return
 
         # (0) (11/19 사용자·차선 팀원) 놓친 순간 실제로 돌던 곡률(IMU) 그대로, imu_speed 로 줄여 imu_keep_sec 동안
         #   1118 comp_lap14: 코너 앞에서 선을 놓치고 hold -> creep -> stop 으로 11초 섬

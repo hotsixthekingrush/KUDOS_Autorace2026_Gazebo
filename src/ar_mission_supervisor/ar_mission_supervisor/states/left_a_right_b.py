@@ -24,6 +24,8 @@ A/B 표지판을 인식하면 진입하고, 표지판까지 거리가 임계값 
   (점선을 못 넘은 채 끝나면 LANE_FOLLOWING 이 처음 차선으로 돌아가서).
 """
 
+import math
+
 from ar_mission_supervisor.base_state import SafeState
 from ar_mission_supervisor.controllers import clamp
 from ar_mission_supervisor.lane_driver import LaneDriver
@@ -64,6 +66,8 @@ class LeftARightB(SafeState):
         self.direction = 0.0
         self.goal_lane = None
         self.reached_s = None
+        self.bend_since = None      # (11/19) 도착 뒤 길이 휜다고 본 시각
+        self.bend_hd = 0.0
         self.lane_shift = 0
         self._cam_prev = None
         self.waiting_jump = False
@@ -80,6 +84,12 @@ class LeftARightB(SafeState):
                                        % self.plan.name(self.plan.lane))
 
     def run(self):
+        out = self._run()
+        if out == 'done':
+            self.node.mark_after_ab(self.node.clock_sec())     # (11/19) 갈림길 뒤 ~ 라바콘 전 (after_ab)
+        return out
+
+    def _run(self):
         node = self.node
         cfg = node.left_a_right_b
 
@@ -303,14 +313,35 @@ class LeftARightB(SafeState):
                 self.reached_s = res.s
                 node.get_logger().info('[LEFT_A_RIGHT_B] %s 차선 도착 (d=%.2fm)'
                                        % (plan.name(plan.lane), res.d))
-            if res.s - self.reached_s >= cfg['odom_hold_distance'] and self._end_clear(plan, res.s, cfg):
+            if res.s - self.reached_s >= cfg['odom_end_after'] and self._end_clear(plan, res.s, cfg):
                 node.get_logger().info('[LEFT_A_RIGHT_B] %s 경로 진입 완료 - 복귀'
                                        % ('A(좌)' if self.goal_lane == cfg['a_lane'] else 'B(우)'))
                 self._ab_done()
                 return True
+            if self._bend(now, cfg):
+                node.get_logger().info('[LEFT_A_RIGHT_B] %s 차선 도착 뒤 카메라가 길이 휜다고 봄 (방향 %.0f도, %.1f초) - 차선 따라가기로 복귀'
+                                       % (plan.name(plan.lane), math.degrees(self.bend_hd), cfg['odom_bend_sec']))
+                self._ab_done()
+                return True
         else:
             self.reached_s = None
+            self.bend_since = None
         return False
+
+    def _bend(self, now, cfg):
+        """(11/19 사용자·차선 팀원) 목표 차선 도착 뒤, 카메라가 두 선을 보며 |방향| > odom_bend_deg 를 odom_bend_sec 동안 계속 내면 True.
+        섬을 도는 A/B 길·합류는 휘어 있는데 3차선 좌표는 직선이라 (1118 comp_lap11 91~93초 방향 -11~-29도, lap18 179~184초 -15~-43도)
+        가장자리로 붙음 -> 차선 따라가기로 넘김. 도착 전(차선 옮기는 중)엔 차가 기울어 있어 안 봄. 0 = 끔."""
+        if cfg['odom_bend_deg'] <= 0.0:
+            return False
+        lane = self.node.lane_error(now)
+        if lane is None or lane.single or abs(lane.heading) <= math.radians(cfg['odom_bend_deg']):
+            self.bend_since = None
+            return False
+        if self.bend_since is None:
+            self.bend_since = now
+        self.bend_hd = lane.heading
+        return now - self.bend_since >= cfg['odom_bend_sec']
 
     def _end_clear(self, plan, s_car, cfg):
         """(11/19 사용자) 끝내도 되는지. odom_end_clear > 0: 목표 차선(가운데 +-(차선 반폭 + 차 반폭)) 안, 차 앞 odom_end_clear m 안에

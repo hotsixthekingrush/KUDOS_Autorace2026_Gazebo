@@ -90,6 +90,10 @@ mission_supervisor:
       # (11/19) 이 속도보다 빠르면 세기를 (pd_fast_ref / 속도)^pd_fast_exp 로 줄임. 0 = 끔
       pd_fast_ref: 0.4         # [m/s]
       pd_fast_exp: 0.5
+      # (11/19 차선 팀원 제안) |차선 방향| 이 pd_head_dead_deg 넘으면 넘은 만큼 x pd_head_k 더 돎 (+-pd_head_max). 0 = 끔
+      pd_head_k: 0.0
+      pd_head_dead_deg: 10.0
+      pd_head_max: 0.5
       # 속도 (LANE_FOLLOWING 만): base_speed * max(min_ratio, 1 - |lateral| / slow_lat), slow_rule 조건이면 min_ratio,
       #   최저 min_speed, 가속 accel_max / 감속 decel_max 까지. 켜면 위 corner_* 감속은 안 씀. false = corner_* 감속
       speed_by_lateral: true
@@ -116,6 +120,12 @@ mission_supervisor:
       imu_keep_sec: 2.0
       imu_speed: 0.2
       imu_rate_window: 1.0
+      # (11/19 사용자·차선 팀원) 놓치기 직전 1초 안 카메라 방향이 8도 넘으면 그 방향(최대 90도)으로 돌아 감 (0.2 m/s, k_yaw 1.5)
+      #   1118 comp_lap14 145초: 방향 -17~-28도인데 lat 0 이라 직진하다 놓침 -> 정지. 없으면 갈림길 뒤면 오른쪽 90도(after_ab), 아니면 imu_keep
+      head_follow: true
+      head_min_deg: 8.0
+      head_max_age: 1.0
+      head_k_yaw: 1.5
       # (11/05) 예전 규정(터널)용 벽 따라가기(wall_sector_deg, wall_max_range)는 뺌 - 2026 트랙엔 벽 없음
 
     perception:
@@ -237,6 +247,11 @@ mission_supervisor:
       # (11/19 사용자) 끝낼 때 목표 차선 안(+-차선 반폭+차 반폭), 차 앞 이 거리 안에 장애물이 없으면 됨 [m].
       #   0 = 예전: 3차선 지도에 차보다 앞인 장애물이 하나라도 있으면 안 끝냄 (1118 comp_lap18 20초 제한까지 직진)
       odom_end_clear: 1.0
+      # (11/19 사용자·차선 팀원) 목표 차선 도착 뒤 바로 끝 (예전 0.6 m 더 감), 그리고 도착 뒤 카메라(두 선) |방향| 이 15도 넘게 0.5초
+      #   계속되면 끝 - 섬을 도는 A/B 길·합류는 휘는데 3차선 좌표는 직선이라 가장자리로 붙음 (1118 comp_lap11 91~93초, lap18 179~184초)
+      odom_end_after: 0.0
+      odom_bend_deg: 15.0
+      odom_bend_sec: 0.5
       odom_max_duration: 90.0  # (11/16) 3차선 이어받은 뒤 앞뒤 움직임을 했으면 max_duration 대신 이 시간 (static_1116_2: 20초에 끊김)
       # (11/13) 카메라 방식(3차선 정보 없을 때)에서 옆으로 옮기는 중, 차선 노드가 '지금 들어간 차선' 가운데로 바꿔 주면
       #   lateral 이 차선 폭만큼 튐 (왼쪽 차선으로 바뀌면 +폭). 그 횟수만큼 목표 이동량에서 빼서 한 차선 더 가지 않게 함.
@@ -612,6 +627,15 @@ mission_supervisor:
       # (11/19 사용자·YOLO 팀원) A/B 표지판은 판단 켠 뒤 AVOID_STATIC 이 한 번 시작된 뒤에만 (1119 모델이 37초 서행·보행자 표지판을
       #   B 0.88 로 봄). 중간(3차선 뒤)부터 켜서 갈림길만 시험할 땐 false
       after_static: true
+
+    # (11/19 사용자·차선 팀원) 갈림길(LEFT_A_RIGHT_B) 끝난 뒤 라바콘 전까지 (또는 6 m): 차선 주행 0.3 m/s 까지
+    #   (1118 comp_lap14 142~143초 0.37 로 C3 코너), 차선 놓쳤는데 방향 값도 없으면 오른쪽 90도 (코스상 다음 코너).
+    #   course_right: 실차에서 이걸로 한 번이라도 문제 생기면 false (사용자)
+    after_ab:
+      speed_cap: 0.3
+      max_distance: 6.0
+      course_right: true
+      course_turn_deg: 90.0
 
     # (11/18 사용자) 트랙 방향 자동 보정. 대회장 comp_lap1: 카메라 차선 방향이 판단 트랙 축(start_yaw_deg 기준 0/-90/180)과
     #   한 바퀴 내내 +7~8도 차이 (켤 때 차가 출발 직선과 비뚤게 놓임) -> 3차선 기준 좌표가 틀어져 바깥 노란선 위로 감, 6.8초 막힘.

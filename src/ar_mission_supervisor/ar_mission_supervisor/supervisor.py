@@ -199,6 +199,10 @@ PARAM_DEFAULTS = {
         # (11/19) 이 속도보다 빠르면 세기를 (pd_fast_ref / 속도)^pd_fast_exp 로 줄임 (0 = 끔)
         'pd_fast_ref': 0.4,        # [m/s]
         'pd_fast_exp': 0.5,
+        # (11/19 차선 팀원 제안) |차선 방향| 이 pd_head_dead_deg 넘으면 넘은 만큼 x pd_head_k 더 돎 (+-pd_head_max). 0 = 끔
+        'pd_head_k': 0.0,          # [rad/s per rad]
+        'pd_head_dead_deg': 10.0,
+        'pd_head_max': 0.5,        # [rad/s]
         # speed_by_lateral: LANE_FOLLOWING 속도 = base_speed * max(min_ratio, 1 - |lateral| / slow_lat),
         #   한 선 추정 프레임은 min_ratio. 최저 min_speed. 가속 accel_max, 감속 decel_max 까지.
         #   켜면 위 corner_* 감속은 안 씀 (겹치지 않게). false = corner_* 감속 (11/10)
@@ -223,6 +227,12 @@ PARAM_DEFAULTS = {
         'imu_keep_sec': 2.0,
         'imu_speed': 0.2,
         'imu_rate_window': 1.0,
+        # (11/19 사용자·차선 팀원) 놓치기 직전 1초 안 카메라 방향(|head_min_deg| 넘음)이 있으면 그 방향(최대 90도)으로 돌아 감
+        #   (1118 comp_lap14 145초: 방향 -17~-28도인데 lat 0 이라 직진하다 놓침). 없으면 갈림길 뒤면 오른쪽 90도(after_ab), 아니면 imu_keep
+        'head_follow': True,
+        'head_min_deg': 8.0,
+        'head_max_age': 1.0,       # [s]
+        'head_k_yaw': 1.5,
     },
     'perception': {
         'stale_sec': 0.5,
@@ -322,6 +332,9 @@ PARAM_DEFAULTS = {
         'a_lane': 0,               # odom 모드에서 A(좌) 경로로 이어지는 차선 (0 왼쪽, 1 가운데, 2 오른쪽)
         'b_lane': 2,
         'odom_hold_distance': 0.6, # 목표 차선 도착 후 이만큼 더 간 뒤 종료 [m]
+        'odom_end_after': 0.0,     # (11/19 사용자) 목표 차선 도착 뒤 이만큼 더 가서 끝 [m] (예전 odom_hold_distance 0.6 을 같이 씀)
+        'odom_bend_deg': 15.0,     # (11/19 사용자·차선 팀원) 도착 뒤 카메라(두 선) |방향| 이 이보다 크면 길이 휜 것 [도]. 0 = 끔
+        'odom_bend_sec': 0.5,      #   그게 이만큼 계속되면 차선 따라가기로 [s]
         'odom_end_clear': 1.0,     # (11/19 사용자) 끝낼 때 목표 차선 안, 차 앞 이 거리 안에 장애물이 없으면 됨 [m]. 0 = 예전 (지도 어디든 앞에 있으면 안 끝냄)
         'odom_max_duration': 90.0, # (11/16) 3차선 이어받은 뒤 앞뒤 움직임을 했으면 이 시간까지 (max_duration 20 은 앞뒤 움직임보다 짧음)
         # (11/13) 카메라 방식: 옮기는 중 차선 노드가 '지금 들어간 차선' 기준으로 바뀌면 lateral 이 차선 폭만큼 튐 -> 목표 이동량에서 뺌
@@ -643,6 +656,16 @@ PARAM_DEFAULTS['ab_vote'] = {
     'after_static': True,
 }
 
+PARAM_DEFAULTS['after_ab'] = {
+    # (11/19 사용자·차선 팀원) 갈림길(LEFT_A_RIGHT_B) 이 끝난 뒤 라바콘(AVOID_CONE) 전까지 (또는 max_distance m 갈 때까지):
+    #   차선 주행 속도 speed_cap 까지 (1118 comp_lap14 142~143초 0.37 m/s 로 C3 코너 들어감),
+    #   차선을 놓쳤는데 방향 값도 없으면 오른쪽으로 course_turn_deg 까지 돎 (코스상 다음 코너가 오른쪽, course_right)
+    'speed_cap': 0.3,          # [m/s]. 0 = 끔
+    'max_distance': 6.0,       # [m] 갈림길 끝난 자리에서 이만큼 (직선거리) 멀어지면 끝
+    'course_right': True,      # (사용자: 실차에서 이걸로 한 번이라도 문제 생기면 false)
+    'course_turn_deg': 90.0,
+}
+
 PARAM_DEFAULTS['axis_auto'] = {
     # (11/18 사용자) 트랙 방향 자동 보정. 대회장 comp_lap1: 카메라 차선 방향이 판단의 트랙 축(start_yaw_deg 기준 0/-90/180)과
     #   한 바퀴 내내 +7~8도 차이 (판단 켤 때 차가 출발 직선과 비뚤게 놓임) -> 3차선 기준 좌표가 틀어져 바깥 노란선 위로 감.
@@ -811,6 +834,7 @@ class MissionSupervisor(Node):
         self._yolo_streak = {}
         self.ab_votes = collections.deque(maxlen=200)       # (11/19) (시각, 'A'/'B') 다수결용
         self.static_started = False     # (11/19) 판단 켠 뒤 AVOID_STATIC 이 시작된 적 있는지 (A/B 는 그 뒤에만)
+        self.after_ab_at = None         # (11/19) 갈림길 끝난 (시각, x, y). 라바콘 들어가면 None
         self._ab_before_logged = False
         self.ab_votes_all = collections.deque(maxlen=2000)
         self.stopline = StopLineTracker(self)     # 정지선 거리 추정 (State 들이 공유)
@@ -1555,6 +1579,22 @@ class MissionSupervisor(Node):
 
     def marker_distance(self):
         return self._latest('marker_dist')
+
+    # ---- (11/19 사용자·차선 팀원) 갈림길 뒤 ~ 라바콘 전 ----
+    def mark_after_ab(self, now):
+        pose = self.odom_pose()
+        self.after_ab_at = (now, pose[0], pose[1]) if pose is not None else (now, None, None)
+
+    def after_ab_active(self):
+        if self.after_ab_at is None:
+            return False
+        _, x0, y0 = self.after_ab_at
+        pose = self.odom_pose()
+        if x0 is not None and pose is not None and math.hypot(pose[0] - x0, pose[1] - y0) > self.after_ab['max_distance']:
+            self.after_ab_at = None
+            self.get_logger().info('[A/B 뒤] %.1f m 지남 - 속도 상한·오른쪽 대비 끝' % self.after_ab['max_distance'])
+            return False
+        return True
 
     # ---- (11/19 사용자·YOLO 팀원) A/B 다수결 ----
     def _ab_turning(self, now):

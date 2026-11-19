@@ -62,6 +62,7 @@ class AvoidCone(SafeState):
         self.n_seen = 0           # 지금까지 기억에 새로 들어간 콘 수
 
     def on_enter(self):
+        self.node.after_ab_at = None    # (11/19) 갈림길 뒤 속도 상한·오른쪽 대비 끝
         self.miss = 0
         self.entered_at = self.node.clock_sec()
         self.last_steer = 0.0

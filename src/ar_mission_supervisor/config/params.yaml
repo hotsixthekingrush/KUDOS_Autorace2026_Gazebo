@@ -469,7 +469,8 @@ mission_supervisor:
       roi_min_x: 0.05
       roi_max_x: 2.0
       roi_max_y: 1.0
-      max_radius: 0.18
+      max_radius: 0.10         # (11/20 03:57 사용자 E2: 0.18 -> 0.10) 라이다 콘 = 0.07 고정, 그 밖(LIMO·벽 조각) = 0.16.
+                               #   real_lap1 595~599: r 0.16 벽 조각이 기억에 남아 콘 구간 늦게 끝남 (재생 599.05 -> 598.30)
       pair_max_dx: 0.45
       pair_max_angle_deg: 45.0   # 게이트 두 콘을 이은 선이 차 옆방향에서 이만큼 넘게 틀어지면 같은 줄 콘으로 봄
       min_gate_width: 0.30
@@ -534,8 +535,8 @@ mission_supervisor:
                                  #   1.0 이면 이 규칙이 안 맞음. 녹화로 돌려 보니 0.7 = 마지막 콘 지나고 0.1초 뒤 끝, 0.6 은 오른쪽 콘(-0.6)이 경계
       end_min_cones: 4
       # (11/20 E1) 차 앞 ghost_x_min~ghost_x_max, 옆 end_ahead_max_y 안 기억 콘이 ghost_sec 초 동안 한 번도 다시 안 보이면
-      #   '앞 콘' 수·기억 길에서 뺌 (벽 조각을 한 번 콘으로 받아 끝까지 남던 것). 0 = 끔
-      ghost_sec: 0.0
+      #   '앞 콘' 수·기억 길에서 뺌 (벽 조각을 한 번 콘으로 받아 끝까지 남던 것). 0 = 끔 (11/20 03:46 사용자: 켬, E2 는 안 함)
+      ghost_sec: 1.0
       ghost_x_min: 0.45
       ghost_x_max: 1.5
       hold_steer_zero: true      # 콘이 안 보이는데 아직 안 끝낼 때 조향 0 (예전: 마지막 조향 유지 -> 최대 조향 1.7초 유지해 43도 더 돎)

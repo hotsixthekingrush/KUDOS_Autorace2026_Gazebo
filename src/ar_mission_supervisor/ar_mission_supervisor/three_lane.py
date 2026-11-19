@@ -131,6 +131,8 @@ class ThreeLanePlanner(object):
         self.last_backup_s = None   # 마지막으로 후진을 시작한 자리 s (그 근처에서 또 막히면 후진 말고 앞뒤 움직임)
         self.backups = 0
         self.target_since = -1e9
+        self.goal_full_since = None     # (11/19) goal 차선이 끝까지 빈 상태가 시작된 시각
+        self.goal_wait_logged = None    # (11/19) 'goal 차선 앞에 LIMO 남음' 로그 (그 LIMO 자리)
         self.lat_snap_pending = False   # 옆 위치를 LIMO 로 맞춰야 하는지 (차 위치 기준일 때, 11/12)
         self.ident = None               # (11/16) 흰 점선으로 몇 번 차선인지 확인하는 중이면 {'t0', 's0', 'hyp'}
         self.edge_shrink = (0.0, 0.0)   # (오른쪽 바깥 선, 왼쪽 바깥 선)을 안쪽으로 당긴 양 [m] - 확인 전까지 양쪽 가정 모두에서 안전한 폭만
@@ -183,6 +185,8 @@ class ThreeLanePlanner(object):
         self.ab_goal = None
         self.logged_floor = False
         self.target_since = -1e9
+        self.goal_full_since = None
+        self.goal_wait_logged = None
         self.active = True
         self.released_at = None
         self._ident_begin()
@@ -491,6 +495,23 @@ class ThreeLanePlanner(object):
             if it['s'] + it['r'] - s_car < -back:
                 continue
             best = min(best, it['s'] - it['r'] - s_car)
+        return best
+
+    def goal_blocker(self, lane, s_car):
+        """(11/19 사용자) lane 안(가운데 +-(차선 반폭 + goal_pass_side)), 차 앞부터 goal_pass_ahead m 안에 통째로 앞에 있는
+        가장 가까운 장애물 가장자리 거리. 없으면 None. A/B 목표(ab_goal)일 때만 씀 (표지판 없을 때 가운데로 가는 건 섬이 가운데라 안 씀)."""
+        cfg = self.cfg
+        c = self.center(lane)
+        side = 0.5 * self.width() + cfg['goal_pass_side']
+        front = s_car + 0.5 * cfg['car_length']
+        best = None
+        for it in self.map.confirmed(cfg['confirm_hits']):
+            if abs(it['d'] - c) > side + it['r']:
+                continue
+            gap = it['s'] - it['r'] - front
+            if gap < 0.0 or gap > cfg['goal_pass_ahead']:
+                continue        # 이미 옆·뒤에 있는 건 굴려보기(차 모양)가 판단 - 지나는 대로 목표 차선으로 비스듬히 들어감
+            best = gap if best is None else min(best, gap)
         return best
 
     def obstacles_ahead(self, s_car):
@@ -1045,6 +1066,19 @@ class ThreeLanePlanner(object):
         node.dbg('static/free_target', free[self.target])
         node.dbg('static/reach_target', reach[self.target])
 
+        # (11/19 사용자) A/B 목표 차선에 아직 LIMO 가 남아 있으면 그걸 지날 때까지 목표를 안 씀 (그냥 피하기만).
+        #   n1119 comp_lap20 84~98초·lap30 103~122초: LIMO 가 남았는데 A(왼쪽) 로 먼저 가서 그 차선 마지막 LIMO 뒤에서 정지 -> 후진 반복
+        if goal is not None and cfg['goal_after_pass'] and goal == self.ab_goal:
+            blk = self.goal_blocker(goal, s_)
+            if blk is not None:
+                key = round(s_ + blk, 1)
+                if self.goal_wait_logged is None or abs(self.goal_wait_logged - key) > 0.3:
+                    self.goal_wait_logged = key
+                    log.info('[%s] 목표 %s 차선 %.2fm 앞에 LIMO 남음 - 지날 때까지 목표 안 쓰고 피하기만'
+                             % (who, self.name(goal), max(0.0, blk)))
+                node.dbg('static/goal_wait', blk)
+                goal = None
+
         def score(ln):
             sc = reach[ln] - 0.02 * abs(ln - self.lane)
             if goal is not None and ln == goal:
@@ -1053,6 +1087,19 @@ class ThreeLanePlanner(object):
 
         old = self.target
         held = now - self.target_since
+        # (11/19 사용자) goal 차선이 끝까지 비어도 goal_full_sec 동안 계속 비어야 그쪽으로 (굴려본 결과가 0.05초마다 3.00 <-> 0.12 로
+        #   튀어 목표가 계속 뒤집힘, n1119 comp_lap21 72~82초·lap31 135~140초). goal 차선에서 다른 차선으로 바꾸는 건 바꾼 지 switch_hold
+        #   안이면 goal 차선이 quick_switch_free 안에서 막힐 때만 (예전 commit_distance 0.9 라 0.3~0.5 m 로 튀면 바로 뒤집힘)
+        goal_ok = False
+        if goal is not None and goal in full:
+            if self.goal_full_since is None:
+                self.goal_full_since = now
+            goal_ok = now - self.goal_full_since >= cfg['goal_full_sec'] - 1e-6
+        else:
+            self.goal_full_since = None
+        # 목표(goal) 차선에서 다른 차선으로 바꿀 때만 quick_switch_free (static_noise Gazebo 배치에서 모든 바꿈에 쓰면 후진 0.1 -> 0.8번, +4초)
+        quick = (cfg['quick_switch_free'] if cfg['quick_switch_free'] > 0.0 and goal is not None and old == goal
+                 else cfg['commit_distance'])
         if cfg['lane_commit'] and self.changing and self.lane != old:
             # (11/12) 목표 차선으로 가는 중: 고정. 목표가 곧 막히고 switch_hold 가 지났을 때만 다시 고름
             new = old
@@ -1060,7 +1107,7 @@ class ThreeLanePlanner(object):
                 best = max(self.LANES, key=score)
                 if best != old and score(best) > score(old) + cfg['switch_margin']:
                     new = best
-        elif goal is not None and goal in full:
+        elif goal_ok:
             new = goal
         elif old in full:
             new = old
@@ -1070,7 +1117,7 @@ class ThreeLanePlanner(object):
             best = max(self.LANES, key=score)
             new = old
             if best != old and score(best) > score(old) + cfg['switch_margin']:
-                if held >= cfg['switch_hold'] or free[old] < cfg['commit_distance']:
+                if held >= cfg['switch_hold'] or free[old] < quick:
                     new = best
 
         if new != old:

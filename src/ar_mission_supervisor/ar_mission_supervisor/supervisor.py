@@ -203,6 +203,7 @@ PARAM_DEFAULTS = {
         'pd_head_k': 0.0,          # [rad/s per rad]
         'pd_head_dead_deg': 10.0,
         'pd_head_max': 0.5,        # [rad/s]
+        'pd_head_lat_max': 0.0,    # (11/19 차선 팀원 제안) |옆오차| 가 이 안일 때만 방향 항 [m]. 0 = 상관없이
         # speed_by_lateral: LANE_FOLLOWING 속도 = base_speed * max(min_ratio, 1 - |lateral| / slow_lat),
         #   한 선 추정 프레임은 min_ratio. 최저 min_speed. 가속 accel_max, 감속 decel_max 까지.
         #   켜면 위 corner_* 감속은 안 씀 (겹치지 않게). false = corner_* 감속 (11/10)
@@ -233,6 +234,12 @@ PARAM_DEFAULTS = {
         'head_min_deg': 8.0,
         'head_max_age': 1.0,       # [s]
         'head_k_yaw': 1.5,
+        # (11/19 차선 팀원 lap24) 놓치기 직전 head_max_age 초 안 큰 |차선 방향| 을 씀 (튄 값 빼고 큰 쪽 20% 자리). 마지막 값만 보면
+        #   lap24 24.7초 -5도라 안 켜짐 (그 전 1초 -33~-5도, 영상: 오른쪽 코너 바깥으로 노란 선 넘어 벽 쪽). 그게 head_full_deg 넘으면
+        #   그쪽으로 그때 차 방향에서 head_full_turn_deg 까지 크게 (거의 끝까지 꺾음) 돎, 선 다시 잡으면 차선 따라가기.
+        #   lap24 그 순간 값이 -17도라 20 이면 안 켜짐 -> 15
+        'head_full_deg': 15.0,     # [도]. 0 = 끔 (차 방향 + 차선 방향까지만)
+        'head_full_turn_deg': 90.0,
     },
     'perception': {
         'stale_sec': 0.5,
@@ -243,6 +250,7 @@ PARAM_DEFAULTS = {
     'yolo': {
         'event_range': 3.0,        # 위치가 유효할 때 이 거리 안에 들어와야 이벤트로 인정
         'pedestrian_range': 1.5,   # 보행자 표지판만 따로 (유도선보다 먼저 잡혀 SLOW_ZONE 을 건너뛰지 않게)
+        'slow_range': 1.5,         # (11/19 오전 사용자) 서행 표지판(SLOW, 지금은 방지턱 구간 표지판)만 따로 [m]. n1119: 2.15~2.35 m 에서 BUMP 시작. 0 = event_range
         'parking_range': 1.5,      # (11/19 사용자·YOLO 팀원) 주차 표지판(P)만 따로: 새 모델이 3 m 넘게 멀리서도 잡아 신호등 앞에서 주차로 갈 수 있음 [m]. 0 = event_range
         'confirm_frames': 2,       # 같은 이벤트가 연속 N 프레임 검출돼야 인정 (오인식 방지)
         'hold_sec': 1.0,           # YOLO 결과 유지시간 (추론이 느려도 프레임 사이가 끊기지 않게)
@@ -265,10 +273,10 @@ PARAM_DEFAULTS = {
         'approach_speed': 0.2,
         'min_speed': 0.08,
         'slowdown_distance': 0.0,  # >0 이면 정지 직전 이 거리부터 감속 (0 = 끝까지 approach_speed)
-        'stop_gap': 0.13,          # (11/17 사용자) 0.03 -> 0.08: full_1117_1 아슬아슬. (11/19 사용자) 0.13: 1118 comp_lap11 0.074 에서 5 cm 뒤로
+        'stop_gap': 0.10,          # (11/17 사용자) 0.03 -> 0.08: full_1117_1 아슬아슬. (11/19) 0.13: 1118 comp_lap11 0.074 에서 5 cm 뒤로. (11/19 오전 사용자) 0.10: n1119 0.121~0.130 에서 3 cm 앞으로
         'green_confirm_sec': 0.3,  # 정지 후 초록불이 이 시간 이상 유지되면 출발
         'approach_timeout': 25.0,  # 정지선 거리를 끝내 못 받으면 이 시간 뒤 현 위치에서 판정
-        'max_wait_sec': 10.0,      # 정지 후 이 시간 안에 초록불을 못 보면 출발 (0 = 무한 대기)
+        'max_wait_sec': 90.0,      # 정지 후 이 시간 안에 초록불을 못 보면 출발 (0 = 무한 대기). (11/19 사용자) 10 -> 90: 대회 신호등 자동, 빨간불만 약 45초
         # (11/17 사용자) 출발할 때 옆 길 신호등을 보고 TRAFFIC_LIGHT 로 들어감 -> 켠 자리에서 이 거리 전엔 무시 (켜고 끄기: ignore_start)
         'ignore_start_distance': 3.0,  # [m] 켠 뒤 실제로 간 거리 (11/17 full_1117_2 전엔 직선거리)
     },
@@ -284,7 +292,7 @@ PARAM_DEFAULTS = {
         'approach_speed': 0.2,
         'min_speed': 0.08,
         'slowdown_distance': 0.0,
-        'stop_gap': 0.14,          # (11/17 사용자) 0.03 -> 0.18: full_1117_1 15 cm 더 가서 섬. (11/19) 0.14: 1118 녹화 0.175 에서 4 cm 앞으로
+        'stop_gap': 0.11,          # (11/17 사용자) 0.03 -> 0.18: full_1117_1 15 cm 더 가서 섬. (11/19) 0.14: 1118 녹화 0.175 에서 4 cm 앞으로. (11/19 오전) 0.11: n1119 0.129~0.139 에서 3 cm 앞으로
         'wait_sec': 4.0,           # 규정: 완전정지 후 3초 이상, 15초 이내 출발
         'approach_timeout': 25.0,
         # (11/16 사용자) 횡단보도가 지그재그 바로 뒤라 접근 중에도 SLOW_ZONE 처럼 헤딩 고정 (k_yaw·lane_blend 는 slow_zone 값).
@@ -296,7 +304,7 @@ PARAM_DEFAULTS = {
     },
     'bump': {
         'speed': 0.2,              # 규정: 기본 속도의 1/2, 최대 0.2 m/s
-        'after_sign_sec': 3.0,     # (11/15 사용자) 표지판 옆을 지나고 이 시간 뒤 끝 [s]. 0 = 아래 거리 방식
+        'after_sign_sec': 5.0,     # (11/15 사용자) 표지판 옆을 지나고 이 시간 뒤 끝 [s]. 0 = 아래 거리 방식. (11/19 사용자) 3 -> 5
         'after_sign_distance': 1.8,    # after_sign_sec 0 일 때: 표지판을 지나 이만큼 더 가면 끝 (odom) [m] (11/05)
         'unknown_sign_distance': 2.0,  # 표지판 위치를 한 번도 못 받았을 때 표지판까지 거리로 침 [m]
         'duration_sec': 8.0,       # odom 이 없을 때만: 진입 후 이 시간 뒤 끝 (예전 방식)
@@ -370,6 +378,12 @@ PARAM_DEFAULTS = {
         'switch_step': 0.3,        # 이 거리마다 '여기서 옆 차선으로 옮기면' 을 굴려 봄 [m]
         'switch_margin': 0.15,     # 목표 차선은 이만큼 더 멀리 갈 수 있을 때만 바꿈 [m]
         'switch_hold': 1.0,        # 목표 차선을 바꾼 뒤 이 시간은 유지 (지금 목표가 곧 막히면 예외) [s] (11/12: 0.5 -> 1.0)
+        # (11/19 사용자) 3차선 왔다갔다 (n1119 comp_lap20·21·30·31)
+        'goal_after_pass': True,   # A/B 목표 차선 앞 goal_pass_ahead m 안에 LIMO 가 남아 있으면 지날 때까지 목표 안 씀 (피하기만)
+        'goal_pass_ahead': 3.0,    # [m]
+        'goal_pass_side': 0.05,    # 목표 차선 반폭에 더하는 옆 여유 [m]
+        'goal_full_sec': 0.3,      # 목표 차선이 끝까지 빈 게 이만큼 계속돼야 그쪽으로 [s] (0.15~0.3 시험: 섬 앞 A/B 차선은 그대로)
+        'quick_switch_free': 0.25, # A/B 목표 차선에서 다른 차선으로: 바꾼 지 switch_hold 안이면 목표 차선이 이 거리 안에서 막힐 때만 [m] (예전 = commit_distance 0.9). 0 = 예전
         # (11/12) 차선 바꾸기 확정: 켜면 목표 차선에 들어가기 전엔 목표 고정 (목표가 commit_distance 안에서 막히고
         #   switch_hold 지났을 때만 예외). pd_lane_run4 의 목표 뒤집힘 때문에 넣었지만 0.55 배치는 계속 다시 골라야
         #   빠져나가는 경우가 있어 (run.py 4개 막힘) 기본 끔. '바로 옆 차선만' 은 0.55 배치에서 막혀서 코드에 안 넣음
@@ -632,7 +646,7 @@ PARAM_DEFAULTS['entry_hold'] = {
     'distance': 2.0,           # 이만큼 곧게 간 뒤 차선 따라가기로 [m] (그 전에 AVOID_STATIC 등으로 넘어가면 거기서 끝)
     'abort_deg': 40.0,         # 도중에 이만큼 넘게 틀어지면 그만
     'k_yaw': 1.5,              # 조향 = k_yaw x 방향 오차
-    'lane_blend': 1.0,         # 차선 보정을 섞는 비율 (0 = 방향만). (11/19 사용자) 0 -> 1.0 + lane_max: 치우친 채 2 m 가던 것 (1118 comp_lap11·18)
+    'lane_blend': 0.0,         # 차선 보정을 섞는 비율 (0 = 방향만). (11/19) 1.0 + lane_max 시험 -> (11/19 오전 사용자) 0: 차선 노드가 입구에서 맨 오른쪽 차로 기준 값을 내서 (차선 팀원) 오른쪽으로 끌림. 차선 노드가 가운데 차로 기준이 되면 1.0
     'lane_max': 0.1,           # (11/19) 차선 몫 한계 [rad 조향]. 0 = 한계 없음
     'max_speed': 0.3,          # 이 동안 속도 상한 [m/s]
 }
@@ -654,6 +668,10 @@ PARAM_DEFAULTS['ab_vote'] = {
     # (11/19 사용자·YOLO 팀원) A/B 표지판은 판단을 켠 뒤 AVOID_STATIC 이 한 번 시작된 뒤에만 받음 (1119 모델: 37초 서행·보행자 표지판을
     #   B 0.88 로 봄). 중간(3차선 뒤)부터 켜서 시험할 땐 false. 판단 다시 켜면 처음부터
     'after_static': True,
+    # (11/19 n1119) 표지판이 이 거리보다 멀면 표로 안 셈 (보였다는 것만 기억해 천천히 감). 1119 실차 모델이 B 표지판을 1.4 m 넘게
+    #   멀면 A 0.7~0.88 로 봄: comp_lap21·30·31 셋 다 실제 B 인데 1.9~2.2 m 에서 A 로 확정. 1.2 m 안 표만 세면 넷 다 맞음
+    #   (lap20 A: A 47 / B 0, lap21 B: A 0 / B 28, lap30 B: A 1 / B 6, lap31 B: A 0 / B 8). 0 = 거리 안 봄
+    'max_dist': 0.0,           # [m] (n1119 근거로 1.2 후보, 사용자 결정 전 0)
 }
 
 PARAM_DEFAULTS['after_ab'] = {
@@ -832,6 +850,7 @@ class MissionSupervisor(Node):
         for k in self.YOLO_KEYS:
             self.buf[k].stale_sec = max(stale, self.yolo['hold_sec'])
         self._yolo_streak = {}
+        self.ab_last_seen = -1e9                            # (11/19) 마지막으로 A/B 표지판 본 시각 (멀어서 안 센 것도)
         self.ab_votes = collections.deque(maxlen=200)       # (11/19) (시각, 'A'/'B') 다수결용
         self.static_started = False     # (11/19) 판단 켠 뒤 AVOID_STATIC 이 시작된 적 있는지 (A/B 는 그 뒤에만)
         self.after_ab_at = None         # (11/19) 갈림길 끝난 (시각, x, y). 라바콘 들어가면 None
@@ -1187,6 +1206,8 @@ class MissionSupervisor(Node):
             limit = ped_rng if o.class_id == MissionObject.PEDESTRIAN_SIGN else rng
             if o.class_id == MissionObject.PARKING_SIGN and self.yolo['parking_range'] > 0.0:
                 limit = self.yolo['parking_range']      # (11/19) P 는 가까이서만
+            if o.class_id == MissionObject.SLOW_SIGN and self.yolo['slow_range'] > 0.0:
+                limit = self.yolo['slow_range']         # (11/19 오전) 서행 표지판도 가까이서만
             return (not o.position_valid) or X(o) <= limit
 
         # 이번 프레임에 보이는 이벤트들 -> 연속 프레임 수 갱신
@@ -1251,10 +1272,11 @@ class MissionSupervisor(Node):
             sign = max(signs, key=lambda o: o.confidence)
             self.buf['marker_type'].set(
                 'A' if sign.class_id == MissionObject.SIGN_A else 'B', now)
-            self._ab_add_vote('A' if sign.class_id == MissionObject.SIGN_A else 'B', now)
+            dist = None
             if sign.position_valid:
                 dist, _ = self._latency_compensated(X(sign), msg.header, now)
                 self.buf['marker_dist'].set(dist, now)
+            self._ab_add_vote('A' if sign.class_id == MissionObject.SIGN_A else 'B', now, dist)
 
         stamp = _stamp_sec(msg.header)
         self.dbg('yolo/age', max(0.0, now - stamp) if stamp > 0.0 else 0.0)
@@ -1601,7 +1623,12 @@ class MissionSupervisor(Node):
         rate = self.turn_rate(now)
         return rate is not None and abs(rate) > math.radians(self.ab_vote['max_turn_dps'])
 
-    def _ab_add_vote(self, kind, now):
+    def _ab_add_vote(self, kind, now, dist=None):
+        self.ab_last_seen = now
+        lim = self.ab_vote['max_dist']
+        if lim > 0.0 and dist is not None and dist > lim:
+            self.dbg('ab/vote_skip_far', dist)
+            return                                  # 멀면 안 셈 (멀리선 B 를 A 로 봄)
         if self._ab_turning(now):
             self.dbg('ab/vote_skip_turn', 1.0)
             return                                  # 크게 도는 중엔 안 셈
@@ -1639,7 +1666,7 @@ class MissionSupervisor(Node):
         """최근 window 초 안에 A/B 표가 하나라도 있는지 (못 정했으면 천천히 가려고)."""
         if now is None:
             now = self.clock_sec()
-        return sum(self.ab_counts(now)) > 0
+        return sum(self.ab_counts(now)) > 0 or now - self.ab_last_seen <= self.ab_vote['window']
 
     def ab_fallback(self, since, now=None):
         """since 이후 받은 표 전부의 다수 (같으면 마지막 표지판). 표가 없으면 None."""

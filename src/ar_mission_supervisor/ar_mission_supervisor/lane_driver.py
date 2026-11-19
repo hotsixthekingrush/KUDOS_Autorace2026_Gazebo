@@ -33,6 +33,7 @@ class LaneDriver(object):
         self.last_steer = 0.0
         self.lost_kappa = None     # (11/19) 차선을 놓친 순간 IMU(odom 방향)로 잰 곡률 [1/m] (False = 못 잼)
         self.last_head = None      # (11/19) 마지막 차선 값 (시각, 그때 차 방향, 차선 방향)
+        self.head_hist = []        # (11/19) 최근 차선 값들 (시각, 차 방향, 차선 방향), head_max_age 초
         self.lost_target = None    # (11/19) 놓친 뒤 돌아 갈 방향 (yaw) 과 이유
         self.lost_logged = False
         self.pd_prev = None        # omega_pd: 직전 차선 값 (평활한 lateral, 찍은 시각, 원래 lateral)
@@ -72,9 +73,20 @@ class LaneDriver(object):
             return None
         lh = self.last_head
         if cfg['head_follow'] and lh is not None and now - lh[0] <= cfg['head_max_age']:
-            if abs(lh[2]) >= math.radians(cfg['head_min_deg']):
-                hd = clamp(lh[2], -math.pi / 2, math.pi / 2)
-                return (lh[1] + hd, '놓치기 직전 차선 방향 %+.0f도' % math.degrees(lh[2]))
+            # (11/19 차선 팀원 lap24) 마지막 값이 아니라 head_max_age 초 안 큰 |차선 방향|. 차선 방향은 한 장씩 튐 (lap24 10.41초
+            #   -4 -> +30 -> -1도, 23.68초 -27 -> -51 -> -31도) -> 1초 중간값 부호와 같은 것들 중 큰 쪽 20% 자리 값 (튄 값 빼고 큰 값)
+            recent = [h for h in self.head_hist if now - h[0] <= cfg['head_max_age']] or [lh]
+            med = sorted(h[2] for h in recent)[len(recent) // 2]
+            same = sorted((h for h in recent if h[2] * med > 0.0), key=lambda h: -abs(h[2]))
+            big = same[int(0.2 * len(same))] if len(same) >= 3 else min(recent, key=lambda h: abs(h[2] - med))
+            full = float(cfg.get('head_full_deg', 0.0))
+            if full > 0.0 and abs(big[2]) >= math.radians(full):
+                turn = math.copysign(math.radians(cfg['head_full_turn_deg']), big[2])
+                return (big[1] + turn, '놓치기 직전 1초 안 차선 방향 %+.0f도 (마지막 %+.0f도) - 크게 %+.0f도'
+                        % (math.degrees(big[2]), math.degrees(lh[2]), math.degrees(turn)))
+            if abs(big[2]) >= math.radians(cfg['head_min_deg']):
+                hd = clamp(big[2], -math.pi / 2, math.pi / 2)
+                return (big[1] + hd, '놓치기 직전 차선 방향 %+.0f도' % math.degrees(big[2]))
             return None        # 직전 방향이 거의 직진 -> 그대로 (imu_keep)
         if node.after_ab_active() and node.after_ab['course_right']:
             ab = node.after_ab
@@ -127,7 +139,8 @@ class LaneDriver(object):
             #   1118 comp_lap14 145초: lat 0 인데 방향 -28도 -> 조향 -0.04 로 직진하다 C3 에서 놓침
             hd = lane[1]
             dead = math.radians(float(g.get('pd_head_dead_deg', 10.0)))
-            if abs(hd) > dead:
+            lat_max = float(g.get('pd_head_lat_max', 0.0))   # (11/19 차선 팀원) 옆오차가 이 안일 때만 (0 = 상관없이)
+            if abs(hd) > dead and (lat_max <= 0.0 or abs(lane[0]) < lat_max):
                 extra = k_head * (abs(hd) - dead) * (1.0 if hd > 0 else -1.0)
                 lim = float(g.get('pd_head_max', 0.5))
                 omega += clamp(extra, -lim, lim)
@@ -199,6 +212,10 @@ class LaneDriver(object):
         pose = node.odom_pose()
         if pose is not None:
             self.last_head = (now, pose[2], lane.heading)
+            self.head_hist.append(self.last_head)
+            keep = float(node.failsafe.get('head_max_age', 1.0))
+            while self.head_hist and now - self.head_hist[0][0] > keep:
+                self.head_hist.pop(0)
         steer = self.lane_steer(lane, now, offset, speed=target_speed)
         if self._pd():
             steer = self._limit_steer(steer, now)

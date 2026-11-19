@@ -108,7 +108,7 @@ class LaneDriver(object):
         return rate / v
 
     # ------------------------------------------------------------------
-    def lane_omega(self, lane, offset=0.0):
+    def lane_omega(self, lane, offset=0.0, speed=None):
         """omega_pd: 회전속도 = pd_kp * lateral + pd_kd * (lateral 변화율), +-pd_max_omega.
         변화율은 새 차선 값(찍은 시각이 바뀜)이 왔을 때만 다시 계산 (제어 20 Hz, 차선은 그보다 느림).
         이웃 값이 pd_d_jump 넘게 다르면 (한 선 <-> 두 선, 차로 바뀜) 그 변화율은 버림 (D 가 튀지 않게)."""
@@ -134,6 +134,11 @@ class LaneDriver(object):
         lateral = self.pd_prev[0]
         omega = g['pd_kp'] * lateral + g['pd_kd'] * self.pd_rate
         k_head = float(g.get('pd_head_k', 0.0))
+        v0, v1 = float(g.get('pd_head_v0', 0.0)), float(g.get('pd_head_v1', 0.0))
+        if k_head > 0.0 and v1 > v0 > 0.0:
+            # (11/19 차선 팀원) 지령 속도로 자동: v0 이하 0, v1 이상 pd_head_k, 사이는 비례 (갈림길 뒤 0.3 m/s 제한 땐 자동으로 꺼짐)
+            v = abs(speed) if speed is not None else abs(getattr(self.node, 'last_v', 0.0))
+            k_head *= clamp((v - v0) / (v1 - v0), 0.0, 1.0)
         if k_head > 0.0:
             # (11/19 차선 팀원 제안, 시험 중) |차선 방향| 이 pd_head_dead_deg 넘으면 넘은 만큼 더 돎 (+-pd_head_max).
             #   1118 comp_lap14 145초: lat 0 인데 방향 -28도 -> 조향 -0.04 로 직진하다 C3 에서 놓침
@@ -160,8 +165,8 @@ class LaneDriver(object):
         """
         node = self.node
         if self._pd():
-            omega = self.lane_omega(lane, offset)
             v = speed if speed is not None else getattr(node, 'last_v', 0.0)
+            omega = self.lane_omega(lane, offset, speed=v)
             v = max(abs(v), node.lane_gains['min_speed'], 1e-3)
             ref = float(node.lane_gains.get('pd_speed_ref', 0.0))
             if self.speed_ref and ref > 0.0 and v < ref:

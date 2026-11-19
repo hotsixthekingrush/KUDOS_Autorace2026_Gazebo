@@ -139,13 +139,21 @@ class LaneDriver(object):
             # (11/19 차선 팀원) 지령 속도로 자동: v0 이하 0, v1 이상 pd_head_k, 사이는 비례 (갈림길 뒤 0.3 m/s 제한 땐 자동으로 꺼짐)
             v = abs(speed) if speed is not None else abs(getattr(self.node, 'last_v', 0.0))
             k_head *= clamp((v - v0) / (v1 - v0), 0.0, 1.0)
+        single_deg = float(g.get('pd_head_single_deg', 0.0))
+        lat_free = False
+        if (single_deg > 0.0 and getattr(lane, 'single', False) and len(lane) > 1
+                and abs(lane[1]) >= math.radians(single_deg)):
+            # (11/19 사용자·차선 팀원) 한 선으로 추정한 값이면 lat 이 틀리기 쉬움 (real_lap1 632~634.7초: lat -0.01 인데 방향 -21도,
+            #   조향 거의 0, 차선 팀원 real_lap11 22~25초 0.22 m/s 에서 코너 덜 돎) -> |방향| 이 이 이상이면 속도·lat 상관없이 방향 보정 전부
+            k_head = float(g.get('pd_head_k', 0.0))
+            lat_free = True
         if k_head > 0.0:
             # (11/19 차선 팀원 제안, 시험 중) |차선 방향| 이 pd_head_dead_deg 넘으면 넘은 만큼 더 돎 (+-pd_head_max).
             #   1118 comp_lap14 145초: lat 0 인데 방향 -28도 -> 조향 -0.04 로 직진하다 C3 에서 놓침
             hd = lane[1]
             dead = math.radians(float(g.get('pd_head_dead_deg', 10.0)))
             lat_max = float(g.get('pd_head_lat_max', 0.0))   # (11/19 차선 팀원) 옆오차가 이 안일 때만 (0 = 상관없이)
-            if abs(hd) > dead and (lat_max <= 0.0 or abs(lane[0]) < lat_max):
+            if abs(hd) > dead and (lat_free or lat_max <= 0.0 or abs(lane[0]) < lat_max):
                 extra = k_head * (abs(hd) - dead) * (1.0 if hd > 0 else -1.0)
                 lim = float(g.get('pd_head_max', 0.5))
                 omega += clamp(extra, -lim, lim)

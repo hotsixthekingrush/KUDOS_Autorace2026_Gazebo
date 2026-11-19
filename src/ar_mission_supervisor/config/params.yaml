@@ -100,6 +100,9 @@ mission_supervisor:
       # (11/19 차선 팀원) 지령 속도로 자동: 0.35 m/s 이하 0, 0.5 이상 pd_head_k, 사이 비례 (갈림길 뒤 0.3 제한 땐 자동으로 꺼짐)
       pd_head_v0: 0.35         # [m/s]
       pd_head_v1: 0.5          # [m/s]
+      # (11/19 사용자·차선 팀원) 한 선으로 추정한 값(single)이고 |방향| 25도 이상이면 속도·옆오차 상관없이 방향 보정 전부.
+      #   real_lap1 632~634.7초 lat -0.01 인데 방향 -21도로 조향 거의 0, real_lap11 0.22 m/s 코너 덜 돎. 0 = 끔
+      pd_head_single_deg: 25.0
       # 속도 (LANE_FOLLOWING 만): base_speed * max(min_ratio, 1 - |lateral| / slow_lat), slow_rule 조건이면 min_ratio,
       #   최저 min_speed, 가속 accel_max / 감속 decel_max 까지. 켜면 위 corner_* 감속은 안 씀. false = corner_* 감속
       speed_by_lateral: true

@@ -209,6 +209,8 @@ PARAM_DEFAULTS = {
         # (11/19 차선 팀원) 지령 속도로 자동: pd_head_v0 이하 0, pd_head_v1 이상 pd_head_k, 사이 비례 (0.3 m/s 에선 나빠져서). v1 0 = 항상 pd_head_k
         'pd_head_v0': 0.35,        # [m/s]
         'pd_head_v1': 0.5,         # [m/s]
+        # (11/19 사용자·차선 팀원) 한 선 추정(single)이고 |방향| 이 이 이상이면 속도·옆오차 상관없이 방향 보정 전부 (lat 믿기 어려울 때). 0 = 끔
+        'pd_head_single_deg': 25.0,
         # speed_by_lateral: LANE_FOLLOWING 속도 = base_speed * max(min_ratio, 1 - |lateral| / slow_lat),
         #   한 선 추정 프레임은 min_ratio. 최저 min_speed. 가속 accel_max, 감속 decel_max 까지.
         #   켜면 위 corner_* 감속은 안 씀 (겹치지 않게). false = corner_* 감속 (11/10)

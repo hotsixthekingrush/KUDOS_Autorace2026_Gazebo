@@ -673,7 +673,8 @@ PARAM_DEFAULTS['ab_vote'] = {
     # (11/19 n1119) 표지판이 이 거리보다 멀면 표로 안 셈 (보였다는 것만 기억해 천천히 감). 1119 실차 모델이 B 표지판을 1.4 m 넘게
     #   멀면 A 0.7~0.88 로 봄: comp_lap21·30·31 셋 다 실제 B 인데 1.9~2.2 m 에서 A 로 확정. 1.2 m 안 표만 세면 넷 다 맞음
     #   (lap20 A: A 47 / B 0, lap21 B: A 0 / B 28, lap30 B: A 1 / B 6, lap31 B: A 0 / B 8). 0 = 거리 안 봄
-    'max_dist': 0.0,           # [m] (n1119 근거로 1.2 후보, 사용자 결정 전 0)
+    'max_dist': 1.2,           # [m] (11/19 12:32 사용자: 켬, 본선 전 새 YOLO 모델 확인 못 해서)
+    'far_slow_margin': 0.6,    # [m] 표지판이 max_dist + 이 안이면 (표로 안 세도) undecided_speed 로 줄여 1.2 m 안 표를 모음
 }
 
 PARAM_DEFAULTS['after_ab'] = {
@@ -1668,7 +1669,14 @@ class MissionSupervisor(Node):
         """최근 window 초 안에 A/B 표가 하나라도 있는지 (못 정했으면 천천히 가려고)."""
         if now is None:
             now = self.clock_sec()
-        return sum(self.ab_counts(now)) > 0 or now - self.ab_last_seen <= self.ab_vote['window']
+        # (11/19) 멀어서 안 센 표지판은 max_dist + far_slow_margin 안일 때만 침 (2.5 m 부터 0.15 m/s 면 10초 넘게 기어감,
+        #   아예 안 치면 가짜 인지 3차선에서 1.2 m 안 표를 못 모으고 지나감)
+        if sum(self.ab_counts(now)) > 0:
+            return True
+        d = self._latest('marker_dist')
+        lim = self.ab_vote['max_dist']
+        return (lim > 0.0 and now - self.ab_last_seen <= self.ab_vote['window'] and d is not None
+                and d <= lim + self.ab_vote['far_slow_margin'])
 
     def ab_fallback(self, since, now=None):
         """since 이후 받은 표 전부의 다수 (같으면 마지막 표지판). 표가 없으면 None."""

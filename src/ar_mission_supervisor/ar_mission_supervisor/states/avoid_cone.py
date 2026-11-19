@@ -41,6 +41,14 @@ from ar_mission_supervisor.geometry import (
     distance, pure_pursuit_curvature, point_along_path, find_largest_gap)
 
 
+class _MemCone(object):
+    """기억한 콘을 라이다 장애물처럼 (base_link)."""
+    __slots__ = ('x', 'y', 'radius', 'is_dynamic')
+
+    def __init__(self, x, y, r):
+        self.x, self.y, self.radius, self.is_dynamic = x, y, r, False
+
+
 class AvoidCone(SafeState):
 
     OUTCOMES = ['done']
@@ -60,6 +68,10 @@ class AvoidCone(SafeState):
         self.final_gate = None    # 지금까지 본 가장 먼 게이트 선 (odom 점 x, y, 앞쪽 방향 nx, ny)
         self.few = 0              # 차 앞 콘이 end_ahead_min 개 미만인 연속 횟수
         self.n_seen = 0           # 지금까지 기억에 새로 들어간 콘 수
+        self.last_path = None     # (11/19) 마지막으로 굴려본 길 (odom 점들)
+        self.last_path_t = None
+        self.kind = None          # (11/19) 지금 방식 'gate' / 'side'
+        self.kind_since = None
 
     def on_enter(self):
         self.node.after_ab_at = None    # (11/19) 갈림길 뒤 속도 상한·오른쪽 대비 끝
@@ -76,6 +88,10 @@ class AvoidCone(SafeState):
         self.final_gate = None
         self.few = 0
         self.n_seen = 0
+        self.last_path = None
+        self.last_path_t = None
+        self.kind = None
+        self.kind_since = None
 
     def run(self):
         node = self.node
@@ -102,6 +118,11 @@ class AvoidCone(SafeState):
             hold = 0.0 if cfg['hold_steer_zero'] else self.last_steer
 
             if not cones:
+                if self._follow_memory(pose, cfg, now, 'mem_roll'):
+                    # (11/19 real_lap1 491.25~491.34초) 라이다가 콘을 안 보내도 기억한 콘이 바로 옆에 있으면 직진(조향 0) 대신
+                    #   마지막 길로 계속 굴려보기
+                    self.sleep()
+                    continue
                 if self._gate_not_passed(cfg):
                     # 라이다 시야(앞쪽)에선 빠졌지만 마지막 게이트 선을 앞바퀴가 아직 안 넘음 - 넘을 때까지 계속
                     # (한쪽 콘만 있으면 마지막 콘이 일찍 시야에서 빠져, 앞바퀴가 마지막 줄 전에 끝나던 문제)
@@ -119,18 +140,36 @@ class AvoidCone(SafeState):
 
             self.miss = 0
 
+            if cfg.get('path_from_memory', False) and pose is not None:
+                # (11/19 real_lap1 시뮬) 라이다가 가까운 콘을 자주 빠뜨림 (488초: 한 장엔 있고 다음 장엔 없음) -> 이번 장에 보인 콘만으로
+                #   짝을 지으면 먼 콘끼리 엉뚱하게 짝지음. 기억한 콘(odom) 중 지금 ROI 안인 것으로 길을 만듦 (닿음 검사는 원래도 기억으로 함)
+                cones = self._memory_cones(pose, cfg) or cones
             gates = self._gates(cones, cfg)
             if gates:
                 self.side = None                     # 게이트가 다시 보이면 따라갈 쪽은 다음에 새로 정함
                 if pose is not None:
                     (lx, ly), (rx, ry) = self.last_pair
                     self._note_gate(pose, (0.5 * (lx + rx), 0.5 * (ly + ry)), (ly - ry, rx - lx))
+            hold = cfg.get('mode_hold_sec', 0.0)
+            held = hold > 0.0 and self.kind_since is not None and now - self.kind_since < hold
+            if held and self.kind == 'side' and gates:
+                # (11/19) 한쪽 줄로 바꾼 지 mode_hold_sec 안이면 게이트가 보여도 한쪽 줄 그대로 (real_lap1: 102번 중 62번 방식 바뀜)
+                if self._drive_side_line(cones, pose, cfg, now, keep_side=True):
+                    self.sleep()
+                    continue
+            if held and self.kind == 'gate' and not gates:
+                # 게이트로 바꾼 지 mode_hold_sec 안이면 게이트가 잠깐 안 보여도 마지막 게이트 길로
+                if self._follow_memory(pose, cfg, now, 'gate_hold', need_near=False):
+                    self.sleep()
+                    continue
+
             if cfg['use_rollout'] and pose is not None and gates:
+                self._set_kind('gate', now)
                 self._drive_rollout(pose, gates, cfg, now)
                 self.sleep()
                 continue
 
-            if not gates and self._drive_side_line(cones, pose, cfg, now):
+            if not gates and self._drive_side_line(cones, pose, cfg, now, keep_side=held):
                 self.sleep()
                 continue
 
@@ -248,7 +287,64 @@ class AvoidCone(SafeState):
         along = (fx - g[0]) * g[2] + (fy - g[1]) * g[3]
         return along < cfg['pass_margin'] and math.hypot(fx - g[0], fy - g[1]) < 0.8
 
-    def _drive_side_line(self, cones, pose, cfg, now):
+    def _memory_cones(self, pose, cfg):
+        x, y, yaw = pose
+        c, s = math.cos(yaw), math.sin(yaw)
+        out = []
+        for m in self.memory:
+            bx = c * (m[0] - x) + s * (m[1] - y)
+            by = -s * (m[0] - x) + c * (m[1] - y)
+            if cfg['roi_min_x'] <= bx <= cfg['roi_max_x'] and abs(by) <= cfg['roi_max_y']:
+                out.append(_MemCone(bx, by, m[2]))
+        return out
+
+    def _set_kind(self, kind, now):
+        if kind != self.kind:
+            self.kind = kind
+            self.kind_since = now
+
+    def _follow_memory(self, pose, cfg, now, mode, need_near=True):
+        """(11/19) 마지막으로 굴려본 길(odom)로 계속 굴려보기. 그 길이 mem_follow_sec 안에 만든 것이고, need_near 면
+        기억한 콘이 차 옆·앞 가까이(-0.3~0.8 m, 옆 0.6 m 안) 있을 때만. 못 하면 False."""
+        lim = cfg.get('mem_follow_sec', 0.0)
+        if mode == 'gate_hold':
+            lim = max(lim, cfg.get('mode_hold_sec', 0.0))
+        if lim <= 0.0 or pose is None or self.last_path is None or now - self.last_path_t > lim:
+            return False
+        x, y, yaw = pose
+        c, s = math.cos(yaw), math.sin(yaw)
+        if need_near:
+            near = False
+            for m in self.memory:
+                bx = c * (m[0] - x) + s * (m[1] - y)
+                by = -s * (m[0] - x) + c * (m[1] - y)
+                if -0.3 < bx < 0.8 and abs(by) < 0.6:
+                    near = True
+                    break
+            if not near:
+                return False
+        pts = []
+        for ox, oy in self.last_path:
+            bx = c * (ox - x) + s * (oy - y)
+            by = -s * (ox - x) + c * (oy - y)
+            pts.append((bx, by))
+        ahead = [p for p in pts if p[0] > 0.05]
+        if len(ahead) < 2 and len(pts) >= 2:
+            (ax, ay), (bx2, by2) = pts[-2], pts[-1]          # 마지막 선분을 앞으로 늘림
+            dx, dy = bx2 - ax, by2 - ay
+            n = math.hypot(dx, dy)
+            if n > 1e-6:
+                for k in (1, 2, 3):
+                    q = (bx2 + dx / n * 0.3 * k, by2 + dy / n * 0.3 * k)
+                    if q[0] > 0.05:
+                        ahead.append(q)
+        if not ahead:
+            return False
+        self._drive_rollout(pose, ahead, cfg, now, record=False)
+        self.node.dbg('cone/mode', mode)
+        return True
+
+    def _drive_side_line(self, cones, pose, cfg, now, keep_side=False):
         """한쪽 콘 줄을 따라간다. 줄을 못 찾으면 False."""
         node = self.node
         ahead = sorted((c.x, c.y) for c in cones)
@@ -263,10 +359,11 @@ class AvoidCone(SafeState):
                 by = -s * (m[0] - x) + c * (m[1] - y)
                 if bx < ahead[0][0] - 0.05 and abs(by) < 1.0:
                     beside.append((bx, by))
-        found = self._side_line(beside, ahead, cfg)
+        found = self._side_line(beside, ahead, cfg, keep_side)
         if found is None:
             return False
         side, chain = found
+        self._set_kind('side', now)
         self.side = side
         half = self.half_width if self.half_width is not None else cfg['side_half_width']
         if pose is not None:
@@ -301,7 +398,7 @@ class AvoidCone(SafeState):
         node.dbg('cone/side_lateral', lateral)
         return True
 
-    def _side_line(self, beside, ahead, cfg):
+    def _side_line(self, beside, ahead, cfg, keep_side=False):
         """한 줄로 이어진 콘 묶음 하나를 고른다 -> (쪽 +1 왼쪽/-1 오른쪽, [콘...] 뒤에서 앞 순) 또는 None.
 
         차에 가까운 콘 몇 개에서 각각 줄을 이어 보고, 가장 멀리까지 이어지는 줄을 고른다
@@ -322,7 +419,7 @@ class AvoidCone(SafeState):
             if len(chain) < 2 or chain[-1][0] <= 0.0:
                 continue
             side = self._which_side(chain)
-            key = chain[-1][0] + (0.05 if side == self.side else 0.0)
+            key = chain[-1][0] + ((10.0 if keep_side else 0.05) if side == self.side else 0.0)   # (11/19) 유지 중엔 같은 쪽
             if best is None or key > best[0]:
                 best = (key, side, chain)
         return None if best is None else (best[1], best[2])
@@ -476,7 +573,7 @@ class AvoidCone(SafeState):
                 keep.append(m)
         self.memory = keep
 
-    def _drive_rollout(self, pose, gates, cfg, now):
+    def _drive_rollout(self, pose, gates, cfg, now, record=True):
         """게이트 길을 옆으로 옮긴 후보들을 Pure Pursuit 로 따라가 보고, 안 닿는 것 중 가운데에 가까운 것.
 
         후보 = 옆으로 옮긴 양(0, ±offset_step … ±offset_max) x 따라가는 거리(lookahead, lookahead_short, lookahead_long).
@@ -488,6 +585,9 @@ class AvoidCone(SafeState):
         wb, ms = node.wheel_base, node.max_steer
         x, y, yaw = pose
         c, s = math.cos(yaw), math.sin(yaw)
+        if record:
+            self.last_path = [(x + c * gx - s * gy, y + s * gx + c * gy) for gx, gy in gates]
+            self.last_path_t = now
         reach = cfg['horizon'] + 0.6
         obs = []
         for m in self.memory:
@@ -538,12 +638,16 @@ class AvoidCone(SafeState):
             node.dbg('cone/mode', 'roll')
             v = cfg['speed'] / (1.0 + cfg['curve_gain'] * abs(math.tan(steer) / wb))
             v = max(cfg['creep_speed'], v)
+            if cfg.get('slow_margin', 0.0) > 0.0 and margin < cfg['slow_margin']:
+                v = min(v, cfg['slow_speed'])  # (11/19) 여유가 적은 길이면 그 동안만 천천히 (지연 동안 덜 밀림)
         else:
             off, steer, end, margin, la = fallback
             node.dbg('cone/mode', 'roll_tight')
             if fb_key is not None:
                 node.dbg('cone/hit_s', fb_key[0])
             v = cfg['tight_speed']
+            if cfg.get('slow_margin', 0.0) > 0.0:
+                v = min(v, cfg['slow_speed'])
             if self.warned_at is None or now - self.warned_at > 1.0:
                 node.get_logger().warn('[CONE] 안 닿는 길을 못 찾음 - 여유가 가장 큰 쪽으로 천천히 (여유 %.3fm)'
                                        % margin)
@@ -590,6 +694,7 @@ class AvoidCone(SafeState):
         hit_s = None          # (11/19) 처음 닿는 거리 [m]
         pre = 9.0             # 처음 닿기 전까지 가장 작은 여유
         nstep = max(1, int(round(cfg['horizon'] / ds)))
+        lag_m = cfg.get('act_delay', 0.0) * cfg['speed']
         for k in range(nstep):
             sp, _ = self._project(path, x, y)
             tx, ty = self._point_at(path, sp + la)
@@ -597,8 +702,10 @@ class AvoidCone(SafeState):
             lx = c * (tx - x) + s * (ty - y)
             ly = -s * (tx - x) + c * (ty - y)
             target = clamp(math.atan(wb * pure_pursuit_curvature(lx, ly)), -ms, ms)
-            if first is None:
-                first = target
+            if (k + 1) * ds <= lag_m:
+                target = self.last_steer      # (11/19) 명령이 바퀴에 닿기 전(act_delay x speed)엔 지난 조향 그대로 감
+            elif first is None:
+                first = target                # 지연 뒤 도착할 자리에서 계산한 조향을 지금 명령으로 (지연 없으면 지금 자리)
             if per_m > 0.0:
                 d = per_m * ds
                 steer += clamp(target - steer, -d, d)
